@@ -1,0 +1,36 @@
+# Binaries and test output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Dependency vendoring (uncomment if this repository does not commit vendor/)
+# vendor/
+
+# Build and temporary directories
+bin/
+dist/
+tmp/
+*.log
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
