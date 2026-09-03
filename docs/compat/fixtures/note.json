@@ -1,0 +1,22 @@
+{
+  "id": "note-example-0001",
+  "createdAt": "2026-01-02T00:00:00.000Z",
+  "text": "synthetic fixture text",
+  "cw": null,
+  "user": {
+    "id": "user-example-0001",
+    "username": "owner",
+    "host": null
+  },
+  "userId": "user-example-0001",
+  "visibility": "public",
+  "localOnly": false,
+  "renoteCount": 0,
+  "repliesCount": 0,
+  "reactions": {},
+  "emojis": {},
+  "fileIds": [],
+  "files": [],
+  "visibleUserIds": [],
+  "mentions": []
+}
