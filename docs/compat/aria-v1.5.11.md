@@ -14,9 +14,11 @@
 The contract distinguishes two origins. `LOCAL_ORIGIN` is the configured,
 public origin of this Misskey-compatible service and is the origin Aria calls.
 `IDENTITY_ORIGIN` is the fixed upstream Misskey origin used for owner
-verification and provider requests. Neither value is supplied by an Aria
-request, and neither may contain a path. The two origins may be different and
-must not be substituted for one another.
+verification and upstream Misskey provider requests. Neither value is
+supplied by an Aria request, and neither may contain a path. The two origins
+may be different and must not be substituted for one another. An external
+provider such as Open WebUI has a separate workspace-scoped origin policy and
+is outside this Aria compatibility contract.
 
 The release page identifies the v1.5.11 tag as `0f957e9`, while the roadmap
 explicitly pins the source inspection snapshot to `a66c930…`. Both values are
@@ -102,8 +104,9 @@ exact status and code remain an implementation contract-test decision.
 ### Request transport
 
 - Misskey API calls are `POST` with JSON content type.
-- The API base is `LOCAL_ORIGIN` plus `/api/`; upstream requests use
-  `IDENTITY_ORIGIN` only inside the provider boundary.
+- The API base is `LOCAL_ORIGIN` plus `/api/`; upstream Misskey requests use
+  `IDENTITY_ORIGIN` only inside the provider boundary. Other external
+  providers use their own feature-specific origin policy.
 - Authenticated calls carry `i: <local API token>` in the JSON body. Aria does
   not use an `Authorization` header for this client path.
 - Null-valued optional request fields are omitted by the pinned client. A

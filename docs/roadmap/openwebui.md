@@ -49,10 +49,12 @@ behavior.
 PR #19 is the Issue #2 contract-document PR; it is not the parent of this
 feature. This roadmap is scoped under Issue #1. OWUI-C, OWUI-P, OWUI-B, and
 OWUI-R are separate child issue/PR units to create under #1 (or under a new
-Open WebUI umbrella issue if the tracker requires one). Each PR must handle
-one child only, link the umbrella requirement, and close its child issue; no
-child PR closes #1. The outbound revision supersedes the former
-import-oriented OWUI-S label.
+Open WebUI umbrella issue if the tracker requires one). Each implementation
+PR must handle exactly one child, link the applicable parent requirement, use
+`Closes #<child>` for that child only, and never close #1 or #2 as a side
+effect. The current Issue #2 contract-document PR is not one of those OWUI
+children. The outbound revision supersedes the former import-oriented OWUI-S
+label.
 
 The existing #7 Misskey wire layer remains the transport consumer for any
 Aria-visible projection and keeps its original #2/#5/#6 dependency order.
@@ -211,8 +213,9 @@ Acceptance criteria:
   nullable/opaque and never use them for local identity, ordering, or
   authorization.
 - [ ] Add conversation-link state-transition tests proving only `ready` can
-  continue and `creation_pending`/`ambiguous`/`failed`/`dead` cannot create,
-  continue, or auto-retry.
+  continue; only the owning `creation_pending` claim can issue its single
+  initial `StartChat`, and `creation_pending`/`ambiguous`/`failed`/`dead`
+  cannot issue another create, continue, or auto-retry.
 - [ ] Add migration, serialization, unknown/null field, local reply-tree, and
   local stable-cursor contract tests.
 
@@ -230,8 +233,10 @@ the former import-oriented OWUI-S track.
 - An `OpenWebUIConversationLink` stores the local `thread_id`, a stable local
   `branch_id`, `workspace_id`, `default_model_id`, optional opaque
   `remote_chat_id`, state, optional `remote_current_id`, and timestamps. A
-  remote chat maps to exactly one local thread; a thread can have multiple
-  links, but a local branch has at most one. A remote chat never becomes the
+  remote chat maps to exactly one local thread within its workspace; a thread
+  can have multiple links, but a local branch has at most one. Persistence
+  enforces unique `(thread_id, branch_id)` and, for non-null IDs, unique
+  `(workspace_id, remote_chat_id)` mappings. A remote chat never becomes the
   branch or thread identity.
 - An `OpenWebUITurnLink` stores `local_message_id`, `local_parent_id`,
   `branch_id`, optional `remote_chat_id`, optional `remote_message_id`,
@@ -241,26 +246,38 @@ the former import-oriented OWUI-S track.
 The conversation-link state machine is explicit:
 
 ```text
-unlinked -> creation_pending -> ready
-                         \-> ambiguous
-                         \-> failed
-                         \-> dead
+unlinked --claim--> creation_pending --confirmed--> ready
+                         |                         |
+                         |                         +--uncertain continuation--> ambiguous
+                         +--definitive failure--> failed
+                         +--uncertain/lost response or lease expiry--> ambiguous
+
+ambiguous --owner confirms the same chat--> ready
+ambiguous --owner abandons branch-------> dead
 ```
 
-`creation_pending` represents the one claimed first-create operation; it is
-not a retryable state. Only `ready`, with confirmed chat persistence and a
-stable `remote_chat_id`, may receive `ContinueTurn`. A
-`creation_pending`/`ambiguous`/`failed`/`dead` link is frozen: it is not a
-target for new remote-chat creation, another `StartChat`, a `ContinueTurn`, or
-automatic retry. A lost or uncertain creation response transitions to
-`ambiguous`, and the state
-remains there until explicit owner/operator recovery verifies the provider
-outcome. Recovery may mark a confirmed chat `ready` or deliberately abandon
-the branch and start a separately audited local branch; it must never silently
-create a second remote chat. A definitive creation failure is `failed`; a
-terminal operator decision or exhausted, non-replayable operation is `dead`.
-These states are independent of a definitive turn `failed` result after a
-`ready` link; a known-good ready link may continue only when the individual
+`unlinked` means that no outbound branch link has been claimed. The atomic
+claim in step 3 creates `creation_pending` and assigns exactly one initial
+`StartChat` operation to its durable job. That owning job may make that one
+provider call while the link is pending; `creation_pending` is not a
+retryable or re-claimable state. Only `ready`, with confirmed chat persistence
+and a stable `remote_chat_id`, may receive `ContinueTurn`. A
+`creation_pending` link permits only its already-claimed initial call; it and
+`ambiguous`/`failed`/`dead` are not targets for another remote-chat creation,
+another `StartChat`, a `ContinueTurn`, or automatic retry. Thus step 4's
+initial `StartChat` is the claimed operation, not a second create from a
+pending link.
+
+A lost or uncertain creation response, including an expired lease before a
+definitive result, transitions to `ambiguous`; restart recovery must freeze
+the link rather than issue another `StartChat`. The state remains there until
+explicit owner/operator recovery verifies the provider outcome. Recovery may
+mark the same confirmed chat `ready` or deliberately abandon the branch and
+start a separately audited local branch; it must never silently create a
+second remote chat. A definitive creation failure is `failed`; a terminal
+operator decision or exhausted, non-replayable operation is `dead`. These
+states are independent of a definitive turn `failed` result after a `ready`
+link: a known-good ready link may continue only when the individual
 continuation is safe to retry. An uncertain continuation response transitions
 the link to `ambiguous` and freezes it until recovery; a definitive failure
 whose remote outcome is known may leave the link `ready` while marking only
@@ -292,6 +309,10 @@ body. Model, usage, provider timestamp, finish reason, request ID, remote IDs,
 and status are provenance metadata. Untrusted provider content is escaped for
 rendering and never executed as instructions.
 
+Each assistant child is inserted with local `reply_to_id` set to the triggering
+owner message ID. A remote `parentId` or `currentId` can enrich correlation
+metadata only; it never changes that local edge.
+
 ### Remote ID correlation
 
 - `message.id`, when returned, is stored as `remote_message_id`; if absent,
@@ -310,15 +331,28 @@ The provider message sequence contains only normalized messages selected from
 the local path. Historical context is eligible only when an owner-authored
 post has terminal local status `completed` and is not tombstoned, or a local
 `llm_reply` has terminal status `completed`, `done=true`, and is not
-tombstoned. `failed`, `incomplete`, `streaming`, `pending`, `ambiguous`,
-`cancelled`, dead/retry-exhausted, and deleted/tombstoned messages are never
-sent. The newly accepted owner message is passed separately as `new_turn` (and
-is appended to the initial sequence for `StartChat`); it is the only current,
-non-historical message allowed in the request. If any required path node is
-ineligible, the job fails closed without silently skipping it or treating it as
-a root. The sequence carries no local IDs,
+tombstoned. For an owner-authored post, `completed` means that the local post
+was durably accepted and validated; it is independent of the Open WebUI turn
+or job status, so a provider outage or pending generation does not make the
+owner's saved post disappear from eligible local history. `failed`,
+`incomplete`, `streaming`, `pending`, `ambiguous`, `cancelled`,
+dead/retry-exhausted, and deleted/tombstoned messages are never sent when
+those statuses apply to the message itself. The newly accepted owner message
+is passed separately as `new_turn` (and is appended to the initial sequence
+for `StartChat`); it is the only current, non-historical message allowed in
+the request. If any required path node is ineligible, the job fails closed
+without silently skipping it or treating it as a root. The sequence carries
+no local IDs,
 Misskey metadata, credentials, system prompt, tool call, or provider debug
 field; those remain local provenance or are excluded.
+
+For `StartChat`, the request sequence is the eligible root-to-parent history
+followed by `new_turn`. For `ContinueTurn`, the linked persistent chat is
+addressed by its opaque remote IDs and `new_turn` is the current turn;
+`message_sequence` is the already-validated local context supplied to the
+provider port only as allowed by the pinned target contract. It must never be
+filled by reading remote history, and the adapter must not blindly resend
+already-persisted turns when the target contract does not require that form.
 
 Whether the target API creates and saves a persistent chat on the first
 request, lets the adapter continue it, accepts an initial message sequence and
@@ -340,10 +374,12 @@ The send/receive order is:
    branch, cycle, orphan, and eligible-message rules.
 3. Commit the local message, a `creation_pending` link for a new branch when
    needed, and the durable turn-job intent atomically.
-4. Under a thread-level lease/single-flight, issue the one `StartChat` for an
-   unlinked branch, or resolve the linked branch for continuation. A linked
-   branch is eligible for this step only when its state is `ready`; every
-   other link state fails closed without a provider call.
+4. Under a thread-level lease/single-flight, execute the one already-claimed
+   `StartChat` for a `creation_pending` branch, or resolve the linked branch
+   for continuation. A continuation is eligible for this step only when its
+   link is `ready`; every other link state fails closed without a provider
+   call. No worker may issue an initial create unless it owns the corresponding
+   `creation_pending` claim.
 5. Send the initial sequence through `StartChat`, or the new owner turn through
    `ContinueTurn`, using the configured default model and turn idempotency key.
 6. Receive a buffered final response or ordered stream events.
@@ -444,9 +480,10 @@ Acceptance criteria:
   mixed into the linear chat.
 - [ ] Provider outage still saves the Aria post; duplicate delivery creates no
   second assistant entry or remote chat.
-- [ ] Initial remote chat creation response loss becomes `ambiguous/dead` and
-  never silently creates a duplicate chat; no new creation, continuation, or
-  automatic retry occurs until owner/operator recovery.
+- [ ] Initial remote chat creation response loss becomes `ambiguous` (and may
+  become `dead` only through explicit recovery) and never silently creates a
+  duplicate chat; no new creation, continuation, or automatic retry occurs
+  until owner/operator recovery.
 - [ ] Target-instance evidence covers persistent chat creation/continuation,
   default-model permission, completion finish, and any enabled stream finish.
 - [ ] Raw provider credentials, session capabilities, cookies, prompts, and
@@ -698,7 +735,7 @@ pull-sync code is deliberately not a deferred TODO; it is outside this track.
 
 | Existing requirement | Outbound feature impact | Owner / dependency |
 | --- | --- | --- |
-| #2 local/upstream MiAuth and token separation | Open WebUI credentials never authenticate Aria, bind an owner, or mint a local token | #2 → OWUI-C; unchanged #2 ADR |
+| #2 local/upstream MiAuth and token separation | Open WebUI credentials never authenticate Aria, bind an owner, or mint a local token | #2 → OWUI-C; authentication boundary unchanged |
 | #1 local post survives LLM/provider outage | Save Aria post and `OpenWebUITurnJob` intent atomically before any remote call | #4 + #8 + OWUI-B |
 | #1 thread/reply/restart behavior | Local `reply_to_id` and `thread_id` own the tree; remote IDs are metadata | #6 + OWUI-P + OWUI-B |
 | #1 LLM reply/follow-up remains separate | Default-model VirtualActor writes a separate assistant child; source text is immutable | #9 + OWUI-B, feature off by default |

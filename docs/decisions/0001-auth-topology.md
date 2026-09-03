@@ -28,15 +28,17 @@ The deployment has two distinct canonical origins:
   production). Aria uses it for `/miauth` and `/api/*`; it is also the base for
   the internal server-side callback endpoint.
 - `IDENTITY_ORIGIN` is the fixed upstream Misskey origin used for owner
-  verification and provider requests. It is an HTTPS origin in production.
+  verification and upstream Misskey provider requests. It is an HTTPS origin
+  in production. Any later external-provider adapter, such as Open WebUI,
+  uses its own explicitly allowlisted origin and never reuses this value.
 
 An origin includes scheme, host, and an explicit port when one is configured;
 paths are not accepted as either origin. The server uses only
-`IDENTITY_ORIGIN` for upstream requests and issuer/instance validation, and
-only `LOCAL_ORIGIN` for the local compatibility surface and its internal
-callback endpoint. The two values may differ and are never selected by a
-client. A client return callback is checked against its separate exact-match
-allowlist.
+`IDENTITY_ORIGIN` for upstream Misskey requests and issuer/instance
+validation, and only `LOCAL_ORIGIN` for the local compatibility surface and
+its internal callback endpoint. The two values may differ and are never
+selected by a client. A client return callback is checked against its separate
+exact-match allowlist.
 
 The server MUST NOT accept an arbitrary upstream host or redirect destination
 from a client request. The internal callback is fixed under `LOCAL_ORIGIN`.
@@ -153,10 +155,13 @@ The local owner identity and upstream identity are deliberately different:
 | System actor | Distinct reserved `system_local_user_id` with `actor_type=system` | A presentation actor for ingestion/status entries; never accepted by MiAuth and never a login principal |
 
 The three local actor IDs are distinct opaque strings, and the upstream user
-ID, note IDs, session IDs, and provider IDs are opaque strings as well. A wire
-actor's `host` is `null` for local projections; the upstream host is not copied
-into the local account namespace. Actor type is domain metadata and must not
-be inferred from a username or note text.
+ID, note IDs, session IDs, and provider IDs are opaque strings as well. The
+owner, generic assistant, and system wire projections use `host: null`; a
+provider-specific VirtualActor may use only an explicitly fixed presentation
+host defined by its feature contract, never a copied upstream host. Such a
+VirtualActor is a separate local actor ID and does not imply federation or
+remote discovery. Actor type is domain metadata and must not be inferred from
+a username or note text.
 
 ## Authentication sequence
 
