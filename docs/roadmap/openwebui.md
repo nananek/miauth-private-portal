@@ -2,7 +2,7 @@
 
 - Status: Planned, opt-in P1 extension; not required for the Issue #1 MVP
 - Source plan: document board key `openwebui-roadmap-plan`
-- Scope: single-owner `miauth-private-server` and one allowlisted Open WebUI workspace
+- Scope: single-owner `miauth-private-portal` service and one allowlisted Open WebUI workspace
 
 ## Goal
 
@@ -55,10 +55,11 @@ depend on its HTTP API, JWT format, or database model. The boundary is:
 
 - **Domain/use-case:** `WorkspaceDefinition`, `ModelDefinition`,
   `VirtualActor`, `ExternalChatLink`, `ExternalMessageLink`, `SyncCursor`,
-  and `OpenWebUIJob`.
+  and `OpenWebUIJob`. The MVP has one enabled workspace and one configured
+  default model; model selection is never a client-supplied capability.
 - **Provider port:** `ListChats(updated_after/cursor)`,
   `GetChat(external_chat_id)`, and
-  `Complete(model_id, messages, correlation metadata)`. `CreateChat` and
+  `Complete(model_id, messages, correlation/idempotency metadata)`. `CreateChat` and
   `AppendMessage` are allowed only after a pinned target contract proves they
   are needed.
 - **Adapter:** absorbs Open WebUI endpoint/version differences and Bearer API
@@ -69,8 +70,10 @@ depend on its HTTP API, JWT format, or database model. The boundary is:
 
 The adapter must use a pinned Open WebUI API/version and a fixed HTTPS origin
 allowlist. It must not discover or connect to an arbitrary URL supplied by a
-user. This feature's “virtual federation” means local presentation of an
-external model actor only; it does not add Misskey or ActivityPub federation.
+user, and it must revalidate every redirect hop (or disable redirects) against
+that allowlist and the resolved-IP SSRF policy. This feature's “virtual
+federation” means local presentation of an external model actor only; it does
+not add Misskey or ActivityPub federation.
 No Open WebUI source is copied into this repository; the contract is captured
 with redacted fixtures and a narrow adapter.
 
@@ -177,8 +180,9 @@ Placement: after #8 and #6/OWUI-P, in parallel with #9/#10.
 Branches are retained when #6 can represent parent relations. Aria displays
 the `currentId` active branch by default; other branches remain children or
 related entries. If the existing domain cannot retain all branches, the MVP
-must explicitly limit itself to the active branch before implementation and
-must not silently discard the others.
+must explicitly select active-branch-only mode before implementation and
+must not silently discard the others; that mode and its loss of inactive
+branches must be recorded in OWUI-C and the release gate.
 
 Role mapping:
 
@@ -194,6 +198,19 @@ External assistant edits create a revision/tombstone rather than destroying a
 local entry. External deletes become `deleted`/`hidden` provenance. Equality is
 based on external IDs/links, never body text.
 
+Absence from a partial, filtered, or permission-limited response is not
+treated as deletion. A tombstone requires an explicit provider deletion signal
+or a verified complete snapshot according to the pinned contract.
+
+Imported `user` messages are accepted only when the pinned workspace contract
+maps their external author to the single local owner. Messages from any other
+author are quarantined as restricted provenance or make the sync contract
+fail; they must not become another login-capable or timeline actor. Message
+content, system text, tool metadata, and citations are untrusted data and are
+never executed or treated as instructions. File/source URLs are metadata-only
+in this MVP unless a separately allowlisted, SSRF-safe fetch contract is
+accepted.
+
 ### Completion bridge
 
 An owner post and its `OpenWebUIJob` intent are committed atomically before
@@ -206,11 +223,12 @@ partial/failed assistant entry; streaming is optional.
 Acceptance criteria:
 
 - [ ] Add an `OpenWebUIProvider` port and HTTP adapter with timeout, redirect,
-  response-size, TLS/origin, Bearer/key-header, and redacted-error handling in
-  one boundary.
+  request/message/response-size bounds, TLS/origin, Bearer/key-header, and
+  redacted-error handling in one boundary.
 - [ ] Add `sync_workspace`, `sync_chat`, and `openwebui_completion` durable
   jobs using #8 leases, bounded retry/dead state, restart recovery, and
-  idempotency.
+  idempotency. Cursor advancement must be transactional with the completed
+  page/detail upserts and must stop on any partial or contract-failed page.
 - [ ] Implement chat/message, parent/current branch, provenance,
   revision/tombstone mapping without overwriting user-authored text.
 - [ ] Implement owner action -> post -> job -> completion -> assistant entry
@@ -234,11 +252,17 @@ local owner, mint a local API token, or expand the existing local API scopes.
 Open WebUI calls are made only by the server-side adapter with the
 workspace-scoped credential.
 
+The completion bridge always uses the enabled workspace's configured
+`default_model_id`; no Aria request may select an arbitrary workspace or model.
+The adapter also verifies that the model belongs to that workspace before any
+provider call.
+
 Open WebUI uses a dedicated low-privilege workspace account/key. Only a
 `secret_ref` crosses the domain/config boundary; the raw key is isolated in
 the adapter/secret store and is never written to the database, fixtures, URL,
-error body, logs, traces, or backups. Rotation/revocation and the responsible
-operator are documented before enabling the feature. 401/403 are permanent
+error body, logs, traces, backups, or planning documents. Rotation/revocation
+and the responsible operator are documented before enabling the feature.
+401/403 are permanent
 `auth_failed` states until reauthentication or rotation; they are not blindly
 retried.
 
@@ -252,8 +276,11 @@ Default permissions:
 - arbitrary workspace/model switching and tool/function/MCP execution are
   outside MVP;
 - user-supplied base URL, host, redirect, and callback are never used as-is;
-  adapter validation enforces HTTPS, fixed origin allowlist, redirect limits,
-  timeout, response-size limits, and private-IP/localhost rejection.
+  adapter validation enforces HTTPS, fixed origin allowlist, redirect-hop
+  revalidation (or redirects disabled), timeout, response-size limits, and
+  private-IP/localhost rejection at connection time. A Tailnet address is
+  permitted only as an explicit deployment-provisioned origin in the fixed
+  allowlist; arbitrary private addresses remain rejected.
 
 Tailnet reachability is a deployment prerequisite, not application
 authorization. Network identity cannot replace owner permission checks.
@@ -263,29 +290,42 @@ authorization. Network identity cannot replace owner permission checks.
 Sync runs on #8's SQLite-backed durable jobs:
 
 - workspace pull obtains pinned chat list/detail pages and stores cursor,
-  `updated_at`, and last successful sync;
+  `updated_at`, and last successful sync only after the corresponding page and
+  detail upserts commit;
 - per-chat sync upserts the complete message tree;
 - outbound generation runs after owner post commit under a leased job;
 - imports use `(workspace_id, external_chat_id, external_message_id)`;
-  generation uses a local request/correlation ID to suppress duplicate
-  responses;
-- cursors include a provider timestamp plus an opaque tie-breaker; timestamp
-  alone is not sufficient;
+  generation persists a unique local request/correlation ID before calling the
+  provider and uses an atomic local response upsert to suppress duplicate
+  assistant entries. This does not make a non-idempotent remote completion
+  exactly-once: OWUI-C must verify a provider idempotency key or result lookup;
+  without one, an ambiguous timeout is not blindly retried and the job is
+  marked dead for operator recovery;
+- cursors include a provider-defined timestamp plus an opaque tie-breaker;
+  timestamp alone is not sufficient. Cursor inclusivity/exclusivity and the
+  provider's ordering must be pinned in OWUI-C; a cursor advances only after
+  the complete page/detail transaction succeeds.
 - statuses distinguish `healthy`, `degraded`, `auth_failed`,
   `contract_failed`, and `retry_exhausted`.
 
 Error behavior:
 
 - 401/403: no blind retry; mark `auth_failed` and require owner
-  reauthentication or credential rotation;
-- 408/429/5xx/network timeout: bounded exponential backoff, honoring
-  `Retry-After`, then dead/retry-exhausted at the configured limit;
+  reauthentication, permission correction, or credential rotation;
+- 408/429/5xx/network timeout on idempotent reads: bounded exponential
+  backoff, honoring a valid `Retry-After` only within the configured maximum
+  delay, then dead/retry-exhausted at the configured limit;
+- completion timeouts or other ambiguous non-idempotent outcomes are not
+  automatically replayed unless the pinned provider contract supplies an
+  idempotency key or result lookup;
 - invalid model/request 4xx: permanent failure until configuration changes;
 - malformed/unknown schema: `contract_failed`; retain only redacted payload
   metadata and metrics;
 - streaming disconnect: store incomplete partial content and do not duplicate
   the assistant entry for the same local request;
 - remote edit/delete: revision/tombstone, never local hard delete;
+- missing messages in a partial or filtered response are not inferred to be
+  deleted;
 - restart: expired leases recover jobs; provider failure never removes the
   committed owner post.
 

@@ -26,21 +26,24 @@ The deployment has two distinct canonical origins:
 
 - `LOCAL_ORIGIN` is the configured public origin of this service (HTTPS in
   production). Aria uses it for `/miauth` and `/api/*`; it is also the base for
-  any server-side callback endpoint.
+  the internal server-side callback endpoint.
 - `IDENTITY_ORIGIN` is the fixed upstream Misskey origin used for owner
   verification and provider requests. It is an HTTPS origin in production.
 
 An origin includes scheme, host, and an explicit port when one is configured;
 paths are not accepted as either origin. The server uses only
 `IDENTITY_ORIGIN` for upstream requests and issuer/instance validation, and
-only `LOCAL_ORIGIN` for the local compatibility surface and its callback
-destinations. The two values may differ and are never selected by a client.
+only `LOCAL_ORIGIN` for the local compatibility surface and its internal
+callback endpoint. The two values may differ and are never selected by a
+client. A client return callback is checked against its separate exact-match
+allowlist.
 
 The server MUST NOT accept an arbitrary upstream host or redirect destination
-from a client request. Callback destinations are exact matches against a
-deployment allowlist. The compatibility allowlist may contain Aria's
-`aria://aria/miauth` callback as an explicitly configured non-HTTPS entry;
-all server-side callbacks remain HTTPS in production.
+from a client request. The internal callback is fixed under `LOCAL_ORIGIN`.
+The client return callback is a separate exact-match deployment allowlist; it
+may contain Aria's `aria://aria/miauth` callback as an explicitly configured
+non-HTTPS entry. That client callback is never forwarded to the upstream
+provider, and all server-side callbacks remain HTTPS in production.
 
 ### 2. Bind one owner, with an explicit bootstrap gate
 
@@ -70,7 +73,7 @@ The implementation must use distinct records and types for these values:
 
 | Credential or session | Issuer / consumer | Lifetime and storage rule |
 | --- | --- | --- |
-| Aria-facing local MiAuth session | Local portal; Aria polls the local check endpoint | Aria supplies an opaque route ID; the server binds it to a crypto/rand state, a one-time 10-minute record, callback, `LOCAL_ORIGIN`, requested scopes, and browser/session context |
+| Aria-facing local MiAuth session | Local portal; Aria polls the local check endpoint | Aria supplies an opaque route ID; the server binds it to a crypto/rand state, a one-time 10-minute record, the internal callback under `LOCAL_ORIGIN`, an optional exact-match client return callback, requested scopes, and browser/session context |
 | Upstream owner-verification MiAuth session | Upstream Misskey; local portal checks it | Opaque, one-time, 10-minute TTL; bind to the configured upstream origin and bootstrap gate when used |
 | Local API token | Local portal; Aria sends it as `i` | Return only after successful local check; persist only a one-way hash, support revocation and rotation, never log the raw token |
 | Upstream Misskey token | Upstream Misskey; local provider adapter | Never return to Aria; if persistence is required, encrypt at rest with the deployment key, minimize retention, revoke and destroy on unbind or rotation |
@@ -98,6 +101,11 @@ service implements every requested endpoint. The local token receives only
 the effective scopes approved by the service. Implemented endpoints enforce
 their exact required scope; unsupported endpoints return a stable explicit
 error and never fabricated success.
+
+The broad Aria permission list is never passed through to the upstream
+identity provider. Owner verification and provider access use a separate,
+minimal server-side scope allowlist appropriate to the adapter; the local
+compatibility scopes and upstream scopes are not interchangeable.
 
 The Aria request contains permissions outside the MVP (for example drive,
 pages, gallery, and chat permissions). Issue #5 must preserve login
@@ -169,9 +177,10 @@ sequenceDiagram
     L->>U: Redirect to fixed IDENTITY_ORIGIN MiAuth with state and fixed callback
     O->>U: Authenticate and approve as the owner
     U-->>L: Redirect to fixed LOCAL_ORIGIN callback with state/result
-    L->>L: Validate issuer/callback allowlist, constant-time state, TTL, replay
+    L->>L: Validate issuer/internal callback, constant-time state, TTL, replay
     L->>L: Verify (IDENTITY_ORIGIN, user ID) matches ALLOWED/bound owner
     L->>B: Mark authorized for the bound local owner
+    L-->>A: Redirect to the separately allowlisted Aria callback with route-session
     A->>L: POST /api/miauth/{route-session}/check (no i)
     L->>B: Atomic check-and-consume
     L-->>A: {ok:true, token: local-token, user: local owner projection}
@@ -182,13 +191,19 @@ sequenceDiagram
 ```
 
 Opening `GET /miauth/{route-session}` only creates the pending local record
-and starts the redirect; it cannot transition the record to `authorized`. The
-upstream step must require explicit authentication/consent by the owner at
-the fixed `IDENTITY_ORIGIN` (an already-present local browser cookie alone is
-not approval). A third party who can cause the GET, or who possesses the route
-ID and calls `check`, can only observe/poll that attempt and cannot approve it
-or mint a local token. Only the validated, one-time callback above (or the
-explicit operator approval in the bootstrap flow) can authorize the record.
+and starts the redirect; it cannot transition the record to `authorized`. A
+repeat GET must not replace the state, extend the TTL, or create a second
+upstream attempt; it either resumes the same compatible pending attempt or
+rejects an incompatible request without mutating the pending attempt. The
+upstream step must require explicit
+authentication/consent by the owner at the fixed `IDENTITY_ORIGIN` (an
+already-present local browser cookie alone is not approval). A third party who
+can cause the GET, or who possesses the route ID and calls `check`, can only
+observe/poll that attempt and cannot approve it or mint a local token. Only the
+validated, one-time callback above (or the explicit operator approval in the
+bootstrap flow) can authorize the record. If Aria supplied a client callback,
+the local service uses the exact stored value only for the final return to
+Aria; it is not an upstream redirect target.
 
 The unbound bootstrap flow is a separate operator-controlled sequence:
 

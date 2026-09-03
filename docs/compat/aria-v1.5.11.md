@@ -67,16 +67,16 @@ redacted.
 
 | Endpoint | Classification | Why it is called | Authentication / scope boundary |
 | --- | --- | --- | --- |
-| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The local session is bound to `LOCAL_ORIGIN`, its callback, and requested permissions; any owner verification uses `IDENTITY_ORIGIN` |
+| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The local session is bound to the internal callback under `LOCAL_ORIGIN`, an optional exact-match client return callback, and requested permissions; any owner verification uses `IDENTITY_ORIGIN` |
 | `POST /api/miauth/{session}/check` | **必要** | Completes the MiAuth flow | `{session}` is a bearer capability/correlation secret for this auth attempt; no `i` body field. It is not owner-binding or token-minting authentication |
 | `POST /api/meta` | **必要** | Detects `features.miauth` and optionally canonicalizes the instance URI | Anonymous; no `i` body field |
 | `POST /api/i` | **必要** | Access-token login fallback and authenticated account bootstrap | `i` token; local `read:account` equivalent |
 | `POST /api/endpoints` | **要実機確認** | Aria probes endpoint availability before its edit path | The observed provider sends no token; exact anonymous behavior and response compatibility must be verified |
 | `POST /api/notes/timeline` | **必要** | Home timeline initial load, reload, and older-page pagination | `i` token; local `read:notes` equivalent |
 | `POST /api/notes/create` | **必要** | New note and reply creation | `i` token; local `write:notes` equivalent |
-| `POST /api/notes/show` | **必要** | Note reload and opening a note not already cached | `i` token when the account is authenticated; local `read:notes` equivalent |
-| `POST /api/notes/conversation` | **必要** | Loads the ancestor chain for a thread | `i` token when the account is authenticated; local `read:notes` equivalent |
-| `POST /api/notes/children` | **必要** | Loads direct replies / quote-renotes for a thread | `i` token when the account is authenticated; local `read:notes` equivalent |
+| `POST /api/notes/show` | **必要** | Note reload and opening a note not already cached | `i` token required; local `read:notes` equivalent |
+| `POST /api/notes/conversation` | **必要** | Loads the ancestor chain for a thread | `i` token required; local `read:notes` equivalent |
+| `POST /api/notes/children` | **必要** | Loads direct replies / quote-renotes for a thread | `i` token required; local `read:notes` equivalent |
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
 | WebSocket `/streaming` timeline channel | **不要** for MVP | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
 
@@ -90,7 +90,10 @@ For this contract, the exact effective local API scope set is
 from Aria is recorded for compatibility but does not grant any additional
 scope. `meta`, `endpoints`, the MiAuth page, and the MiAuth check use their
 documented browser or anonymous/session capability and do not consume a local
-API token. Any endpoint outside this allowlist returns an explicit,
+API token. `/api/i` and every notes endpoint in the allowlist require a
+locally issued API token; the token-login fallback accepts only such a local
+token and never accepts, exchanges, or persists an upstream Misskey token.
+Any endpoint outside this allowlist returns an explicit,
 consistently classified unsupported-endpoint error at the wire boundary; its
 exact status and code remain an implementation contract-test decision.
 
@@ -148,7 +151,9 @@ Aria first sends an anonymous empty object:
 {}
 ```
 
-The login path reads only these fields:
+The login path reads only these fields. The local service returns its
+configured `LOCAL_ORIGIN` (or omits `uri`); it must never return
+`IDENTITY_ORIGIN` or an arbitrary upstream authority for Aria to save.
 
 | Field | Type | Required for this path | Null / omission behavior |
 | --- | --- | --- | --- |
@@ -170,8 +175,12 @@ Aria generates an opaque UUID-like session ID and constructs:
 ```
 
 On Android it additionally sends `callback=aria://aria/miauth`. Other
-platforms do not add a callback parameter in this source path. The exact
-permission values, in source order, are:
+platforms do not add a callback parameter in this source path. When present,
+the value is a client return destination, not the server's upstream callback:
+the local service validates and stores it, completes owner verification at its
+fixed internal HTTPS callback, and only then redirects to the exact stored
+Aria callback with the original route session. The exact permission values,
+in source order, are:
 
 ```text
 read:account,write:account,read:blocks,write:blocks,
@@ -190,13 +199,17 @@ The line breaks above are presentation only; the query value is one comma
 separated string. The local service records requested permissions but grants
 only its effective implemented scope set. Aria's broad request is not proof
 that blocks, drive, pages, gallery, chat, or any other non-MVP API exists.
+It must not be forwarded unchanged to the upstream identity provider; any
+upstream owner-verification/provider scopes come from a separate minimal
+server-side allowlist.
 
 The response is an interactive HTML/browser flow and is not parsed by Aria.
 The exact page status, cookie attributes, consent behavior, redirect timing,
 and whether the upstream implementation accepts every requested permission
-are **要実機確認**. The local server must use `LOCAL_ORIGIN` and its exact
-callback allowlist; it must reject any client attempt to select an upstream
-origin or an unconfigured callback.
+are **要実機確認**. The local server must use its fixed internal callback
+under `LOCAL_ORIGIN` and its exact client-return callback allowlist; it must
+reject any client attempt to select an upstream origin or an unconfigured
+callback.
 
 The `{session}` route value is the same opaque Aria route session ID in the
 `GET` URL and the `/api/miauth/{session}/check` path. It is a high-entropy
@@ -273,7 +286,9 @@ missing or hidden value without a live compatibility test.
 Aria has two observed uses:
 
 1. The explicit token-login fallback sends `{"i":"<token>"}` and the account
-   store reads `id` (string) and `username` (string) to save the account.
+   store reads `id` (string) and `username` (string) to save the account. For
+   this local service, `<token>` is only a previously issued local API token;
+   an upstream token is not a supported login path.
 2. After login, the timeline loads the current account and decodes the full
    response as `MeDetailed`.
 
@@ -462,7 +477,7 @@ access token, real user content, real instance host, or personal identifier.
 | Journey | Aria request cursor | Client behavior | Local contract decision |
 | --- | --- | --- | --- |
 | Home initial load | No cursor; `limit: 30` | Adds returned notes to cache | Return newest-to-oldest page with deterministic ordering |
-| Home older page | `untilId` = last loaded note ID | Requests again; filters duplicate/older items client-side | Use a stable cursor with an explicit timestamp/opaque-ID tie-breaker; never offset-only |
+| Home older page | `untilId` = last loaded note ID | Requests again; filters duplicate/older items client-side | Resolve the opaque note ID through the stored ordering/cursor; use an explicit timestamp/opaque-ID tie-breaker, never lexical ID order or offset-only pagination |
 | Home around a viewed note | `sinceId` or `untilId` in auxiliary provider | Fills before/after viewed note | Preserve cursor inclusivity/exclusivity in contract tests |
 | Conversation | No cursor in Aria path | Loads one ancestor list | Define ordering and subject inclusion before implementation |
 | Children | Optional `untilId`; `depth: 1` | Loads until an empty page | Define deterministic ordering and hidden-note behavior |
