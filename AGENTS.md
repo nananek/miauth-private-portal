@@ -13,6 +13,7 @@ Do not add a custom web UI, federation, general-purpose Misskey compatibility, u
 - The linked GitHub issue and its acceptance criteria define the current change.
 - docs/decisions contains accepted architectural decisions.
 - docs/compat contains observed Aria/Misskey wire contracts and the pinned client version.
+- docs/roadmap contains planned feature roadmaps, their phase placement, and dependency/acceptance criteria before implementation begins.
 - AGENTS.md contains repository-wide engineering and security rules.
 - If these sources conflict or required behavior is ambiguous, stop implementation and record or request an ADR update; do not silently invent a protocol.
 

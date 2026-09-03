@@ -32,12 +32,12 @@ gate in the existing roadmap:
 - **Phase 0.5, after #2 and before #4:** OWUI-C freezes the Open WebUI API,
   identity, security, and storage contract. It may proceed in parallel with
   #3, but must finish before #4 starts its schema addendum.
-- **Phase 2, after #8 and alongside #9:** OWUI-P adds the local thread/link,
-  turn, branch, and VirtualActor domain projection after #4/#6 are
-  available. Its Aria-facing serialization is consumed when #7 reaches the
-  relevant projection work. OWUI-B then adds the outbound Aria-message →
-  new-chat/continued-turn → local-assistant bridge after #7/#8, in parallel
-  with #9.
+- **Phase 1, after #4 and #6:** OWUI-P adds the local thread/link, turn,
+  branch, and VirtualActor domain projection. Its Aria-facing serialization is
+  consumed when #7 reaches the relevant projection work.
+- **Phase 2, after #7 and #8, alongside #9:** OWUI-B adds the outbound
+  Aria-message → new-chat/continued-turn → local-assistant bridge on top of
+  OWUI-P.
 - **Phase 3 / #13 opt-in gate:** OWUI-R adds the release E2E and operations
   evidence only if this feature is promoted into the same release.
 

@@ -21,9 +21,12 @@ provider such as Open WebUI has a separate workspace-scoped origin policy and
 is outside this Aria compatibility contract.
 
 The release page identifies the v1.5.11 tag as `0f957e9`, while the roadmap
-explicitly pins the source inspection snapshot to `a66c930…`. Both values are
-recorded instead of silently substituting one for the other. Compatibility
-regression tests must state which snapshot they exercise.
+explicitly pins the source inspection snapshot to `a66c930…`, which is 11
+commits and 491 files ahead of the tag. Both values are recorded instead of
+silently substituting one for the other. The pinned `misskey_dart` dependency
+is identical at both commits, so the wire-model surface this contract relies
+on is unaffected by the drift. Compatibility regression tests must state
+which snapshot they exercise.
 
 The following labels are used throughout this document:
 

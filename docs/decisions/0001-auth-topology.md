@@ -134,7 +134,7 @@ upstream MiAuth: created -> authorized -> consumed
                                       \-> expired / denied
 
 bootstrap gate: issued -> consumed
-                         \-> expired / revoked
+                         \-> expired / revoked / failed
 ```
 
 The `check` operation atomically attempts the `authorized -> consumed`
@@ -176,7 +176,7 @@ sequenceDiagram
     participant U as Upstream Misskey
 
     A->>L: POST /api/meta (capability check)
-    A->>L: GET /miauth/{route-session}?permission=...
+    A->>L: GET /miauth/{session}?permission=...
     L->>B: Store route ID, generate state, 10-minute TTL, fixed callback binding
     O->>L: Open local approval flow
     L->>U: Redirect to fixed IDENTITY_ORIGIN MiAuth with state and fixed callback
@@ -185,8 +185,8 @@ sequenceDiagram
     L->>L: Validate issuer/internal callback, constant-time state, TTL, replay
     L->>L: Verify (IDENTITY_ORIGIN, user ID) matches ALLOWED/bound owner
     L->>B: Mark authorized for the bound local owner
-    L-->>A: Redirect to the separately allowlisted Aria callback with route-session
-    A->>L: POST /api/miauth/{route-session}/check (no i)
+    L-->>A: Redirect to the separately allowlisted Aria callback with session
+    A->>L: POST /api/miauth/{session}/check (no i)
     L->>B: Atomic check-and-consume
     L-->>A: {ok:true, token: local-token, user: local owner projection}
     A->>L: POST /api/notes/timeline with i=local-token
