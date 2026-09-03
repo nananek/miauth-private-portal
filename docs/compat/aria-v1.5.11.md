@@ -11,6 +11,13 @@
   `misskey_dart` request/response models; no credentials, personal data, or
   live Misskey account were used.
 
+The contract distinguishes two origins. `LOCAL_ORIGIN` is the configured,
+public origin of this Misskey-compatible service and is the origin Aria calls.
+`IDENTITY_ORIGIN` is the fixed upstream Misskey origin used for owner
+verification and provider requests. Neither value is supplied by an Aria
+request, and neither may contain a path. The two origins may be different and
+must not be substituted for one another.
+
 The release page identifies the v1.5.11 tag as `0f957e9`, while the roadmap
 explicitly pins the source inspection snapshot to `a66c930…`. Both values are
 recorded instead of silently substituting one for the other. Compatibility
@@ -60,7 +67,7 @@ redacted.
 
 | Endpoint | Classification | Why it is called | Authentication / scope boundary |
 | --- | --- | --- | --- |
-| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The server binds the session to the configured identity origin, callback, and requested permissions |
+| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The local session is bound to `LOCAL_ORIGIN`, its callback, and requested permissions; any owner verification uses `IDENTITY_ORIGIN` |
 | `POST /api/miauth/{session}/check` | **必要** | Completes the MiAuth flow | The session is the capability; no `i` body field |
 | `POST /api/meta` | **必要** | Detects `features.miauth` and optionally canonicalizes the instance URI | Anonymous; no `i` body field |
 | `POST /api/i` | **必要** | Access-token login fallback and authenticated account bootstrap | `i` token; local `read:account` equivalent |
@@ -78,12 +85,22 @@ minimal release gate: the call is present in Aria's edit capability probe,
 but create/reply/reload/thread journeys do not depend on it. The local server
 must not claim edit support until the later endpoint decision is made.
 
+For this contract, the exact effective local API scope set is
+`read:account`, `read:notes`, and `write:notes`. The broad `permission` query
+from Aria is recorded for compatibility but does not grant any additional
+scope. `meta`, `endpoints`, the MiAuth page, and the MiAuth check use their
+documented browser or anonymous/session capability and do not consume a local
+API token. Any endpoint outside this allowlist returns an explicit,
+consistently classified unsupported-endpoint error at the wire boundary; its
+exact status and code remain an implementation contract-test decision.
+
 ## Shared request, authentication, and error rules
 
 ### Request transport
 
 - Misskey API calls are `POST` with JSON content type.
-- The API base is the configured instance origin plus `/api/`.
+- The API base is `LOCAL_ORIGIN` plus `/api/`; upstream requests use
+  `IDENTITY_ORIGIN` only inside the provider boundary.
 - Authenticated calls carry `i: <local API token>` in the JSON body. Aria does
   not use an `Authorization` header for this client path.
 - Null-valued optional request fields are omitted by the pinned client. A
@@ -147,7 +164,7 @@ feature map or a legacy shape are **要実機確認**.
 Aria generates an opaque UUID-like session ID and constructs:
 
 ```text
-https://<configured-origin>/miauth/<session>
+<LOCAL_ORIGIN>/miauth/<session>
   ?name=Aria
   &permission=<comma-separated-permission-values>
 ```
@@ -177,8 +194,9 @@ that blocks, drive, pages, gallery, chat, or any other non-MVP API exists.
 The response is an interactive HTML/browser flow and is not parsed by Aria.
 The exact page status, cookie attributes, consent behavior, redirect timing,
 and whether the upstream implementation accepts every requested permission
-are **要実機確認**. The server must reject an origin or callback that is not
-in its configured allowlist.
+are **要実機確認**. The local server must use `LOCAL_ORIGIN` and its exact
+callback allowlist; it must reject any client attempt to select an upstream
+origin or an unconfigured callback.
 
 ### `POST /api/miauth/{session}/check`
 
@@ -202,8 +220,9 @@ The `token` must be a JSON string and `user` must be a JSON object. The
 success user object is decoded directly as `UserDetailedNotMe`; its minimum
 fields are listed below. Any response not matching `ok: true` plus those two
 types returns a pending/failure result to Aria. Aria does not distinguish
-pending from denial in this method, and it does not accept a token from a
-different origin or session.
+pending from denial in this method. The local server must bind the returned
+token to this local session and the configured origins; the response must
+never contain the upstream token.
 
 The `token` in this response is a secret. It is shown in this example only as
 the literal word `REDACTED_…`; real fixtures and logs must never contain it.
