@@ -18,6 +18,9 @@ const (
 	KeyHTTPShutdownGrace     = "HTTP_SHUTDOWN_GRACE_PERIOD"
 	KeyLogLevel              = "LOG_LEVEL"
 	KeyLogFormat             = "LOG_FORMAT"
+	KeyDBPath                = "DB_PATH"
+	KeyDBBusyTimeoutMS       = "DB_BUSY_TIMEOUT_MS"
+	KeyDBMaxOpenConns        = "DB_MAX_OPEN_CONNS"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -34,6 +37,9 @@ var knownKeyOrder = []string{
 	KeyHTTPShutdownGrace,
 	KeyLogLevel,
 	KeyLogFormat,
+	KeyDBPath,
+	KeyDBBusyTimeoutMS,
+	KeyDBMaxOpenConns,
 }
 
 func isKnownKey(key string) bool {

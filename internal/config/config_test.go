@@ -70,6 +70,11 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			ShutdownGracePeriod: 15 * time.Second,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
+		DB: DBConfig{
+			Path:         "./data/portal.db",
+			BusyTimeout:  5 * time.Second,
+			MaxOpenConns: 8,
+		},
 	}
 
 	if *cfg != want {
@@ -173,6 +178,45 @@ func TestLoad_InvalidPortRange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), KeyHTTPPort) {
 		t.Errorf("error %q does not mention %s", err.Error(), KeyHTTPPort)
+	}
+}
+
+func TestLoad_InvalidDBBusyTimeout(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:          "development",
+		KeyDBBusyTimeoutMS: "0",
+	})})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyDBBusyTimeoutMS) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyDBBusyTimeoutMS)
+	}
+}
+
+func TestLoad_InvalidDBMaxOpenConns(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:         "development",
+		KeyDBMaxOpenConns: "0",
+	})})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyDBMaxOpenConns) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyDBMaxOpenConns)
+	}
+}
+
+func TestLoad_DBPathOverride(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv: "development",
+		KeyDBPath: "/data/custom.db",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DB.Path != "/data/custom.db" {
+		t.Errorf("DB.Path = %q, want /data/custom.db", cfg.DB.Path)
 	}
 }
 
@@ -338,6 +382,11 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			ShutdownGracePeriod: 15 * time.Second,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
+		DB: DBConfig{
+			Path:         "./data/portal.db",
+			BusyTimeout:  5 * time.Second,
+			MaxOpenConns: 8,
+		},
 	}
 
 	if err := cfg.Validate(); err != nil {

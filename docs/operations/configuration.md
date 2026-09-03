@@ -1,9 +1,9 @@
 # Configuration
 
 This document covers the configuration and HTTP-routing foundation added by
-Issue #3. It does not cover MiAuth, SQLite, the post API, or LLM
-configuration; those are added by later issues and will extend this
-document rather than replace it.
+Issue #3, and the SQLite persistence layer added by Issue #4. It does not
+cover MiAuth, the post API, or LLM configuration; those are added by later
+issues and will extend this document rather than replace it.
 
 ## Loading order
 
@@ -54,6 +54,9 @@ catch that class of mistake during local development.
 | `HTTP_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Bounds how long graceful shutdown waits before forcing connections closed. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, `error`. Must not be `debug` in production. |
 | `LOG_FORMAT` | no | `text` | `json` or `text`. Must be `json` in production. |
+| `DB_PATH` | no | `./data/portal.db` | SQLite database file path; its parent directory is created if missing. Must not be empty. |
+| `DB_BUSY_TIMEOUT_MS` | no | `5000` | Positive integer milliseconds passed to SQLite's `busy_timeout` pragma. |
+| `DB_MAX_OPEN_CONNS` | no | `8` | 1-100. Bounds the SQLite connection pool. |
 
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
@@ -105,6 +108,49 @@ decision in a new ADR at that time. `docs/decisions/0002-*` is already
 reserved by the Open WebUI roadmap's OWUI-C track, so this decision is
 intentionally not filed as an ADR here.
 
+## SQLite
+
+`internal/storage/sqlite.Open` is the only place in this service that opens
+the database. It applies three PRAGMAs through the connection DSN (as
+`_foreign_keys`, `_busy_timeout`, and `_journal_mode` query parameters)
+rather than as a one-time `PRAGMA` statement run once after `Open` returns:
+`database/sql` can open more than one physical connection over the
+program's lifetime (concurrent HTTP handlers, and eventually Issue #8's
+worker), and a PRAGMA executed only against the first connection would
+never reach any connection opened later. Embedding them in the DSN makes
+the driver re-apply them to every connection it opens.
+
+- `foreign_keys` is always on. This is a correctness requirement, not an
+  operator-configurable setting.
+- `journal_mode` is always `WAL`. This is also fixed rather than
+  configurable: WAL is what allows concurrent readers alongside a single
+  writer, which this service depends on once more than one goroutine
+  touches the database.
+- `busy_timeout` is the one operator-configurable PRAGMA
+  (`DB_BUSY_TIMEOUT_MS`); it bounds how long SQLite retries internally on
+  `SQLITE_BUSY` before returning an error to the caller.
+
+At startup, `cmd/server` logs `"sqlite pragmas applied"` with the resolved
+`foreign_keys`, `journal_mode`, and `busy_timeout` values.
+
+### Migrations
+
+Migrations live in `internal/storage/sqlite/migrations/*.sql`, embedded at
+build time with `embed.FS`, and are applied forward-only in ascending
+numeric-prefix order (`0001_actors.sql`, `0002_owner_binding.sql`, ...) by
+`internal/storage/sqlite.DB.Migrate`, which `cmd/server` calls once at
+startup, after `Open` and before serving traffic. Each migration runs in
+its own transaction, so a failing statement rolls back cleanly instead of
+partially applying.
+
+**An applied migration file must never be edited.** This is enforced
+mechanically, not just by convention: `Migrate` records a SHA-256
+checksum of each migration's contents in the `schema_migrations` table
+when it is first applied, and on every later startup it recomputes that
+checksum from the embedded file and fails startup immediately if it no
+longer matches. Add a new, higher-numbered migration file instead of
+changing one that has already shipped.
+
 ## Health and readiness
 
 - `GET /healthz` (liveness) always returns `200`. It reports only that the
@@ -118,9 +164,13 @@ intentionally not filed as an ADR here.
   the graceful drain, so a load balancer can stop sending new traffic
   before in-flight requests finish.
 
-Issue #3 registers no `Checker`s (there is no dependency to check yet).
-Issue #4 registers a SQLite `Checker` with `Registry.Register`; no change
-to `internal/health` or `internal/httpserver` is required to do so.
+Issue #3 registered no `Checker`s (there was no dependency to check yet).
+Issue #4 registers `internal/storage/sqlite.DB.Checker()` with
+`Registry.Register` in `cmd/server`; `internal/health` and
+`internal/httpserver` did not need to change. The checker runs `SELECT 1`,
+a real round trip through the query engine, rather than `PRAGMA
+integrity_check`: that check is a full-database scan, too expensive to run
+on every `/readyz` poll.
 
 ## Graceful shutdown
 

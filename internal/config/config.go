@@ -31,6 +31,7 @@ type Config struct {
 	Env  Environment
 	HTTP HTTPConfig
 	Log  LogConfig
+	DB   DBConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -55,6 +56,14 @@ func (h HTTPConfig) Addr() string {
 type LogConfig struct {
 	Level  string
 	Format string
+}
+
+// DBConfig bounds the SQLite database file path, busy timeout, and
+// connection pool size (internal/storage/sqlite.Open).
+type DBConfig struct {
+	Path         string
+	BusyTimeout  time.Duration
+	MaxOpenConns int
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -205,6 +214,11 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Log.Level = parseOptionalEnum(values, KeyLogLevel, "info", []string{"debug", "info", "warn", "error"}, &errs)
 	cfg.Log.Format = parseOptionalEnum(values, KeyLogFormat, "text", []string{"json", "text"}, &errs)
 
+	cfg.DB.Path = parseOptionalString(values, KeyDBPath, "./data/portal.db")
+	busyTimeoutMS := parseOptionalInt(values, KeyDBBusyTimeoutMS, 5000, 1, 600_000, &errs)
+	cfg.DB.BusyTimeout = time.Duration(busyTimeoutMS) * time.Millisecond
+	cfg.DB.MaxOpenConns = parseOptionalInt(values, KeyDBMaxOpenConns, 8, 1, 100, &errs)
+
 	return cfg, errs
 }
 
@@ -229,6 +243,14 @@ func (c Config) Validate() error {
 	validatePositiveDuration(&errs, KeyHTTPIdleTimeout, c.HTTP.IdleTimeout)
 	validateInt64Min(&errs, KeyHTTPMaxBodyBytes, c.HTTP.MaxRequestBodyBytes, 1)
 	validatePositiveDuration(&errs, KeyHTTPShutdownGrace, c.HTTP.ShutdownGracePeriod)
+
+	if c.DB.Path == "" {
+		errs = append(errs, FieldError{Key: KeyDBPath, Reason: "must not be empty"})
+	}
+	if c.DB.BusyTimeout <= 0 {
+		errs = append(errs, FieldError{Key: KeyDBBusyTimeoutMS, Reason: "must be a positive integer (milliseconds)"})
+	}
+	validateIntBounds(&errs, KeyDBMaxOpenConns, c.DB.MaxOpenConns, 1, 100)
 
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
@@ -262,6 +284,9 @@ func (c Config) Redacted() map[string]string {
 		KeyHTTPShutdownGrace:     c.HTTP.ShutdownGracePeriod.String(),
 		KeyLogLevel:              c.Log.Level,
 		KeyLogFormat:             c.Log.Format,
+		KeyDBPath:                c.DB.Path,
+		KeyDBBusyTimeoutMS:       strconv.FormatInt(c.DB.BusyTimeout.Milliseconds(), 10),
+		KeyDBMaxOpenConns:        strconv.Itoa(c.DB.MaxOpenConns),
 	}
 }
 
