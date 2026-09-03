@@ -1,0 +1,15 @@
+{
+  "id": "user-example-0001",
+  "name": null,
+  "username": "owner",
+  "host": null,
+  "isBot": false,
+  "isCat": false,
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "isLocked": false,
+  "isSilenced": false,
+  "isSuspended": false,
+  "followersCount": 0,
+  "followingCount": 0,
+  "notesCount": 0
+}
