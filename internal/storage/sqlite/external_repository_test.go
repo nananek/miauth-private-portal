@@ -86,6 +86,32 @@ func TestExternalItemRepository_CreateGetByDedupeKeyAndPromote(t *testing.T) {
 	}
 }
 
+func TestExternalItemRepository_Promote_RejectsSecondAttempt(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	source := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+	now := time.Now()
+
+	item := domain.ExternalItem{
+		ID: domain.NewID(), SourceID: source.ID, ExternalID: "guid-1", FetchedAt: now, DedupeKey: "dedupe-1",
+		CreatedAt: now,
+	}
+	if err := db.ExternalItems.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+
+	first := mustCreateThreadAndRoot(t, db, actorID, now)
+	if err := db.ExternalItems.Promote(t.Context(), item.ID, first.ID); err != nil {
+		t.Fatalf("first promote: %v", err)
+	}
+
+	second := mustCreateThreadAndRoot(t, db, actorID, now)
+	err := db.ExternalItems.Promote(t.Context(), item.ID, second.ID)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("second Promote() error = %v, want ErrConflict", err)
+	}
+}
+
 func TestExternalItemRepository_Create_RejectsDuplicateDedupeKey(t *testing.T) {
 	db := newTestDB(t)
 	source := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")

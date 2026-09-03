@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 
 	sqlitedriver "modernc.org/sqlite"
 	sqlitelib "modernc.org/sqlite/lib"
@@ -29,7 +30,7 @@ func mapWriteError(err error) error {
 			return domain.ErrConflict
 		}
 	}
-	return err
+	return fmt.Errorf("sqlite write: %w", err)
 }
 
 // mapReadError translates sql.ErrNoRows into domain.ErrNotFound.

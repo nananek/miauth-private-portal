@@ -62,6 +62,24 @@ func applyAll(ctx context.Context, db *sql.DB, files fs.FS, dir string) error {
 		return err
 	}
 
+	// A version recorded as applied must still have a corresponding
+	// embedded migration file: if the file was deleted, this is the only
+	// mechanical check that notices, since the version simply would not
+	// appear in migrations at all and the loop below would otherwise
+	// start up successfully without ever having reapplied or verified it.
+	loadedVersions := make(map[int]bool, len(migrations))
+	for _, m := range migrations {
+		loadedVersions[m.version] = true
+	}
+	for version := range applied {
+		if !loadedVersions[version] {
+			return fmt.Errorf(
+				"schema_migrations records version %d as applied, but no embedded migration file provides that version; an applied migration must never be removed",
+				version,
+			)
+		}
+	}
+
 	for _, m := range migrations {
 		if existing, ok := applied[m.version]; ok {
 			if existing != m.checksum {

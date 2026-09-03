@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -38,6 +39,14 @@ func (r *jobRepository) Get(ctx context.Context, id string) (domain.Job, error) 
 // selection and the UPDATE are one SQL statement (RETURNING reports which
 // rows it touched), so this is safe against a concurrent Claim call
 // without needing its own transaction.
+//
+// SQLite does not guarantee RETURNING reports rows in any particular
+// order, so the subquery's ORDER BY next_run_at, id (kept for
+// readability and to make the candidate selection deterministic) does
+// not by itself guarantee the order jobs come back in here. The actual
+// ordering callers can rely on - next_run_at ascending, ties broken by
+// id ascending so equal-next_run_at jobs cannot starve each other - is
+// enforced below in Go.
 func (r *jobRepository) Claim(ctx context.Context, leaseOwner string, limit int, now, leaseExpiresAt time.Time) ([]domain.Job, error) {
 	rows, err := r.q.QueryContext(ctx,
 		`UPDATE jobs SET state = 'running', lease_owner = ?, lease_expires_at = ?, updated_at = ?
@@ -45,7 +54,7 @@ func (r *jobRepository) Claim(ctx context.Context, leaseOwner string, limit int,
 			SELECT id FROM jobs
 			WHERE (state = 'pending' AND next_run_at <= ?)
 			   OR (state = 'running' AND lease_expires_at <= ?)
-			ORDER BY next_run_at
+			ORDER BY next_run_at, id
 			LIMIT ?
 		 )
 		 RETURNING id, job_type, payload, payload_version, state, attempt, idempotency_key, next_run_at,
@@ -65,7 +74,17 @@ func (r *jobRepository) Claim(ctx context.Context, leaseOwner string, limit int,
 		}
 		jobs = append(jobs, j)
 	}
-	return jobs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if !jobs[i].NextRunAt.Equal(jobs[j].NextRunAt) {
+			return jobs[i].NextRunAt.Before(jobs[j].NextRunAt)
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
+	return jobs, nil
 }
 
 func (r *jobRepository) Succeed(ctx context.Context, id string, at time.Time) error {

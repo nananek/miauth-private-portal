@@ -52,7 +52,12 @@ type LLMClassificationRepository interface {
 	// active version per entry at a time).
 	Create(ctx context.Context, c LLMClassification) (int64, error)
 	// Activate marks entryID's classification at version as the active
-	// one and deactivates every other version for that entry.
+	// one and deactivates every other version for that entry. Callers
+	// that need this to happen atomically must call it inside
+	// UnitOfWork.WithinTx; called standalone, a failure partway through
+	// can leave entryID with no active version at all. That is still
+	// safe - GetActive then reports ErrNotFound rather than returning a
+	// stale or inconsistent result - but it is not atomic.
 	Activate(ctx context.Context, entryID string, version int) error
 	GetActive(ctx context.Context, entryID string) (LLMClassification, error)
 	ListVersions(ctx context.Context, entryID string) ([]LLMClassification, error)

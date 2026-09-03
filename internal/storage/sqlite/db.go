@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -68,9 +69,17 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		}
 	}
 
+	// cfg.Path is percent-encoded via url.URL.EscapedPath before being
+	// embedded in the DSN: modernc.org/sqlite passes the "file:" DSN
+	// through to SQLite's own URI parser (sqlite3_open_v2 with
+	// SQLITE_OPEN_URI), which treats an unescaped '#' as the start of a
+	// URI fragment (silently truncating the path) and '?' as the start of
+	// the query string. An unescaped path containing either character
+	// would silently open the wrong file.
+	u := url.URL{Path: cfg.Path}
 	dsn := fmt.Sprintf(
 		"file:%s?_foreign_keys=1&_busy_timeout=%d&_journal_mode=WAL&_txlock=immediate",
-		cfg.Path, cfg.BusyTimeout.Milliseconds(),
+		u.EscapedPath(), cfg.BusyTimeout.Milliseconds(),
 	)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {

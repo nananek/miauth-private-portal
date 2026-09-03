@@ -22,6 +22,31 @@ func TestOpen_CreatesParentDirectory(t *testing.T) {
 	}
 }
 
+// TestOpen_EscapesPathsWithURISpecialCharacters backs Open's DSN
+// construction: a path containing '#' or '?' must still be opened
+// literally, not truncated at a URI fragment/query boundary by the
+// SQLite driver's URI parser.
+func TestOpen_EscapesPathsWithURISpecialCharacters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data#1", "portal.db")
+	db, err := Open(t.Context(), Config{Path: path, BusyTimeout: time.Second, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("database file was not created at %s: %v", path, err)
+	}
+
+	var foreignKeys string
+	if err := db.sqlDB.QueryRowContext(t.Context(), "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys pragma: %v", err)
+	}
+	if foreignKeys != "1" {
+		t.Errorf("foreign_keys = %q, want 1", foreignKeys)
+	}
+}
+
 func TestOpen_InvalidPathFailsFast(t *testing.T) {
 	// A path whose parent segment is a plain file, not a directory,
 	// cannot have its parent directory created.

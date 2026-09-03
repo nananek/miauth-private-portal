@@ -79,12 +79,17 @@ func (r *externalItemRepository) GetByDedupeKey(ctx context.Context, dedupeKey s
 	return scanExternalItem(row)
 }
 
+// Promote sets id's entry_id, but only if it is not already promoted: the
+// WHERE clause's entry_id IS NULL check makes a second Promote of the
+// same item report ErrConflict instead of silently overwriting the
+// existing entry_id, symmetric with Create's dedupe-key protection.
 func (r *externalItemRepository) Promote(ctx context.Context, id, entryID string) error {
-	res, err := r.q.ExecContext(ctx, `UPDATE external_items SET entry_id = ? WHERE id = ?`, entryID, id)
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE external_items SET entry_id = ? WHERE id = ? AND entry_id IS NULL`, entryID, id)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
 func scanExternalItem(row rowScanner) (domain.ExternalItem, error) {

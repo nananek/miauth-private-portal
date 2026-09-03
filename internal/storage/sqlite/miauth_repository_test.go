@@ -195,6 +195,38 @@ func TestUpstreamMiAuthSessionRepository_RequiresExactlyOneBinding(t *testing.T)
 	}
 }
 
+// TestUpstreamMiAuthSessionRepository_Create_RejectsDuplicateBootstrapGateID
+// backs the single-use bootstrap gate design: a bootstrap gate must bind
+// to at most one upstream session, so a second upstream session created
+// against the same gate must fail rather than silently sharing it.
+func TestUpstreamMiAuthSessionRepository_Create_RejectsDuplicateBootstrapGateID(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	gate := domain.BootstrapGate{
+		ID: domain.NewID(), Status: domain.BootstrapGateIssued, CreatedAt: now, ExpiresAt: now.Add(15 * time.Minute),
+	}
+	if err := db.BootstrapGates.Create(t.Context(), gate); err != nil {
+		t.Fatal(err)
+	}
+
+	first := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), BootstrapGateID: &gate.ID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.UpstreamMiAuth.Create(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+
+	dup := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), BootstrapGateID: &gate.ID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	err := db.UpstreamMiAuth.Create(t.Context(), dup)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Create() error = %v, want ErrConflict", err)
+	}
+}
+
 func TestAPITokenRepository_CreateGetRevoke(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)

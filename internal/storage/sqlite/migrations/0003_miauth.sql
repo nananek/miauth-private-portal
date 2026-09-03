@@ -24,7 +24,7 @@ CREATE TABLE miauth_local_sessions (
 CREATE TABLE miauth_upstream_sessions (
     id TEXT PRIMARY KEY,
     local_session_id TEXT UNIQUE REFERENCES miauth_local_sessions (route_session_id),
-    bootstrap_gate_id TEXT REFERENCES bootstrap_gates (id),
+    bootstrap_gate_id TEXT UNIQUE REFERENCES bootstrap_gates (id),
     identity_origin TEXT NOT NULL,
     state TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (status IN ('created', 'authorized', 'consumed', 'expired', 'denied')),

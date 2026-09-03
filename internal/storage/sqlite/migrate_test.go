@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	_ "modernc.org/sqlite"
 )
@@ -111,6 +112,41 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	}
 	if count != 8 {
 		t.Errorf("schema_migrations count = %d, want 8", count)
+	}
+}
+
+// TestApplyAll_RejectsAppliedVersionMissingFromEmbeddedFiles backs the
+// reverse direction of the checksum check above: applyAll must also
+// notice when schema_migrations records a version as already applied but
+// the filesystem it is handed no longer has a migration file for that
+// version (for example, one was deleted by mistake after being deployed).
+// Silently starting up in that state would contradict
+// docs/operations/configuration.md's "enforced mechanically" claim.
+func TestApplyAll_RejectsAppliedVersionMissingFromEmbeddedFiles(t *testing.T) {
+	files := fstest.MapFS{
+		"migrations/0001_a.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE a (id INTEGER PRIMARY KEY);`)},
+	}
+	db := openMemoryDB(t)
+
+	if _, err := db.ExecContext(t.Context(), `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		`INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (2, 'deadbeef', '2024-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyAll(t.Context(), db, files, "migrations")
+	if err == nil {
+		t.Fatal("expected an error for an applied version with no corresponding embedded migration file")
+	}
+	if !strings.Contains(err.Error(), "version 2") {
+		t.Errorf("error %q does not name the missing version", err.Error())
 	}
 }
 
