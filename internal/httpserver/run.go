@@ -53,8 +53,23 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger, reg *health.Reg
 	}
 
 	server := NewServer(logger, reg)
-	handler := withRecover(logger, withRequestID(withMaxBody(opts.MaxRequestBodyBytes, server.Handler())))
-	srv := newHTTPServer(ctx, opts, handler, logger)
+	// withRequestID must wrap withRecover (not the other way around):
+	// withRequestID's r.WithContext call produces a new *http.Request, so
+	// if it sat inside withRecover, withRecover's deferred closure would
+	// keep referring to the original, pre-request-ID request and never
+	// see the request ID on panic.
+	handler := withRequestID(withRecover(logger, withMaxBody(opts.MaxRequestBodyBytes, server.Handler())))
+
+	// baseCtx roots every in-flight request's context. It is deliberately
+	// independent of the SIGINT/SIGTERM-derived ctx above: srv.Shutdown
+	// already gives in-flight requests up to opts.ShutdownGracePeriod to
+	// finish on their own, so cancelling every request context the
+	// instant a shutdown signal arrives would defeat that grace period.
+	// It is only cancelled if the grace period is exceeded and we fall
+	// back to a forced close.
+	baseCtx, cancelBaseCtx := context.WithCancel(context.Background())
+	defer cancelBaseCtx()
+	srv := newHTTPServer(baseCtx, opts, handler, logger)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -72,11 +87,13 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger, reg *health.Reg
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+		gracefulShutdown(srv, reg, logger, opts.ShutdownGracePeriod, cancelBaseCtx)
+		return <-serveErr
 	case err := <-serveErr:
+		logger.Error("http server failed", "error", err.Error())
+		gracefulShutdown(srv, reg, logger, opts.ShutdownGracePeriod, cancelBaseCtx)
 		return err
 	}
-
-	return shutdown(srv, reg, logger, opts.ShutdownGracePeriod, serveErr)
 }
 
 // newHTTPServer builds the *http.Server used by Run. It is factored out so
@@ -94,7 +111,10 @@ func newHTTPServer(ctx context.Context, opts Options, handler http.Handler, logg
 	}
 }
 
-func shutdown(srv *http.Server, reg *health.Registry, logger *slog.Logger, grace time.Duration, serveErr <-chan error) error {
+// gracefulShutdown marks reg not-ready and gives in-flight requests up to
+// grace to finish via srv.Shutdown, falling back to a forced srv.Close
+// (and cancelling every request's base context) if they do not.
+func gracefulShutdown(srv *http.Server, reg *health.Registry, logger *slog.Logger, grace time.Duration, cancelBaseCtx context.CancelFunc) {
 	reg.MarkNotReady()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
@@ -102,8 +122,7 @@ func shutdown(srv *http.Server, reg *health.Registry, logger *slog.Logger, grace
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown exceeded grace period, forcing close", "error", err.Error())
+		cancelBaseCtx()
 		_ = srv.Close()
 	}
-
-	return <-serveErr
 }

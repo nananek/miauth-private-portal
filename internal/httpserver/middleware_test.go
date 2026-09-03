@@ -100,6 +100,27 @@ func TestWithRecover_ReturnsInternalServerErrorOnPanic(t *testing.T) {
 	}
 }
 
+func TestWithRequestID_WrapsWithRecover_SoPanicLogIncludesRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.Config{Format: "json", Level: "info"})
+
+	// Mirrors Run's composition order: withRequestID must wrap
+	// withRecover, not the other way around, or withRecover's deferred
+	// closure keeps referring to the pre-request-ID request and the
+	// panic log's request_id is always empty.
+	handler := withRequestID(withRecover(logger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if strings.Contains(buf.String(), `"request_id":""`) {
+		t.Errorf("expected non-empty request_id in panic log, got: %s", buf.String())
+	}
+}
+
 func TestWithRecover_PassesThroughWhenNoPanic(t *testing.T) {
 	var buf bytes.Buffer
 	logger := logging.New(&buf, logging.Config{Format: "json", Level: "info"})

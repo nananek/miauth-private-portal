@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -221,6 +222,64 @@ func TestRun_GracefulShutdownWaitsForInFlightRequest(t *testing.T) {
 	}
 }
 
+type ctxCapturingChecker struct {
+	release  chan struct{}
+	sawErrCh chan error
+}
+
+func (c *ctxCapturingChecker) Name() string { return "ctx-capturing" }
+
+func (c *ctxCapturingChecker) Check(ctx context.Context) error {
+	<-c.release
+	c.sawErrCh <- ctx.Err()
+	return nil
+}
+
+func TestRun_InFlightRequestContextNotCancelledDuringGracePeriod(t *testing.T) {
+	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+	release := make(chan struct{})
+	sawErrCh := make(chan error, 1)
+	reg.Register(&ctxCapturingChecker{release: release, sawErrCh: sawErrCh})
+
+	ln := mustListen(t)
+	addr := ln.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, testOptions(ln), logger, reg) }()
+
+	waitForServing(t, addr)
+
+	go func() {
+		resp, err := http.Get("http://" + addr + "/readyz")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Give the in-flight request time to reach the blocking checker
+	// before triggering shutdown.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	// Release the checker while shutdown is in progress but well within
+	// the grace period, and assert its request context was not already
+	// cancelled merely because the shutdown signal fired.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	select {
+	case err := <-sawErrCh:
+		if err != nil {
+			t.Errorf("in-flight request context.Err() = %v, want nil during the shutdown grace period", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checker never observed release")
+	}
+
+	<-done
+}
+
 func TestRun_ForcedCloseAfterGracePeriodExceeded(t *testing.T) {
 	var buf bytes.Buffer
 	logger := logging.New(&buf, logging.Config{Format: "json", Level: "info"})
@@ -261,5 +320,93 @@ func TestRun_ForcedCloseAfterGracePeriodExceeded(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "forcing close") {
 		t.Errorf("expected a forced-close log line, got: %s", buf.String())
+	}
+}
+
+// erroringListener always fails Accept, simulating srv.Serve returning a
+// non-ErrServerClosed error asynchronously after Run has already started
+// serving.
+type erroringListener struct {
+	addr net.Addr
+}
+
+func (l *erroringListener) Accept() (net.Conn, error) { return nil, errors.New("accept boom") }
+func (l *erroringListener) Close() error              { return nil }
+func (l *erroringListener) Addr() net.Addr            { return l.addr }
+
+func TestRun_ServeErrorStillMarksRegistryNotReady(t *testing.T) {
+	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+
+	realLn := mustListen(t)
+	addr := realLn.Addr()
+	realLn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := Run(ctx, testOptions(&erroringListener{addr: addr}), logger, reg)
+	if err == nil {
+		t.Fatal("expected Run to return the Serve error")
+	}
+
+	// Run's doc comment promises a graceful shutdown always runs before
+	// it returns, even when the failure is the server itself rather than
+	// ctx cancellation; that shutdown includes marking the registry
+	// not-ready.
+	if readyErr := reg.Ready(context.Background()); readyErr == nil {
+		t.Error("expected registry to be marked not-ready after a Serve failure")
+	}
+}
+
+type panickingChecker struct{}
+
+func (panickingChecker) Name() string                  { return "panicking" }
+func (panickingChecker) Check(_ context.Context) error { panic("boom") }
+
+func TestRun_PanicInHandlerIsLoggedWithRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+	reg.Register(panickingChecker{})
+
+	ln := mustListen(t)
+	addr := ln.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, testOptions(ln), logger, reg) }()
+
+	waitForServing(t, addr)
+
+	// This exercises the real middleware composition wired up by Run:
+	// AccessLog -> withRequestID -> withRecover -> the panicking /readyz
+	// handler. Both the access log and the panic-recovery log must carry
+	// a non-empty request_id, and the client must still see a clean 500
+	// rather than a dropped connection.
+	resp, err := http.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "panic recovered") {
+		t.Fatalf("expected a panic recovered log line, got: %s", out)
+	}
+	if !strings.Contains(out, "http_request") {
+		t.Errorf("expected AccessLog's completion line even though the handler panicked, got: %s", out)
+	}
+	if strings.Contains(out, `"request_id":""`) {
+		t.Errorf("expected every request_id in the log to be non-empty, got: %s", out)
 	}
 }

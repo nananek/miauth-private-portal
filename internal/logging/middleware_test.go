@@ -73,6 +73,35 @@ func TestAccessLog_RecordsMethodAndStatus(t *testing.T) {
 	}
 }
 
+func TestAccessLog_LogsCompletionThenRepanicsOnHandlerPanic(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, Config{Format: "json", Level: "info"})
+
+	handler := AccessLog(logger, "/panics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/panics", nil)
+	rec := httptest.NewRecorder()
+
+	func() {
+		defer func() {
+			if p := recover(); p == nil {
+				t.Fatal("expected AccessLog to re-panic after logging the completion line")
+			}
+		}()
+		handler.ServeHTTP(rec, req)
+	}()
+
+	out := buf.String()
+	if !strings.Contains(out, "http_request") {
+		t.Errorf("expected an http_request completion log even when the handler panics, got: %s", out)
+	}
+	if !strings.Contains(out, `"status":500`) {
+		t.Errorf("expected status 500 logged for a panicking handler, got: %s", out)
+	}
+}
+
 func TestAccessLog_DefaultsStatusToOKWhenNotExplicitlyWritten(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(&buf, Config{Format: "json", Level: "info"})
