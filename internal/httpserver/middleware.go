@@ -22,6 +22,9 @@ func withRequestID(next http.Handler) http.Handler {
 
 func newRequestID() string {
 	buf := make([]byte, 16)
+	// crypto/rand.Read never returns an error on Go 1.24+: it crashes the
+	// process irrecoverably instead of returning one (go.dev/issue/66821),
+	// so there is no error path here to check or recover from.
 	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)
 }

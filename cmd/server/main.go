@@ -28,6 +28,7 @@ func run() error {
 
 	logger := logging.New(os.Stdout, logging.Config{Level: cfg.Log.Level, Format: cfg.Log.Format})
 	slog.SetDefault(logger)
+	logger.Info("configuration loaded", "config", cfg.Redacted())
 
 	reg := health.NewRegistry()
 

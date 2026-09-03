@@ -9,7 +9,13 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// checkTimeout bounds each individual Checker.Check call within Ready, so
+// one slow or hung dependency cannot block the whole /readyz response
+// indefinitely.
+const checkTimeout = 2 * time.Second
 
 // Checker reports whether one dependency (a database connection, an
 // external adapter, ...) is currently able to serve traffic.
@@ -77,7 +83,10 @@ func (r *Registry) Ready(ctx context.Context) error {
 	r.mu.RUnlock()
 
 	for _, c := range checkers {
-		if err := c.Check(ctx); err != nil {
+		checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+		err := c.Check(checkCtx)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name(), err)
 		}
 	}

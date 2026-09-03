@@ -63,6 +63,31 @@ func TestRegistry_PassingCheckerKeepsReady(t *testing.T) {
 	}
 }
 
+type deadlineRecordingChecker struct {
+	hadDeadline *bool
+}
+
+func (c deadlineRecordingChecker) Name() string { return "deadline-check" }
+func (c deadlineRecordingChecker) Check(ctx context.Context) error {
+	_, ok := ctx.Deadline()
+	*c.hadDeadline = ok
+	return nil
+}
+
+func TestRegistry_Ready_BoundsEachCheckerWithATimeout(t *testing.T) {
+	r := NewRegistry()
+	r.MarkReady()
+	var hadDeadline bool
+	r.Register(deadlineRecordingChecker{hadDeadline: &hadDeadline})
+
+	if err := r.Ready(t.Context()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hadDeadline {
+		t.Error("expected Check to be called with a context bounded by a per-checker timeout")
+	}
+}
+
 func TestRegistry_Live_AlwaysSucceeds(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Live(t.Context()); err != nil {

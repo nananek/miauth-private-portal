@@ -2,8 +2,11 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/nananek/miauth-private-portal/internal/health"
@@ -14,6 +17,33 @@ func newTestServer() (*Server, *health.Registry) {
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	return NewServer(logger, reg), reg
+}
+
+type failingChecker struct{ name string }
+
+func (c failingChecker) Name() string { return c.name }
+func (c failingChecker) Check(_ context.Context) error {
+	return errors.New("connection refused")
+}
+
+func TestServer_ReadyzLogsReasonWhenNotReady(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+	reg.Register(failingChecker{name: "downstream"})
+	reg.MarkReady()
+	srv := NewServer(logger, reg)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(buf.String(), "downstream") {
+		t.Errorf("expected the failing checker's name in the log, got: %s", buf.String())
+	}
 }
 
 func TestServer_HealthzAlwaysOK(t *testing.T) {

@@ -115,6 +115,20 @@ func TestLoad_EnvOverridesFile(t *testing.T) {
 	}
 }
 
+func TestLoad_EmptyEnvOverrideFailsClosedInsteadOfSilentlyDiscardingFileValue(t *testing.T) {
+	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\n")
+	_, err := Load(LoadOptions{
+		ConfigFilePath: path,
+		Getenv:         getenvFromMap(map[string]string{KeyHTTPPort: ""}),
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyHTTPPort) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyHTTPPort)
+	}
+}
+
 func TestLoad_UnknownKeyInFileFailsFast(t *testing.T) {
 	path := writeTempEnvFile(t, "APP_ENV=development\nFOO_BAR=baz\n")
 	_, err := Load(LoadOptions{
@@ -126,6 +140,26 @@ func TestLoad_UnknownKeyInFileFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "FOO_BAR") || !strings.Contains(err.Error(), "unknown") {
 		t.Errorf("error %q does not report FOO_BAR as unknown", err.Error())
+	}
+}
+
+func TestLoad_MultipleUnknownKeysInFileAreAllReportedDeterministically(t *testing.T) {
+	path := writeTempEnvFile(t, "APP_ENV=development\nZZZ_UNKNOWN=1\nAAA_UNKNOWN=2\n")
+
+	for range 5 {
+		_, err := Load(LoadOptions{
+			ConfigFilePath: path,
+			Getenv:         getenvFromMap(nil),
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "AAA_UNKNOWN") || !strings.Contains(err.Error(), "ZZZ_UNKNOWN") {
+			t.Fatalf("error %q does not report both unknown keys", err.Error())
+		}
+		if strings.Index(err.Error(), "AAA_UNKNOWN") > strings.Index(err.Error(), "ZZZ_UNKNOWN") {
+			t.Fatalf("error %q does not report unknown keys in a stable sorted order", err.Error())
+		}
 	}
 }
 
@@ -260,6 +294,54 @@ func TestConfig_Redacted(t *testing.T) {
 	}
 	if redacted[KeyHTTPPort] != "8080" {
 		t.Errorf("Redacted()[%s] = %q, want 8080", KeyHTTPPort, redacted[KeyHTTPPort])
+	}
+}
+
+func TestConfig_ValidateRejectsHandBuiltConfigWithOutOfBoundsFields(t *testing.T) {
+	cfg := Config{
+		Env: EnvDevelopment,
+		HTTP: HTTPConfig{
+			Host:                "0.0.0.0",
+			Port:                0,
+			ReadTimeout:         -1 * time.Second,
+			ReadHeaderTimeout:   5 * time.Second,
+			WriteTimeout:        10 * time.Second,
+			IdleTimeout:         60 * time.Second,
+			MaxRequestBodyBytes: -5,
+			ShutdownGracePeriod: 15 * time.Second,
+		},
+		Log: LogConfig{Level: "info", Format: "text"},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for out-of-bounds hand-built Config, got nil")
+	}
+	for _, key := range []string{KeyHTTPPort, KeyHTTPReadTimeout, KeyHTTPMaxBodyBytes} {
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("error %q does not mention %s", err.Error(), key)
+		}
+	}
+}
+
+func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
+	cfg := Config{
+		Env: EnvDevelopment,
+		HTTP: HTTPConfig{
+			Host:                "0.0.0.0",
+			Port:                8080,
+			ReadTimeout:         5 * time.Second,
+			ReadHeaderTimeout:   5 * time.Second,
+			WriteTimeout:        10 * time.Second,
+			IdleTimeout:         60 * time.Second,
+			MaxRequestBodyBytes: 1 << 20,
+			ShutdownGracePeriod: 15 * time.Second,
+		},
+		Log: LogConfig{Level: "info", Format: "text"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

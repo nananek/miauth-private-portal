@@ -379,10 +379,10 @@ func TestRun_PanicInHandlerIsLoggedWithRequestID(t *testing.T) {
 	waitForServing(t, addr)
 
 	// This exercises the real middleware composition wired up by Run:
-	// AccessLog -> withRequestID -> withRecover -> the panicking /readyz
-	// handler. Both the access log and the panic-recovery log must carry
-	// a non-empty request_id, and the client must still see a clean 500
-	// rather than a dropped connection.
+	// withRequestID -> withRecover -> withMaxBody -> mux dispatch ->
+	// AccessLog -> the panicking /readyz handler. Both the access log and
+	// the panic-recovery log must carry a non-empty request_id, and the
+	// client must still see a clean 500 rather than a dropped connection.
 	resp, err := http.Get("http://" + addr + "/readyz")
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)

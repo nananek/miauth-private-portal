@@ -20,6 +20,13 @@ a missing required field fails startup immediately with a redacted error
 that names the offending key and reason, never the value that was
 supplied.
 
+An environment variable that is *set but empty* (for example an unresolved
+`${VAR}` in a `docker-compose.yml` or systemd `EnvironmentFile`) is also a
+startup error rather than a silent override: `Load` cannot tell whether an
+empty value is intentional, and treating it as "unset" would silently
+discard a config-file value with no diagnostic at all. Unset the variable
+entirely to fall back to the config file/default instead.
+
 ### Why environment-variable scanning is scoped to known keys
 
 The config file is fully owned by this application, so `Load` can safely

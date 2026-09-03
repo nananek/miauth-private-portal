@@ -87,10 +87,18 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger, reg *health.Reg
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+		// Stop intercepting SIGINT/SIGTERM now, before waiting out the
+		// grace period: signal.NotifyContext suppresses the OS's default
+		// terminate-on-signal behavior for as long as it stays registered,
+		// so a second Ctrl-C during a slow drain must revert to that
+		// default (immediate termination) instead of being silently
+		// swallowed.
+		stop()
 		gracefulShutdown(srv, reg, logger, opts.ShutdownGracePeriod, cancelBaseCtx)
 		return <-serveErr
 	case err := <-serveErr:
 		logger.Error("http server failed", "error", err.Error())
+		stop()
 		gracefulShutdown(srv, reg, logger, opts.ShutdownGracePeriod, cancelBaseCtx)
 		return err
 	}

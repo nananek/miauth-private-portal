@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,13 +115,27 @@ func Load(opts LoadOptions) (*Config, error) {
 		}
 	}
 
+	var errs []FieldError
 	for _, key := range knownKeyOrder {
-		if v, ok := opts.Getenv(key); ok {
-			values[key] = v
+		v, ok := opts.Getenv(key)
+		if !ok {
+			continue
 		}
+		if v == "" {
+			// An env var that is *set but empty* (e.g. an unresolved
+			// ${VAR} in a docker-compose file or systemd EnvironmentFile)
+			// is ambiguous: parseOptional* would silently treat it as
+			// "unset" and fall back to the default, discarding whatever
+			// the config file specified with no diagnostic at all. Fail
+			// closed instead of guessing.
+			errs = append(errs, FieldError{Key: key, Reason: "environment variable is set to an empty value; unset it instead of overriding with an empty string"})
+			continue
+		}
+		values[key] = v
 	}
 
-	cfg, errs := parse(values)
+	cfg, parseErrs := parse(values)
+	errs = append(errs, parseErrs...)
 	if len(errs) > 0 {
 		return nil, &ValidationError{Fields: errs}
 	}
@@ -146,24 +162,36 @@ func loadConfigFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("parse config file %s: %w", path, err)
 	}
 
+	var unknown []string
 	for k := range raw {
 		if !isKnownKey(k) {
-			return nil, &ValidationError{Fields: []FieldError{{
-				Key:    k,
-				Reason: fmt.Sprintf("unknown config key in %s", path),
-			}}}
+			unknown = append(unknown, k)
 		}
+	}
+	if len(unknown) > 0 {
+		// Sorted so which key(s) get reported is deterministic across
+		// runs of the same file, instead of depending on Go's randomized
+		// map iteration order.
+		sort.Strings(unknown)
+		fields := make([]FieldError, len(unknown))
+		for i, k := range unknown {
+			fields[i] = FieldError{Key: k, Reason: fmt.Sprintf("unknown config key in %s", path)}
+		}
+		return nil, &ValidationError{Fields: fields}
 	}
 	return raw, nil
 }
+
+// allowedEnvironments is the single source of truth for valid Env values,
+// shared by parse (which validates the raw config-file/env-var string) and
+// Validate (which re-checks an already-typed Config built by hand).
+var allowedEnvironments = []string{string(EnvDevelopment), string(EnvStaging), string(EnvProduction)}
 
 func parse(values map[string]string) (Config, []FieldError) {
 	var errs []FieldError
 	var cfg Config
 
-	cfg.Env = Environment(parseRequiredEnum(values, KeyAppEnv, []string{
-		string(EnvDevelopment), string(EnvStaging), string(EnvProduction),
-	}, &errs))
+	cfg.Env = Environment(parseRequiredEnum(values, KeyAppEnv, allowedEnvironments, &errs))
 
 	cfg.HTTP.Host = parseOptionalString(values, KeyHTTPHost, "0.0.0.0")
 	cfg.HTTP.Port = parseOptionalInt(values, KeyHTTPPort, 8080, 1, 65535, &errs)
@@ -182,16 +210,25 @@ func parse(values map[string]string) (Config, []FieldError) {
 
 // Validate re-checks cross-field and environment-dependent rules that a
 // single field's parser cannot express alone, such as production
-// hardening. Load always calls it; a Config built by hand (tests,
-// cmd/server defaults) should call it too before use.
+// hardening, and re-checks the same per-field bounds parse enforces
+// (positive timeouts, a 1-65535 port, MaxRequestBodyBytes >= 1) so a
+// hand-built Config (tests, cmd/server defaults) gets the same safety
+// guarantees a Load-produced one does. Load always calls it; a Config
+// built by hand should call it too before use.
 func (c Config) Validate() error {
 	var errs []FieldError
 
-	switch c.Env {
-	case EnvDevelopment, EnvStaging, EnvProduction:
-	default:
-		errs = append(errs, FieldError{Key: KeyAppEnv, Reason: "must be one of development, staging, production"})
+	if !slices.Contains(allowedEnvironments, string(c.Env)) {
+		errs = append(errs, FieldError{Key: KeyAppEnv, Reason: "must be one of " + strings.Join(allowedEnvironments, ", ")})
 	}
+
+	validateIntBounds(&errs, KeyHTTPPort, c.HTTP.Port, 1, 65535)
+	validatePositiveDuration(&errs, KeyHTTPReadTimeout, c.HTTP.ReadTimeout)
+	validatePositiveDuration(&errs, KeyHTTPReadHeaderTimeout, c.HTTP.ReadHeaderTimeout)
+	validatePositiveDuration(&errs, KeyHTTPWriteTimeout, c.HTTP.WriteTimeout)
+	validatePositiveDuration(&errs, KeyHTTPIdleTimeout, c.HTTP.IdleTimeout)
+	validateInt64Min(&errs, KeyHTTPMaxBodyBytes, c.HTTP.MaxRequestBodyBytes, 1)
+	validatePositiveDuration(&errs, KeyHTTPShutdownGrace, c.HTTP.ShutdownGracePeriod)
 
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
@@ -234,7 +271,7 @@ func parseRequiredEnum(values map[string]string, key string, allowed []string, e
 		*errs = append(*errs, FieldError{Key: key, Reason: "required"})
 		return ""
 	}
-	if !containsString(allowed, v) {
+	if !slices.Contains(allowed, v) {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must be one of " + strings.Join(allowed, ", ")})
 		return ""
 	}
@@ -246,7 +283,7 @@ func parseOptionalEnum(values map[string]string, key, def string, allowed []stri
 	if !ok || v == "" {
 		return def
 	}
-	if !containsString(allowed, v) {
+	if !slices.Contains(allowed, v) {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must be one of " + strings.Join(allowed, ", ")})
 		return def
 	}
@@ -266,8 +303,11 @@ func parseOptionalInt(values map[string]string, key string, def, min, max int, e
 		return def
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < min || n > max {
+	if err != nil {
 		*errs = append(*errs, FieldError{Key: key, Reason: fmt.Sprintf("must be an integer between %d and %d", min, max)})
+		return def
+	}
+	if !validateIntBounds(errs, key, n, min, max) {
 		return def
 	}
 	return n
@@ -279,8 +319,11 @@ func parseOptionalInt64(values map[string]string, key string, def, min int64, er
 		return def
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < min {
+	if err != nil {
 		*errs = append(*errs, FieldError{Key: key, Reason: fmt.Sprintf("must be an integer of at least %d", min)})
+		return def
+	}
+	if !validateInt64Min(errs, key, n, min) {
 		return def
 	}
 	return n
@@ -292,18 +335,41 @@ func parseOptionalDuration(values map[string]string, key string, def time.Durati
 		return def
 	}
 	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
+	if err != nil {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must be a positive duration (e.g. 5s)"})
+		return def
+	}
+	if !validatePositiveDuration(errs, key, d) {
 		return def
 	}
 	return d
 }
 
-func containsString(list []string, v string) bool {
-	for _, item := range list {
-		if item == v {
-			return true
-		}
+// validateIntBounds, validateInt64Min, and validatePositiveDuration are the
+// shared bound checks used both while parsing raw config-file/env-var
+// strings (parseOptionalInt, ...) and by Validate when re-checking an
+// already-typed, hand-built Config, so the two paths cannot drift apart.
+
+func validateIntBounds(errs *[]FieldError, key string, n, min, max int) bool {
+	if n < min || n > max {
+		*errs = append(*errs, FieldError{Key: key, Reason: fmt.Sprintf("must be an integer between %d and %d", min, max)})
+		return false
 	}
-	return false
+	return true
+}
+
+func validateInt64Min(errs *[]FieldError, key string, n, min int64) bool {
+	if n < min {
+		*errs = append(*errs, FieldError{Key: key, Reason: fmt.Sprintf("must be an integer of at least %d", min)})
+		return false
+	}
+	return true
+}
+
+func validatePositiveDuration(errs *[]FieldError, key string, d time.Duration) bool {
+	if d <= 0 {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be a positive duration (e.g. 5s)"})
+		return false
+	}
+	return true
 }

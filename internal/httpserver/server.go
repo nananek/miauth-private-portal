@@ -36,10 +36,10 @@ func NewServer(logger *slog.Logger, reg *health.Registry) *Server {
 	s := &Server{mux: http.NewServeMux(), logger: logger}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeHealthResult(w, reg.Live(r.Context()))
+		writeHealthResult(w, logger, reg.Live(r.Context()))
 	}))
 	s.Handle("GET /readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeHealthResult(w, reg.Ready(r.Context()))
+		writeHealthResult(w, logger, reg.Ready(r.Context()))
 	}))
 
 	return s
@@ -57,8 +57,14 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
-func writeHealthResult(w http.ResponseWriter, err error) {
+func writeHealthResult(w http.ResponseWriter, logger *slog.Logger, err error) {
 	if err != nil {
+		// err is already wrapped with the failing Checker's name (see
+		// health.Registry.Ready), so this is the one place that
+		// diagnostic reaches an operator; discarding it silently would
+		// make a 503 indistinguishable from "not ready yet" vs. "a
+		// specific dependency is down".
+		logger.Warn("readiness check failed", "error", err.Error())
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}

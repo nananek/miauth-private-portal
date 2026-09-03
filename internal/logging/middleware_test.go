@@ -118,3 +118,43 @@ func TestAccessLog_DefaultsStatusToOKWhenNotExplicitlyWritten(t *testing.T) {
 		t.Errorf("expected default status 200 in log, got: %s", buf.String())
 	}
 }
+
+func TestAccessLog_PanicAfterWriteHeaderLogsActualStatus(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, Config{Format: "json", Level: "info"})
+
+	handler := AccessLog(logger, "/panics-after-write", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("boom after headers sent")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/panics-after-write", nil)
+	rec := httptest.NewRecorder()
+
+	func() {
+		defer func() { recover() }()
+		handler.ServeHTTP(rec, req)
+	}()
+
+	if !strings.Contains(buf.String(), `"status":200`) {
+		t.Errorf("expected the already-written 200 status logged, not a hardcoded 500, got: %s", buf.String())
+	}
+}
+
+func TestStatusRecorder_SecondWriteHeaderCallDoesNotOverwriteStatus(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, Config{Format: "json", Level: "info"})
+
+	handler := AccessLog(logger, "/double-writeheader", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusInternalServerError) // superfluous; net/http keeps the first on the wire
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/double-writeheader", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !strings.Contains(buf.String(), `"status":200`) {
+		t.Errorf("expected the first WriteHeader status (200) to be logged, got: %s", buf.String())
+	}
+}
