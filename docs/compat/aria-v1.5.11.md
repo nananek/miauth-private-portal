@@ -219,10 +219,11 @@ The success shape that the source explicitly accepts is:
 The `token` must be a JSON string and `user` must be a JSON object. The
 success user object is decoded directly as `UserDetailedNotMe`; its minimum
 fields are listed below. Any response not matching `ok: true` plus those two
-types returns a pending/failure result to Aria. Aria does not distinguish
-pending from denial in this method. The local server must bind the returned
-token to this local session and the configured origins; the response must
-never contain the upstream token.
+types is a non-success response for this contract. Aria does not distinguish
+pending from denial in this method; malformed JSON or a decode failure may be
+surfaced as a transport/decode failure instead. The local server must bind the
+returned token to this local session and the configured origins; the response
+must never contain the upstream token.
 
 The `token` in this response is a secret. It is shown in this example only as
 the literal word `REDACTED_…`; real fixtures and logs must never contain it.
