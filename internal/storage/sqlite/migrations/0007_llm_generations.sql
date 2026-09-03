@@ -18,7 +18,7 @@ CREATE TABLE llm_generations (
     generated_at TEXT
 );
 
-CREATE INDEX idx_llm_generations_target ON llm_generations (target_entry_id, generated_at);
+CREATE INDEX idx_llm_generations_target ON llm_generations (target_entry_id, requested_at);
 
 -- At most one concurrently in-flight generation per (target, kind), so a
 -- retried job cannot produce a duplicate reply or follow-up question.

@@ -247,8 +247,8 @@ func (c Config) Validate() error {
 	if c.DB.Path == "" {
 		errs = append(errs, FieldError{Key: KeyDBPath, Reason: "must not be empty"})
 	}
-	if c.DB.BusyTimeout <= 0 {
-		errs = append(errs, FieldError{Key: KeyDBBusyTimeoutMS, Reason: "must be a positive integer (milliseconds)"})
+	if ms := c.DB.BusyTimeout.Milliseconds(); ms < 1 || ms > 600_000 {
+		errs = append(errs, FieldError{Key: KeyDBBusyTimeoutMS, Reason: "must be an integer between 1 and 600000"})
 	}
 	validateIntBounds(&errs, KeyDBMaxOpenConns, c.DB.MaxOpenConns, 1, 100)
 

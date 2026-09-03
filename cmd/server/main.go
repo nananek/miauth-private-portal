@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/health"
@@ -31,7 +33,15 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("configuration loaded", "config", cfg.Redacted())
 
-	ctx := context.Background()
+	// Registered here, not left to httpserver.Run, so SIGINT/SIGTERM
+	// during the blocking database open/migrate/seed steps below (a slow
+	// disk, a lock held by another process, a stuck migration) still gets
+	// a clean shutdown instead of requiring a SIGKILL. Run installs its
+	// own signal.NotifyContext on top of this ctx for the HTTP serve
+	// loop; registering twice is harmless since both fire from the same
+	// signal.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := sqlite.Open(ctx, sqlite.Config{
 		Path:         cfg.DB.Path,

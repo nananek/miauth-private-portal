@@ -53,6 +53,14 @@ type DB struct {
 //
 // foreign_keys and journal_mode=WAL are always on; they are correctness
 // requirements, not operator-configurable settings.
+//
+// _txlock=immediate makes every BEGIN (including WithinTx's) take
+// SQLite's write lock up front instead of only on the transaction's first
+// write. Without it a transaction that reads through one repository and
+// writes through another (exactly the composition WithinTx exists for)
+// can fail its read-to-write lock upgrade with SQLITE_BUSY_SNAPSHOT under
+// concurrent access, an error busy_timeout's retry cannot recover from
+// because the transaction's read snapshot is already stale by then.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if dir := filepath.Dir(cfg.Path); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -61,7 +69,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	}
 
 	dsn := fmt.Sprintf(
-		"file:%s?_foreign_keys=1&_busy_timeout=%d&_journal_mode=WAL",
+		"file:%s?_foreign_keys=1&_busy_timeout=%d&_journal_mode=WAL&_txlock=immediate",
 		cfg.Path, cfg.BusyTimeout.Milliseconds(),
 	)
 	sqlDB, err := sql.Open("sqlite", dsn)
@@ -70,6 +78,11 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	}
 	if cfg.MaxOpenConns > 0 {
 		sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
+		// Otherwise database/sql's default of 2 idle connections gets
+		// closed back down after any burst above 2 concurrent callers,
+		// forcing the next burst to pay for a fresh physical connection
+		// (and its DSN pragmas) instead of reusing a pooled one.
+		sqlDB.SetMaxIdleConns(cfg.MaxOpenConns)
 	}
 
 	if err := sqlDB.PingContext(ctx); err != nil {

@@ -6,11 +6,22 @@ import (
 )
 
 // timeLayout is the single explicit on-disk format for every timestamp
-// this service persists: RFC 3339 with nanosecond precision, always UTC.
-// Every timestamp column is declared TEXT (not a driver-recognized
-// "TIMESTAMP" type) so this conversion is always explicit here rather
-// than depending on driver-version time-handling behavior.
-const timeLayout = time.RFC3339Nano
+// this service persists: RFC 3339 with a fixed-width nanosecond fraction,
+// always UTC. Every timestamp column is declared TEXT (not a
+// driver-recognized "TIMESTAMP" type) so this conversion is always
+// explicit here rather than depending on driver-version time-handling
+// behavior.
+//
+// The fraction is fixed-width (".000000000", not time.RFC3339Nano's
+// trimmed ".999999999") because SQLite's TEXT ordering, and every
+// ORDER BY / row-value pagination cursor on a timestamp column in this
+// package, is a plain byte-wise string comparison: RFC3339Nano's
+// formatter omits the fraction entirely when it is exactly zero, so
+// "...:00Z" (no fraction) sorts *after* "...:00.5Z" ('.' < 'Z') even
+// though it is chronologically earlier. Always writing all nine digits
+// keeps every stored timestamp the same width, so string order and time
+// order agree.
+const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 // formatTime renders t for storage, normalizing it to UTC first so a
 // caller passing a value in another location never silently changes how

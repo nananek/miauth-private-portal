@@ -20,7 +20,7 @@ func (r *actorRepository) EnsureReservedActors(ctx context.Context) error {
 			 SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM actors WHERE actor_type = ?)`,
 			domain.NewID(), string(t), formatTime(time.Now()), string(t),
 		); err != nil {
-			return fmt.Errorf("ensure reserved actor %s: %w", t, err)
+			return fmt.Errorf("ensure reserved actor %s: %w", t, mapWriteError(err))
 		}
 	}
 	return nil
