@@ -46,10 +46,13 @@ is promoted into the same release, OWUI-R becomes an explicit #13 dependency;
 otherwise the feature remains disabled by default and cannot change the #1 MVP
 behavior.
 
-The parent issue/PR is the existing #19 track. OWUI-C, OWUI-P, OWUI-B, and
-OWUI-R are child task names to split into separate issues or PRs under that
-parent; the outbound revision supersedes the former import-oriented OWUI-S
-label.
+PR #19 is the Issue #2 contract-document PR; it is not the parent of this
+feature. This roadmap is scoped under Issue #1. OWUI-C, OWUI-P, OWUI-B, and
+OWUI-R are separate child issue/PR units to create under #1 (or under a new
+Open WebUI umbrella issue if the tracker requires one). Each PR must handle
+one child only, link the umbrella requirement, and close its child issue; no
+child PR closes #1. The outbound revision supersedes the former
+import-oriented OWUI-S label.
 
 The existing #7 Misskey wire layer remains the transport consumer for any
 Aria-visible projection and keeps its original #2/#5/#6 dependency order.
@@ -207,6 +210,9 @@ Acceptance criteria:
   revision, tombstone, and status migrations; keep remote IDs
   nullable/opaque and never use them for local identity, ordering, or
   authorization.
+- [ ] Add conversation-link state-transition tests proving only `ready` can
+  continue and `creation_pending`/`ambiguous`/`failed`/`dead` cannot create,
+  continue, or auto-retry.
 - [ ] Add migration, serialization, unknown/null field, local reply-tree, and
   local stable-cursor contract tests.
 
@@ -231,6 +237,35 @@ the former import-oriented OWUI-S track.
   `branch_id`, optional `remote_chat_id`, optional `remote_message_id`,
   optional `remote_parent_id` and `remote_current_id`, `request_id`, attempt,
   and provider status.
+
+The conversation-link state machine is explicit:
+
+```text
+unlinked -> creation_pending -> ready
+                         \-> ambiguous
+                         \-> failed
+                         \-> dead
+```
+
+`creation_pending` represents the one claimed first-create operation; it is
+not a retryable state. Only `ready`, with confirmed chat persistence and a
+stable `remote_chat_id`, may receive `ContinueTurn`. A
+`creation_pending`/`ambiguous`/`failed`/`dead` link is frozen: it is not a
+target for new remote-chat creation, another `StartChat`, a `ContinueTurn`, or
+automatic retry. A lost or uncertain creation response transitions to
+`ambiguous`, and the state
+remains there until explicit owner/operator recovery verifies the provider
+outcome. Recovery may mark a confirmed chat `ready` or deliberately abandon
+the branch and start a separately audited local branch; it must never silently
+create a second remote chat. A definitive creation failure is `failed`; a
+terminal operator decision or exhausted, non-replayable operation is `dead`.
+These states are independent of a definitive turn `failed` result after a
+`ready` link; a known-good ready link may continue only when the individual
+continuation is safe to retry. An uncertain continuation response transitions
+the link to `ambiguous` and freezes it until recovery; a definitive failure
+whose remote outcome is known may leave the link `ready` while marking only
+the turn failed.
+
 - Aria `reply_to_id` is the only source of truth for local parentage. Remote
   `chat_id`, `message.id`, `parentId`, and `currentId` are correlation metadata;
   they never replace local identity, ordering, authorization, or
@@ -271,8 +306,17 @@ rendering and never executed as instructions.
 - Remote IDs are opaque nullable strings. They must not be exposed in Aria
   account tokens, public URLs, or used as a chronology cursor.
 
-The provider message sequence contains only normalized owner turns and local
-`llm_reply` turns selected from the local path. It carries no local IDs,
+The provider message sequence contains only normalized messages selected from
+the local path. Historical context is eligible only when an owner-authored
+post has terminal local status `completed` and is not tombstoned, or a local
+`llm_reply` has terminal status `completed`, `done=true`, and is not
+tombstoned. `failed`, `incomplete`, `streaming`, `pending`, `ambiguous`,
+`cancelled`, dead/retry-exhausted, and deleted/tombstoned messages are never
+sent. The newly accepted owner message is passed separately as `new_turn` (and
+is appended to the initial sequence for `StartChat`); it is the only current,
+non-historical message allowed in the request. If any required path node is
+ineligible, the job fails closed without silently skipping it or treating it as
+a root. The sequence carries no local IDs,
 Misskey metadata, credentials, system prompt, tool call, or provider debug
 field; those remain local provenance or are excluded.
 
@@ -294,9 +338,12 @@ The send/receive order is:
    VirtualActor entries cannot enqueue another turn.
 2. Validate same-thread parentage, owner/model actor permissions, the selected
    branch, cycle, orphan, and eligible-message rules.
-3. Commit the local message and durable turn-job intent atomically.
-4. Under a thread-level lease/single-flight, create a new remote chat for a
-   root or an unlinked branch, or resolve the linked branch for continuation.
+3. Commit the local message, a `creation_pending` link for a new branch when
+   needed, and the durable turn-job intent atomically.
+4. Under a thread-level lease/single-flight, issue the one `StartChat` for an
+   unlinked branch, or resolve the linked branch for continuation. A linked
+   branch is eligible for this step only when its state is `ready`; every
+   other link state fails closed without a provider call.
 5. Send the initial sequence through `StartChat`, or the new owner turn through
    `ContinueTurn`, using the configured default model and turn idempotency key.
 6. Receive a buffered final response or ordered stream events.
@@ -311,7 +358,10 @@ the local post is inserted; a persisted dangling edge discovered during
 restart or repair is quarantined and never treated as an implicit root. Each
 local branch has one remote chat in the MVP; a concurrent request in the same
 thread is pending/conflict/retry according to local policy, never an
-unbounded concurrent remote turn.
+unbounded concurrent remote turn. Before the provider call, the worker
+revalidates that every historical path message is an eligible completed
+owner/assistant message and rejects the turn if a tombstone, failed,
+incomplete, or streaming message would otherwise be resent.
 
 ### Idempotency and failure boundary
 
@@ -362,7 +412,8 @@ exists.
   cancellation, and redacted-error handling in one boundary. The adapter must
   not expose unverified endpoint names as a domain contract.
 - [ ] Add an `openwebui_turn` durable job using #8 leases, bounded retry/dead
-  state, restart recovery, thread single-flight, and local idempotency.
+  state for safe ready continuations, explicit terminal creation states,
+  restart recovery, thread single-flight, and local idempotency.
 - [ ] Implement local reply-tree path construction, new-chat versus
   continuation, one-new-chat-per-local-branch policy, assistant-child
   mapping, remote correlation metadata, provenance, partial/failure status,
@@ -373,7 +424,8 @@ exists.
 - [ ] Test linear ordering, independent branch chat creation or explicit
   unsupported-branch rejection, duplicates, response-loss ambiguity, cycles,
   orphans, stale branches, concurrent turns, outage, auth failure, rate limit,
-  malformed response, schema drift, and cancellation.
+  malformed response, schema drift, state-transition guards, and
+  cancellation.
 
 ## OWUI-R: optional release gate
 
@@ -393,12 +445,13 @@ Acceptance criteria:
 - [ ] Provider outage still saves the Aria post; duplicate delivery creates no
   second assistant entry or remote chat.
 - [ ] Initial remote chat creation response loss becomes `ambiguous/dead` and
-  never silently creates a duplicate chat.
+  never silently creates a duplicate chat; no new creation, continuation, or
+  automatic retry occurs until owner/operator recovery.
 - [ ] Target-instance evidence covers persistent chat creation/continuation,
   default-model permission, completion finish, and any enabled stream finish.
 - [ ] Raw provider credentials, session capabilities, cookies, prompts, and
-  stream chunks are
-  absent from logs, traces, fixtures, and error responses. Encrypted,
+  stream chunks are absent from logs, traces, fixtures, and error responses.
+  Encrypted,
   access-controlled backups may contain the local post/assistant bodies and
   opaque remote IDs required for restart and continuation, but never raw
   provider secrets.
@@ -508,6 +561,10 @@ Error behavior:
   Honor a valid `Retry-After` only within a configured maximum delay and use a
   bounded retry count; otherwise mark an ambiguous outcome dead for explicit
   owner recovery.
+- This retry rule applies only to a `ready` link's safe continuation. An
+  initial `StartChat` is never automatically replayed: a definitive failure
+  becomes `failed`, while a timeout, disconnect, or response loss becomes
+  `ambiguous` (and may later be made `dead` only by explicit recovery).
 - Loss of the response after remote chat creation is ambiguous and must not
   automatically create a second chat. The same applies to an uncertain
   completion response.
