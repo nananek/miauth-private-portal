@@ -1,72 +1,92 @@
-# Open WebUI integration roadmap addition
+# Open WebUI outbound chat and Aria reply-tree roadmap addition
 
 - Status: Planned, opt-in P1 extension; not required for the Issue #1 MVP
-- Source plan: document board key `openwebui-roadmap-plan`
+- Source plan: document board key `openwebui-reply-tree-plan`
 - Scope: single-owner `miauth-private-portal` service and one allowlisted Open WebUI workspace
 
 ## Goal
 
-Add an opt-in Open WebUI workspace/model projection, durable chat import, and
-an explicit owner-triggered completion bridge without changing the existing
-single-owner Aria/MiAuth MVP or treating an external model as a login-capable
-user.
+Add an opt-in outbound bridge where an Aria root message or reply creates a
+new Open WebUI persistent chat and returns the model response into the same
+Aria thread. The Aria `reply_to_id` reply tree is the conversation source of
+truth; Open WebUI `chat_id`, `message.id`, `parentId`, and `currentId` are
+opaque correlation metadata only. This does not change the existing
+single-owner Aria/MiAuth MVP or make an external model a login-capable user.
 
 Open WebUI integration is a dedicated feature track, not merely an alternate
-provider for #9. It adds workspace/model identity projection, durable external
-chat synchronization, branch-preserving message mapping, and a completion
-bridge with separate permission and secret boundaries. The existing #2 auth
-topology and Aria contract remain unchanged and are prerequisites.
+provider for #9. It adds workspace/model identity projection, durable outbound
+turn jobs, local reply-tree mapping, and a completion bridge with separate
+permission and secret boundaries. Existing Open WebUI chat open/import/list,
+pull sync, reconciliation, history browsing, and bidirectional edit/delete
+are explicit non-goals. The existing #2 auth topology and Aria contract remain
+unchanged and are prerequisites.
 
 ## Roadmap placement
 
-The work is inserted at two points in the existing roadmap:
+The work is inserted at two implementation points and one conditional release
+gate in the existing roadmap:
 
 - **Phase 0.5, after #2 and before #4:** OWUI-C freezes the Open WebUI API,
   identity, security, and storage contract. It may proceed in parallel with
   #3, but must finish before #4 starts its schema addendum.
-- **Phase 2, after #8 and alongside #9/#10:** OWUI-P adds workspace/model and
-  VirtualActor projections after #4/#6/#7 are available. OWUI-S then adds
-  durable chat sync and the explicit completion bridge after #8, in parallel
-  with #9/#10.
+- **Phase 2, after #8 and alongside #9:** OWUI-P adds the local thread/link,
+  turn, branch, and VirtualActor projection after #4/#6 are available.
+  OWUI-B then adds the outbound Aria-message → new-chat/continued-turn →
+  local-assistant bridge after #8, in parallel with #9.
+- **Phase 3 / #13 opt-in gate:** OWUI-R adds the release E2E and operations
+  evidence only if this feature is promoted into the same release.
 
 The original #13 release gate does not depend on this feature. If the feature
-is promoted into the same release, OWUI-S and its operations/E2E gate become a
-new explicit #13 dependency. Otherwise, the feature remains disabled by
-default and cannot change the #1 MVP behavior.
+is promoted into the same release, OWUI-R becomes an explicit #13 dependency;
+otherwise the feature remains disabled by default and cannot change the #1 MVP
+behavior.
 
-The parent issue should use the next available GitHub issue number (currently
-expected to be #19, but not fixed here). OWUI-C, OWUI-P, and OWUI-S are child
-task names to split into separate issues or PRs under that parent.
+The parent issue/PR is the existing #19 track. OWUI-C, OWUI-P, OWUI-B, and
+OWUI-R are child task names to split into separate issues or PRs under that
+parent; the outbound revision supersedes the former import-oriented OWUI-S
+label.
+
+The existing #7 Misskey wire layer remains the transport consumer for any
+Aria-visible projection and keeps its original #2/#5/#6 dependency order.
+OWUI-P does not promote new endpoints or make #7 an earlier prerequisite; it
+only supplies the local projection for #7 to consume when that issue reaches
+it.
 
 Dependency graph:
 
 ```text
 #2 -> OWUI-C
 #3 + OWUI-C -> #4 schema addendum
-#4 + #6 + #7 + OWUI-C -> OWUI-P
-#6 + #8 + OWUI-P -> OWUI-S
-OWUI-S -> #13 additional E2E/operations gate (only if promoted)
+#4 + #6 + OWUI-C -> OWUI-P
+#6 + #8 + OWUI-P -> OWUI-B
+OWUI-B -> OWUI-R
+#13 -> OWUI-R only if promoted into the same release
 ```
 
 ## Integration boundary
 
-Open WebUI is an external provider/source. Domain and use-case code must not
-depend on its HTTP API, JWT format, or database model. The boundary is:
+Open WebUI is an external provider, not an inbound source for this feature.
+Domain and use-case code must not depend on its HTTP API, JWT format, or
+database model. The narrow boundary is:
 
 - **Domain/use-case:** `WorkspaceDefinition`, `ModelDefinition`,
-  `VirtualActor`, `ExternalChatLink`, `ExternalMessageLink`, `SyncCursor`,
-  and `OpenWebUIJob`. The MVP has one enabled workspace and one configured
-  default model; model selection is never a client-supplied capability.
-- **Provider port:** `ListChats(updated_after/cursor)`,
-  `GetChat(external_chat_id)`, and
-  `Complete(model_id, messages, correlation/idempotency metadata)`. `CreateChat` and
-  `AppendMessage` are allowed only after a pinned target contract proves they
-  are needed.
+  `VirtualActor`, `OpenWebUIConversationLink`, `OpenWebUITurnLink`, local
+  `reply_to_id`, and `OpenWebUITurnJob`. The MVP has one enabled workspace and
+  one configured default model; model selection is never a client-supplied
+  capability.
+- **Provider port:** `StartChat(first_turn, model_id, correlation_id)`,
+  `ContinueTurn(remote_chat_id, selected_local_path, new_turn, correlation_id)`,
+  and `CompleteTurn(remote_chat_id, model_id, message_sequence, stream_mode,
+  correlation_id)`. `CancelTurn` is added only if the target provider proves
+  safe cancellation. `ListChats`, `GetChat`, existing-chat import, history
+  pull, and reconciliation are not part of this port.
 - **Adapter:** absorbs Open WebUI endpoint/version differences and Bearer API
-  key/JWT authentication. OpenAI-compatible chat completions are used only by
-  the explicit generation bridge.
-- **Local API/Aria projection:** exposes synchronized local threads through
-  #6 and #7 projections. Open WebUI credentials and chat APIs never reach Aria.
+  key/JWT authentication. It verifies whether the first completion creates a
+  persistent chat, translates final/stream responses, and returns opaque
+  remote IDs with redacted provider errors.
+- **Local API/Aria projection:** exposes the local thread and default-model
+  VirtualActor through the existing #6/#7 projections. Open WebUI credentials,
+  remote chat IDs, and chat APIs never reach Aria.
 
 The adapter must use a pinned Open WebUI API/version and a fixed HTTPS origin
 allowlist. It must not discover or connect to an arbitrary URL supplied by a
@@ -75,7 +95,11 @@ that allowlist and the resolved-IP SSRF policy. This feature's “virtual
 federation” means local presentation of an external model actor only; it does
 not add Misskey or ActivityPub federation.
 No Open WebUI source is copied into this repository; the contract is captured
-with redacted fixtures and a narrow adapter.
+with redacted fixtures and a narrow adapter. A target instance must not be
+assumed to have a dedicated chat-creation endpoint: OWUI-C must pin the
+endpoint, persistence conditions, chat/message ID return behavior, and save
+completion before implementation. If that cannot be verified, disable the
+feature; completion-only mode is not success for this persistent-chat goal.
 
 ## OWUI-C: contract and identity ADR
 
@@ -87,26 +111,33 @@ Acceptance criteria:
   boundary, local source of truth, VirtualActor, non-federation scope, and
   auth/secret threat model.
 - [ ] Add a pinned compatibility document covering target base URL policy, API
-  version, used endpoints, request/response fields, pagination, auth, errors,
-  rate limits, nullable/unknown fields, and chat/message ID semantics.
-- [ ] Complete target-instance verification for persistent chat, workspace
-  permission, and the default model. If persistent chat is unavailable,
-  explicitly select completion-only mode and remove chat import from this MVP.
-- [ ] Store redacted fixtures for linear and branched `parentId`/`currentId`
-  histories, user/assistant/system messages, tool metadata, edit/delete
-  cases, 401/429, and malformed responses.
-- [ ] Update #2/#1 traceability for #3, #4, #6, #7, #8, #9, and #13 impacts;
+  version, outbound chat creation/continuation endpoints, request/response
+  and stream fields, auth, errors, rate limits, nullable/unknown fields, and
+  opaque chat/message ID semantics.
+- [ ] Complete target-instance verification that the first request creates a
+  persistent chat, returns a stable `chat_id` and response message ID when
+  available, and provides the required default-model workspace permission.
+  If persistence cannot be verified, disable this feature; completion-only is
+  not a successful fallback for this roadmap.
+- [ ] Store redacted fixtures for linear turns, optional remote
+  `parentId`/`currentId` correlation, user/assistant/system/tool metadata,
+  401/429, malformed responses, finish events, duplicate/out-of-order
+  chunks, and response-loss ambiguity.
+- [ ] Add an outbound-only ADR covering source of truth, new chat/continued
+  turn lifecycle, branch policy, edit/delete policy, secret/notification
+  boundary, and non-goals for existing-chat import/list/pull/reconciliation.
+- [ ] Update #1/#2 traceability for #3, #4, #6, #8, #9, and #13 impacts;
   never treat Open WebUI credentials as MiAuth or local API tokens.
 
 Implementation must not begin until the target Open WebUI version/API surface,
-persistent chat endpoint availability, real workspace/default model IDs,
-workspace/model permissions, and credential provision/rotation ownership are
-recorded. These are implementation start conditions, not blockers for
-publishing this roadmap.
+persistent chat creation/continuation endpoint and save semantics, real
+workspace/default model IDs, workspace/model permissions, remote ID return
+behavior, and credential provision/rotation ownership are recorded. These are
+implementation start conditions, not blockers for publishing this roadmap.
 
-## OWUI-P: registry and identity projection
+## OWUI-P: local thread/link and identity projection
 
-Placement: after #4, #6, and #7; feature flag remains off by default.
+Placement: after #4 and #6; feature flag remains off by default.
 
 The minimum registry model is:
 
@@ -119,7 +150,8 @@ The minimum registry model is:
 - `default_model_id` FK to a model in the same workspace
 - fixed presentation `federation_host` (MVP value:
   `openwebui.tail1a2b3c.ts.net`)
-- `sync_enabled`, `generation_enabled`, timestamps, and `last_sync_status`
+- `enabled`, `generation_enabled`, timestamps, and remote chat
+  creation/continuation capability status
 
 ### ModelDefinition
 
@@ -127,6 +159,7 @@ The minimum registry model is:
 - opaque `external_model_id`; never regenerate it from a display name
 - `display_name`, `actor_id`, `active`, and verified `capabilities`
 - optional provider `external_updated_at`
+- default status is resolved by the owning workspace's `default_model_id`
 
 `default_model_id` points to exactly one model in its workspace. Workspace
 disable/delete and related actor/job behavior must be one transaction. A model
@@ -141,7 +174,8 @@ The default model is a presentation actor, not a login-capable user:
 - host: `openwebui.tail1a2b3c.ts.net`
 - stable local `actor_id`, `source=openwebui`, external model/workspace metadata
 - `is_remote=true`, `is_loginable=false`, `can_miauth=false`,
-  `can_own_secret=false`
+  `can_own_secret=false`; it never becomes an owner, credential holder, or
+  Aria account
 
 The host is a fixed presentation/lookup value. The service does not discover
 external actors. A workspace is a container, not normally a user; if a future
@@ -150,7 +184,7 @@ row rather than reusing the model actor.
 
 Acceptance criteria:
 
-- [ ] Add workspace/model/link/cursor migrations and narrow repository
+- [ ] Add workspace/model/thread/turn-link migrations and narrow repository
   interfaces after OWUI-C and the #4 schema addendum.
 - [ ] Enforce same-workspace default-model FK, unique external IDs,
   stable actor IDs, and enabled/disabled constraints.
@@ -158,93 +192,169 @@ Acceptance criteria:
   exclude it from login and MiAuth paths.
 - [ ] Enforce owner-only workspace changes, `secret_ref`, feature flags, and
   fixed presentation-host validation.
-- [ ] Add migration, serialization, unknown/null field, and stable-cursor
-  contract tests.
+- [ ] Add thread-to-workspace, conversation, turn-link, revision, tombstone,
+  and status migrations; keep remote IDs nullable/opaque and never use them
+  for local identity, ordering, or authorization.
+- [ ] Add migration, serialization, unknown/null field, local reply-tree, and
+  local stable-cursor contract tests.
 
-## OWUI-S: adapter, sync, and thread/completion bridge
+## OWUI-B: outbound adapter, durable turn, and thread bridge
 
-Placement: after #8 and #6/OWUI-P, in parallel with #9/#10.
+Placement: after #8 and #6/OWUI-P, in parallel with #9. This replaces the
+former import-oriented OWUI-S track.
 
-### Chat-to-thread mapping
+### Local thread, message body, and reply tree
 
-- one persistent `chat_id` maps to one local thread;
-- `message.id` maps to `external_message_id`;
-- `(workspace_id, external_chat_id, external_message_id)` is the import
-  idempotency key;
-- `message.parentId` maps to the local parent relation;
-- `history.currentId` is stored as current/head metadata;
-- provider timestamp and local `received_at` remain separate;
-- title, model, sources, files, citations, and usage stay provenance metadata,
-  separate from source text.
+- An Aria `thread_id` is the conversation container and remains the local
+  source of truth.
+- An `OpenWebUIConversationLink` stores `thread_id`, `workspace_id`,
+  `default_model_id`, opaque `remote_chat_id`, state, optional
+  `remote_current_id`, and timestamps.
+- An `OpenWebUITurnLink` stores `local_message_id`, `local_parent_id`,
+  `remote_chat_id`, optional `remote_message_id`, optional `remote_parent_id`
+  and `remote_current_id`, `request_id`, attempt, and provider status.
+- Aria `reply_to_id` is the only source of truth for local parentage. Remote
+  `chat_id`, `message.id`, `parentId`, and `currentId` are correlation metadata;
+  they never replace local identity, ordering, authorization, or
+  `reply_to_id`.
+- `remote_chat_id` may be used only inside the adapter to address the linked
+  outbound chat for continuation; it is not a local thread ID or a client
+  capability.
+- The first Aria root message (`reply_to_id = null`) starts one new persistent
+  Open WebUI chat. A linear owner reply continues that same remote chat. All
+  local entries remain in the same Aria thread.
 
-Branches are retained when #6 can represent parent relations. Aria displays
-the `currentId` active branch by default; other branches remain children or
-related entries. If the existing domain cannot retain all branches, the MVP
-must explicitly select active-branch-only mode before implementation and
-must not silently discard the others; that mode and its loss of inactive
-branches must be recorded in OWUI-C and the release gate.
+The linear MVP example is `M0 -> A0 -> M1 -> A1`: `M0` is the owner root,
+`A0` is a child from the default-model VirtualActor, `M1` replies to `A0`, and
+`A1` replies to `M1`. Owner-authored bodies are immutable and authoritative;
+assistant responses are separate `llm_reply` entries. System prompts, hidden
+context, tool output, and provider debug data stay out of normal timeline
+body. Model, usage, provider timestamp, finish reason, request ID, remote IDs,
+and status are provenance metadata. Untrusted provider content is escaped for
+rendering and never executed as instructions.
 
-Role mapping:
+### Remote ID correlation
 
-| Open WebUI role | Local representation | Boundary rule |
-| --- | --- | --- |
-| `user` | owner post or imported user message | Keep authentication/provenance distinct; local source text is immutable |
-| `assistant` | `llm_reply` from the default model VirtualActor | Show only through the fixed virtual host |
-| `system` | system metadata | Do not expose system prompts in the normal timeline; owner-only/debug scope if required |
-| `tool`/`function`/`developer` | restricted metadata | Do not promote to normal actors/messages in MVP |
-| files/sources/citations | attachment/provenance metadata | Apply size, content-type, URL/SSRF, and secret-redaction rules |
+- `message.id`, when returned, is stored as `remote_message_id`; if absent,
+  the local `request_id` remains the correlation key.
+- `message.parentId`, when accepted or returned, is stored as
+  `remote_parent_id`; the local parent is always `local_parent_id`/
+  `reply_to_id`.
+- `history.currentId` or `current_message_id`, when returned, is stored as
+  `remote_current_id`; the local current head is selected from the Aria reply
+  tree. A remote current mismatch fails closed and must not mix another branch
+  into the same remote chat.
+- Remote IDs are opaque nullable strings. They must not be exposed in Aria
+  account tokens, public URLs, or used as a chronology cursor.
 
-External assistant edits create a revision/tombstone rather than destroying a
-local entry. External deletes become `deleted`/`hidden` provenance. Equality is
-based on external IDs/links, never body text.
+Whether the target API creates persistent chat on the first completion, lets
+the adapter continue it, accepts parent/current fields, and returns message
+IDs is version-specific. OWUI-C must verify these behaviors before OWUI-B
+starts; no direct Open WebUI database access is permitted.
 
-Absence from a partial, filtered, or permission-limited response is not
-treated as deletion. A tombstone requires an explicit provider deletion signal
-or a verified complete snapshot according to the pinned contract.
+### Outbound order, cursor, and single-flight
 
-Imported `user` messages are accepted only when the pinned workspace contract
-maps their external author to the single local owner. Messages from any other
-author are quarantined as restricted provenance or make the sync contract
-fail; they must not become another login-capable or timeline actor. Message
-content, system text, tool metadata, and citations are untrusted data and are
-never executed or treated as instructions. File/source URLs are metadata-only
-in this MVP unless a separately allowlisted, SSRF-safe fetch contract is
-accepted.
+This feature has no inbound Open WebUI cursor. It does not list, open, import,
+pull, reconcile, or browse existing remote chats. Local timeline pagination
+continues to use #6's stable cursor; remote IDs never determine chronology.
 
-### Completion bridge
+The send/receive order is:
 
-An owner post and its `OpenWebUIJob` intent are committed atomically before
-the provider call. The provider may fail without making the post disappear.
-The bridge stores the submitted message sequence and response against the
-local chat link. A stateless completion endpoint must not be presented as
-persistent remote history. MVP uses a buffered final response or an explicit
-partial/failed assistant entry; streaming is optional.
+1. Accept an owner-authenticated Aria create/reply request.
+2. Validate same-thread parentage, owner/model actor permissions, cycle, and
+   orphan rules.
+3. Commit the local message and durable turn-job intent atomically.
+4. Under a thread-level lease/single-flight, create a new remote chat for a
+   root or construct the selected local root-to-parent path for continuation.
+5. Send the new owner turn through `StartChat`, `ContinueTurn`, or
+   `CompleteTurn` using the configured default model.
+6. Receive a buffered final response or ordered stream events.
+7. Save the assistant child, remote correlation metadata, provenance, and
+   final job status atomically; provider failure never removes the local post.
+
+The selected local path follows `reply_to_id` from the chosen parent to the
+root, then sends root-to-parent order followed by the new owner turn. A
+visited set rejects cycles before any provider call. Missing parents are
+orphans, not implicit roots; they are quarantined or failed for manual repair.
+Only one active generation per thread is allowed in the linear MVP. A
+concurrent request is pending/conflict/retry according to local policy, never
+an unbounded concurrent remote turn.
+
+### Idempotency and failure boundary
+
+- Turn key: `thread_id + local_message_id + selected_parent_id + model_id +
+  revision`.
+- Job key: turn key plus generation attempt; duplicate local requests return
+  the existing job/result and do not repeat a provider call.
+- One logical request has one local assistant entry. Stream chunks append to
+  that entry with sequence/checkpoint deduplication.
+- Response upsert uses a unique local `request_id` and compare-and-set. If a
+  remote ID exists, `remote_chat_id + remote_message_id` is also checked; a
+  remote ID attached to different local requests is a contract failure.
+- A provider idempotency key or result lookup is required before automatic
+  replay of an ambiguous completion. Without it, timeout or connection loss
+  is `ambiguous/dead` and requires an explicit owner recovery action.
+- Loss of the initial chat-creation response must not automatically create a
+  second remote chat. It is also `ambiguous/dead` until manually resolved.
+- Parent self-reference, ancestor cycle, descendant/unknown parent, parent in
+  another thread, or parent belonging to another owner is rejected before
+  sending. Stale branch responses do not move the local current head.
+
+The local post is always durable before any provider call. Remote success or
+failure is an asynchronous result and cannot determine whether the Aria post
+exists.
+
+### Acceptance criteria
+
+- [ ] Add an `OpenWebUIProvider` port and HTTP adapter implementing
+  `StartChat`, `ContinueTurn`, and `CompleteTurn` with timeout, redirect-hop,
+  request/message/response-size bounds, TLS/origin, Bearer/key-header,
+  cancellation, and redacted-error handling in one boundary.
+- [ ] Add an `openwebui_turn` durable job using #8 leases, bounded retry/dead
+  state, restart recovery, thread single-flight, and local idempotency.
+- [ ] Implement local reply-tree path construction, new-chat versus
+  continuation, assistant-child mapping, remote correlation metadata,
+  provenance, partial/failure status, and no source-text overwrite.
+- [ ] Implement owner action -> local post -> durable job -> outbound chat
+  turn -> assistant entry E2E; local post success must not depend on provider
+  success.
+- [ ] Test linear ordering, duplicates, response-loss ambiguity, cycles,
+  orphans, stale branches, concurrent turns, outage, auth failure, rate limit,
+  malformed response, schema drift, and cancellation.
+
+## OWUI-R: optional release gate
+
+Placement: attached to #13 only when the outbound feature is promoted into
+the same release. It never blocks the original #1 MVP while the feature flag
+is off.
 
 Acceptance criteria:
 
-- [ ] Add an `OpenWebUIProvider` port and HTTP adapter with timeout, redirect,
-  request/message/response-size bounds, TLS/origin, Bearer/key-header, and
-  redacted-error handling in one boundary.
-- [ ] Add `sync_workspace`, `sync_chat`, and `openwebui_completion` durable
-  jobs using #8 leases, bounded retry/dead state, restart recovery, and
-  idempotency. Cursor advancement must be transactional with the completed
-  page/detail upserts and must stop on any partial or contract-failed page.
-- [ ] Implement chat/message, parent/current branch, provenance,
-  revision/tombstone mapping without overwriting user-authored text.
-- [ ] Implement owner action -> post -> job -> completion -> assistant entry
-  E2E; local post success must not depend on provider success.
-- [ ] Test read-only cursor sync, duplicates, reordering, branches, edits,
-  deletes, outage, auth failure, and schema drift.
+- [ ] Feature-off regression proves the existing #1 auth, post, reply, thread,
+  and source-ingestion behavior is unchanged.
+- [ ] Owner root → assistant → follow-up → assistant is restored after
+  restart, with the same local thread and local `reply_to_id` tree.
+- [ ] Provider outage still saves the Aria post; duplicate delivery creates no
+  second assistant entry or remote chat.
+- [ ] Initial remote chat creation response loss becomes `ambiguous/dead` and
+  never silently creates a duplicate chat.
+- [ ] Target-instance evidence covers persistent chat creation/continuation,
+  default-model permission, completion finish, and any enabled stream finish.
+- [ ] Keys, prompts, bodies, stream chunks, remote IDs, and cookies are absent
+  from logs, traces, fixtures, backups, and error responses.
+- [ ] Unsupported branch, regeneration, provider edit/delete, existing-chat
+  import/list/pull, and history-browsing behavior is not advertised as
+  successful API/UI capability.
 
 ## Auth, permission, and secret boundary
 
-The four identities remain distinct:
+The authentication and execution boundaries remain distinct:
 
-1. local owner MiAuth/session;
-2. local API token used by Aria;
-3. workspace-scoped Open WebUI credential/API key;
-4. VirtualActor, which is presentation-only and not an authentication
-   principal.
+1. local owner MiAuth/session and local API token used by Aria;
+2. workspace-scoped Open WebUI credential/API key;
+3. default-model VirtualActor, which is presentation-only and not an
+   authentication principal;
+4. the server-side `OpenWebUITurnJob` worker identity.
 
 The local owner must already be authenticated through the #2 MiAuth/local API
 token boundary. An Open WebUI credential cannot authenticate Aria, create a
@@ -253,28 +363,31 @@ Open WebUI calls are made only by the server-side adapter with the
 workspace-scoped credential.
 
 The completion bridge always uses the enabled workspace's configured
-`default_model_id`; no Aria request may select an arbitrary workspace or model.
-The adapter also verifies that the model belongs to that workspace before any
-provider call.
+`default_model_id`; no Aria request may select an arbitrary workspace, model,
+remote chat ID, or parent ID. The server resolves the local thread/link and
+parent path, and the adapter verifies that the model belongs to the workspace
+before any provider call.
 
 Open WebUI uses a dedicated low-privilege workspace account/key. Only a
 `secret_ref` crosses the domain/config boundary; the raw key is isolated in
 the adapter/secret store and is never written to the database, fixtures, URL,
 error body, logs, traces, backups, or planning documents. Rotation/revocation
 and the responsible operator are documented before enabling the feature.
-401/403 are permanent
-`auth_failed` states until reauthentication or rotation; they are not blindly
-retried.
+401/403 are permanent `auth_failed` states until reauthentication, permission
+correction, or rotation; they are not blindly retried. Remote chat/message
+bodies, prompts, stream chunks, provider request IDs, and local correlation
+IDs are also redacted from diagnostics where they could contain user content.
 
 Default permissions:
 
-- workspace creation, credential rotation, model refresh, sync, and
-  generation are owner-only;
-- local timeline access follows the existing #1/#5/#7 owner policy;
+- workspace configuration, credential rotation, model refresh, bridge
+  triggering, and status viewing are owner-only;
+- local create/reply, thread reload, and timeline access follow the existing
+  #1/#5/#7 owner policy;
 - VirtualActor cannot log in, use MiAuth, own credentials, or perform remote
   actions;
-- arbitrary workspace/model switching and tool/function/MCP execution are
-  outside MVP;
+- arbitrary workspace/model/remote-chat switching and tool/function/MCP
+  execution are outside MVP;
 - user-supplied base URL, host, redirect, and callback are never used as-is;
   adapter validation enforces HTTPS, fixed origin allowlist, redirect-hop
   revalidation (or redirects disabled), timeout, response-size limits, and
@@ -282,55 +395,110 @@ Default permissions:
   permitted only as an explicit deployment-provisioned origin in the fixed
   allowlist; arbitrary private addresses remain rejected.
 
+Notifications are deliberately narrow: local owner-post persistence is
+independent of provider success; completion updates the same thread's local
+assistant entry and job status; and MVP uses Aria poll/reload rather than a
+required streaming/WebSocket notification. There is no VirtualActor
+notification, remote federation notification, or other-user fan-out. An
+`auth_failed`, `ambiguous`, or `contract_failed` result is owner-only
+status/system metadata, never a model response or implicit mention/unread
+notification.
+
 Tailnet reachability is a deployment prerequisite, not application
 authorization. Network identity cannot replace owner permission checks.
 
-## Sync, idempotency, cursor, retry, and error contract
+## Outbound job, retry, and error contract
 
-Sync runs on #8's SQLite-backed durable jobs:
+This feature has no inbound Open WebUI synchronization. There is no
+`ListChats`, `GetChat`, remote history cursor, existing-chat reconciliation, or
+remote edit/delete pull. The only durable job is an owner-triggered outbound
+turn on #8's SQLite-backed lease/retry infrastructure.
 
-- workspace pull obtains pinned chat list/detail pages and stores cursor,
-  `updated_at`, and last successful sync only after the corresponding page and
-  detail upserts commit;
-- per-chat sync upserts the complete message tree;
-- outbound generation runs after owner post commit under a leased job;
-- imports use `(workspace_id, external_chat_id, external_message_id)`;
-  generation persists a unique local request/correlation ID before calling the
-  provider and uses an atomic local response upsert to suppress duplicate
-  assistant entries. This does not make a non-idempotent remote completion
-  exactly-once: OWUI-C must verify a provider idempotency key or result lookup;
-  without one, an ambiguous timeout is not blindly retried and the job is
-  marked dead for operator recovery;
-- cursors include a provider-defined timestamp plus an opaque tie-breaker;
-  timestamp alone is not sufficient. Cursor inclusivity/exclusivity and the
-  provider's ordering must be pinned in OWUI-C; a cursor advances only after
-  the complete page/detail transaction succeeds.
-- statuses distinguish `healthy`, `degraded`, `auth_failed`,
-  `contract_failed`, and `retry_exhausted`.
+- The local post and `OpenWebUITurnJob` intent commit atomically before the
+  provider call.
+- A thread-level lease/single-flight serializes the linear MVP's active turn.
+  Expired leases recover after restart without losing the local post.
+- The local turn key and unique `request_id` suppress duplicate local jobs and
+  assistant entries. Stream chunks append to the same entry by sequence and
+  checkpoint.
+- A cursor is used only by the existing local #6 timeline. Remote IDs and
+  provider timestamps never become a chronology cursor for this feature.
+- Status distinguishes `healthy`, `degraded`, `auth_failed`, `ambiguous`,
+  `contract_failed`, and `retry_exhausted`/dead.
 
 Error behavior:
 
 - 401/403: no blind retry; mark `auth_failed` and require owner
-  reauthentication, permission correction, or credential rotation;
-- 408/429/5xx/network timeout on idempotent reads: bounded exponential
-  backoff, honoring a valid `Retry-After` only within the configured maximum
-  delay, then dead/retry-exhausted at the configured limit;
-- completion timeouts or other ambiguous non-idempotent outcomes are not
-  automatically replayed unless the pinned provider contract supplies an
-  idempotency key or result lookup;
-- invalid model/request 4xx: permanent failure until configuration changes;
-- malformed/unknown schema: `contract_failed`; retain only redacted payload
-  metadata and metrics;
-- streaming disconnect: store incomplete partial content and do not duplicate
-  the assistant entry for the same local request;
-- remote edit/delete: revision/tombstone, never local hard delete;
-- missing messages in a partial or filtered response are not inferred to be
-  deleted;
-- restart: expired leases recover jobs; provider failure never removes the
-  committed owner post.
+  reauthentication, permission correction, or credential rotation.
+- Invalid model/request 4xx: permanent failure until configuration changes;
+  do not retry automatically.
+- 429/5xx/network timeout/disconnect: automatic retry is allowed only when the
+  pinned provider contract supplies a safe idempotency key or result lookup.
+  Honor a valid `Retry-After` only within a configured maximum delay and use a
+  bounded retry count; otherwise mark an ambiguous outcome dead for explicit
+  owner recovery.
+- Loss of the response after remote chat creation is ambiguous and must not
+  automatically create a second chat. The same applies to an uncertain
+  completion response.
+- Malformed/unknown response or stream event is `contract_failed`; retain only
+  redacted payload metadata and metrics.
+- Streaming disconnect, timeout, or late chunk leaves the assistant entry
+  incomplete/failed and never silently marks it done or creates a second entry.
+- Context cancellation stops the in-flight provider operation and releases
+  the lease safely; it does not roll back the already committed local post.
 
-MVP is not automatic bidirectional editing. The local mirror is the source of
-truth; external changes are provenance-bearing imports/revisions.
+## Follow-up branch, regeneration, edit, delete, and streaming lifecycle
+
+### Branches
+
+Aria may create a sibling by replying to any local ancestor. The local tree
+keeps both `M0 -> A0 -> M1 -> A1` and `M0 -> M1b -> A1b`; `A1b` is a new child,
+not an update to `A1`. MVP preserves the local branch but defaults to rejecting
+remote branch generation unless OWUI-C verifies safe branch control. A later
+policy may create one new remote chat per branch, send the selected local path
+as a stateless sequence without claiming persistent history, or explicitly
+reject the branch. Remote `currentId` must never be ignored to mix branches in
+one remote chat.
+
+### Regeneration
+
+Regeneration is a later feature. A retry for the same local parent creates a
+new local request and sibling assistant revision; it never overwrites the
+original assistant. Automatic replay requires provider idempotency or result
+lookup, otherwise it is an explicit owner action after an ambiguous/dead
+outcome.
+
+### Edit and delete
+
+Provider-side edit/delete calls and inbound reconciliation are non-goals. A
+local owner edit after sending creates an immutable new revision/branch and a
+new outbound turn; the sent body remains unchanged. Local delete is a soft
+delete/tombstone that preserves reply edges and provenance. A deleted message
+is not silently reused as a fresh context root; local policy chooses a new
+branch or rejects the request. Assistant revisions/tombstones are local only.
+
+### Streaming lifecycle
+
+Buffered final response is the MVP default. If streaming is enabled after the
+target contract is verified, the lifecycle is:
+
+1. Commit owner message and durable job intent.
+2. Create one assistant-child placeholder with `status=streaming` and
+   `done=false`.
+3. Append provider chunks to that entry by local request ID and sequence/
+   checkpoint, rejecting duplicates and out-of-order data.
+4. On a valid finish event, atomically persist body, usage, finish reason,
+   remote metadata, and `done=true`.
+5. Let Aria observe the placeholder through poll/reload; streaming/WebSocket
+   is not required for notification.
+6. On disconnect, malformed event, timeout, cancellation, or late chunk,
+   mark the entry incomplete/failed and never mark it done silently.
+7. Retry only when remote idempotency/result lookup makes replay safe; never
+   create a second assistant entry for one local request.
+
+System prompts, tool calls, hidden context, and chain-of-thought remain out of
+the timeline even if they appear in a provider stream. `CancelTurn` is not
+implemented unless the target provider proves cancellation safety.
 
 ## MVP and non-goals
 
@@ -339,75 +507,114 @@ truth; external changes are provenance-bearing imports/revisions.
 - one fixed, allowlisted workspace;
 - one owner-selected default model;
 - one non-loginable VirtualActor projection;
-- read-only persistent-chat pull only when the pinned target contract passes;
-- idempotent `chat_id`/message/parent sync;
-- one explicit owner-triggered completion and assistant entry;
-- cursor, job status, provenance, tombstone/revision;
-- restart, duplicate delivery, 401/403, 429/5xx, malformed response, and
-  credential-redaction tests.
+- an Aria root message creates a new persistent Open WebUI chat only after the
+  target contract proves creation and save semantics;
+- a linear Aria owner reply continues that same remote chat;
+- Aria local messages and assistant responses remain in the same local thread,
+  with local `reply_to_id` as the reply-tree source of truth;
+- opaque remote chat/message/parent/current IDs stored only as correlation
+  metadata;
+- atomic local post plus durable turn-job intent;
+- buffered final response by default, or streaming only when the target
+  contract and lifecycle are verified safely;
+- duplicate request, response-loss ambiguity, cycle, orphan, stale branch,
+  single-flight, auth/rate-limit, malformed response, restart, and
+  credential-redaction handling/tests.
 
 ### Excluded
 
+- opening, browsing, listing, searching, importing, or pulling existing
+  Open WebUI chats/history/messages;
+- `ListChats`, `GetChat`, remote cursor sync, existing-chat reconciliation, or
+  remote deletion-event ingestion;
+- converting an existing Open WebUI message tree into an Aria reply tree;
 - automatic discovery or management of all Open WebUI workspaces/models;
 - Misskey/ActivityPub federation, remote discovery, signatures,
   inbox/outbox, or remote callbacks;
 - tool/function/MCP execution or autonomous agent loops;
 - arbitrary Open WebUI URLs or unrestricted tenant switching;
 - complete bidirectional local/remote edit/delete synchronization;
+- same-remote-chat full branch management, remote branch replay, and
+  regeneration until a later pinned contract and policy;
+- provider-side edit/delete calls; local edits/deletes are later local
+  revision/tombstone behavior only;
 - required streaming, unlimited attachment-body ingestion, or system-prompt
   publication;
 - multi-user/role model, PostgreSQL, and custom UI.
 
 The feature must preserve #1's single-owner, non-federation, and
 non-tool-execution boundaries. Shared provider code with #9 may be reused,
-but chat-history import and VirtualActor remain behind a separate feature flag
-and release gate.
+but outbound chat creation/continuation and VirtualActor remain behind a
+separate feature flag and release gate. Existing Open WebUI chat import and
+pull-sync code is deliberately not a deferred TODO; it is outside this track.
+
+## Issue #1/#2 traceability
+
+| Existing requirement | Outbound feature impact | Owner / dependency |
+| --- | --- | --- |
+| #2 local/upstream MiAuth and token separation | Open WebUI credentials never authenticate Aria, bind an owner, or mint a local token | #2 → OWUI-C; unchanged #2 ADR |
+| #1 local post survives LLM/provider outage | Save Aria post and `OpenWebUITurnJob` intent atomically before any remote call | #4 + #8 + OWUI-B |
+| #1 thread/reply/restart behavior | Local `reply_to_id` and `thread_id` own the tree; remote IDs are metadata | #6 + OWUI-P + OWUI-B |
+| #1 LLM reply/follow-up remains separate | Default-model VirtualActor writes a separate assistant child; source text is immutable | #9 + OWUI-B, feature off by default |
+| #1 release/security/E2E gate | Outbound root/reply, ambiguity, restart, secret redaction, and notification policy are opt-in evidence | #13 → OWUI-R only on release promotion |
+| #1 non-goals | Existing-chat open/import/list/pull/reconciliation/history browsing, federation, tools, custom UI, and multi-user behavior stay excluded | #1/#2 boundary; no feature dependency |
 
 ## Implementation start conditions
 
-The first implementation item is OWUI-C-1 through OWUI-C-4: freeze the
+The first implementation item is OWUI-C: freeze the outbound-only
 boundary/compatibility contract, identity ADR, and redacted fixtures before
 writing migrations or adapters. Start only after these are known:
 
 - target Open WebUI version and API surface;
-- persistent-chat endpoint availability and field semantics;
+- concrete persistent-chat creation and continuation endpoint, including
+  first-request creation, save completion, and response-loss semantics;
 - real workspace/default-model IDs and permissions;
+- whether remote `chat_id`/`message.id`/`parentId`/`currentId` are returned or
+  accepted, and the explicit local branch policy when they are not;
 - credential provisioning, rotation, and revocation owner;
 - fixed HTTPS base URL and presentation-host allowlist;
-- whether full chat import is supported; otherwise select completion-only mode.
+- request/response/stream size, timeout, cancellation, and rate-limit bounds.
 
 If any target-instance contract is unverified, do not emulate success. Keep
-the feature disabled or use the explicitly documented completion-only mode.
+the feature disabled; completion-only mode does not satisfy the persistent-chat
+MVP goal.
 
 ## Verification and release gate
 
 - **Existing regression:** `gofmt`, `go test ./...`, `go vet ./...`, and
   `go test -race ./...` where concurrency/jobs are changed; feature flag off
   must leave #1 auth, posts, threads, and source ingestion unchanged.
-- **Contract:** fixture-only schema/nullable/unknown/error tests, API-version
-  drift, rate-limit behavior, and redaction with no credentials or network.
+- **Contract:** fixture-only creation/continuation, nullable/unknown/error,
+  response-loss, finish-event, stream-order, API-version drift, rate-limit,
+  and redaction tests with no credentials or network.
 - **Identity:** stable actor ID across display-name/handle changes,
   disabled/default switches, same external model IDs, and rejection of
   VirtualActor login/MiAuth.
-- **Thread:** chat/message idempotency, parent/current branch, reordering,
-  duplicate delivery, edit/delete revision, and source timestamp versus
-  `received_at`.
-- **Jobs:** outage, 429/5xx, 401/403, timeout, malformed response, lease
-  expiry, restart, retry exhaustion, and partial stream.
+- **Thread:** root→assistant→reply→assistant local `reply_to_id` tree,
+  selected-path ordering, duplicate delivery, cycles, orphans, stale branch,
+  local revision/tombstone, and restart persistence.
+- **Jobs:** outage, 429/5xx, 401/403, timeout, ambiguous create/completion,
+  malformed response, lease expiry, restart, retry exhaustion, single-flight,
+  cancellation, and partial stream.
 - **Security:** arbitrary base URL/redirect/host, private-IP/SSRF, oversized
-  payload, key leakage in logs/traces/fixtures/backups, and no
-  tool/function/MCP execution.
-- **Opt-in Aria E2E:** owner-only sync, default-model display, thread
-  reload/restart, backup/restore, rotation, permission denial, and provider
-  outage against the target instance only when explicitly enabled.
+  payload, key/prompt/body/remote-ID leakage in logs/traces/fixtures/backups,
+  owner-only permission, arbitrary remote identifiers, and no tool/function/
+  MCP execution.
+- **Notification:** local post success independent of provider result, no
+  implicit mention/unread or VirtualActor fan-out, and owner-only
+  auth/ambiguous/contract status metadata.
+- **Opt-in Aria E2E:** owner-only root/reply, default-model display, same-thread
+  reload/restart, duplicate request, response-loss recovery, rotation,
+  permission denial, and provider outage against the target instance only
+  when explicitly enabled.
 
 Only if the feature is promoted into the same release does #13 require the
-OWUI-S E2E/operations runbook, backup/restore, rotation, and security gate.
+OWUI-R E2E/operations runbook, backup/restore, rotation, and security gate.
 
 ## References
 
 - Open WebUI API reference: <https://docs.openwebui.com/reference/api-endpoints/>
 - Open WebUI API keys: <https://docs.openwebui.com/features/authentication-access/api-keys/>
 - Open WebUI database schema: <https://github.com/open-webui/docs/blob/main/docs/reference/database-schema.md>
-- Chat import/export and `history.currentId`:
+- Provider schema background for `parentId`/`currentId` correlation only:
   <https://github.com/open-webui/docs/blob/main/docs/features/chat-conversations/data-controls/import-export.md>
