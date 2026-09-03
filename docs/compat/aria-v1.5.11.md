@@ -68,7 +68,7 @@ redacted.
 | Endpoint | Classification | Why it is called | Authentication / scope boundary |
 | --- | --- | --- | --- |
 | `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The local session is bound to `LOCAL_ORIGIN`, its callback, and requested permissions; any owner verification uses `IDENTITY_ORIGIN` |
-| `POST /api/miauth/{session}/check` | **必要** | Completes the MiAuth flow | The session is the capability; no `i` body field |
+| `POST /api/miauth/{session}/check` | **必要** | Completes the MiAuth flow | `{session}` is a bearer capability/correlation secret for this auth attempt; no `i` body field. It is not owner-binding or token-minting authentication |
 | `POST /api/meta` | **必要** | Detects `features.miauth` and optionally canonicalizes the instance URI | Anonymous; no `i` body field |
 | `POST /api/i` | **必要** | Access-token login fallback and authenticated account bootstrap | `i` token; local `read:account` equivalent |
 | `POST /api/endpoints` | **要実機確認** | Aria probes endpoint availability before its edit path | The observed provider sends no token; exact anonymous behavior and response compatibility must be verified |
@@ -198,9 +198,18 @@ are **要実機確認**. The local server must use `LOCAL_ORIGIN` and its exact
 callback allowlist; it must reject any client attempt to select an upstream
 origin or an unconfigured callback.
 
+The `{session}` route value is the same opaque Aria route session ID in the
+`GET` URL and the `/api/miauth/{session}/check` path. It is a high-entropy
+bearer capability/correlation secret for accessing the state of that one local
+auth attempt, so it must not be logged or exposed in diagnostics. Possession
+permits polling/checking that attempt only; it is not proof of owner identity,
+owner binding, or authorization to mint a local API token. Those decisions
+require the server-side state and owner verification described by ADR-0001.
+
 ### `POST /api/miauth/{session}/check`
 
-Aria sends an empty body and no `i` token:
+Aria sends an empty body and no `i` token; the route ID in the URL is the only
+client-supplied handle:
 
 ```json
 {}
