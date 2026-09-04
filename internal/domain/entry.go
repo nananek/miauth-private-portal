@@ -111,6 +111,21 @@ type EntryRepository interface {
 	// id). When includeHidden is false, archived and hidden entries are
 	// excluded.
 	ListTimeline(ctx context.Context, page Page, includeHidden bool) ([]Entry, error)
+	// ListTimelineDesc returns up to limit entries ordered newest-first by
+	// (created_at, id). When before is nil it returns the most recent
+	// page; otherwise it returns entries strictly older than before in
+	// that same (created_at, id) order. It exists alongside ListTimeline
+	// (never replacing it) because Issue #7's Aria/Misskey-compatible
+	// home timeline needs a newest-first "last N, then older" query that
+	// ListTimeline's oldest-first After cursor cannot express; see
+	// docs/compat/aria-v1.5.11.md's pagination section. When includeHidden
+	// is false, archived and hidden entries are excluded.
+	ListTimelineDesc(ctx context.Context, before *Cursor, limit int, includeHidden bool) ([]Entry, error)
+	// CountByAuthor returns the total number of entries authored by
+	// actorID, including archived and hidden ones (a Misskey notesCount
+	// never decreases when a note is merely hidden/archived, only when it
+	// is actually deleted, which this service does not support).
+	CountByAuthor(ctx context.Context, actorID string) (int, error)
 	// UpdateBody replaces an entry's body and bumps updated_at. It is a
 	// persistence primitive only: use-case callers are responsible for
 	// restricting edits to the author's own user_post entries.

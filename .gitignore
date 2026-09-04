@@ -16,6 +16,10 @@ go.work.sum
 # Dependency vendoring (uncomment if this repository does not commit vendor/)
 # vendor/
 
+# Dart contract test package build artifacts (contract/aria_client);
+# pubspec.lock is committed for reproducibility, but .dart_tool/ is not.
+contract/aria_client/.dart_tool/
+
 # Build and temporary directories
 bin/
 dist/

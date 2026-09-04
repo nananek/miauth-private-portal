@@ -259,6 +259,108 @@ func TestEntryRepository_ListTimeline_ExcludesArchivedAndHiddenByDefault(t *test
 	}
 }
 
+// TestEntryRepository_ListTimelineDesc_NewestFirstWithPaging verifies the
+// newest-first "last N, then older" query Issue #7's home timeline needs,
+// paging via before the same way ListTimeline pages via After, just in the
+// opposite direction.
+func TestEntryRepository_ListTimelineDesc_NewestFirstWithPaging(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	now := time.Now()
+
+	var ids []string
+	for i := 0; i < 3; i++ {
+		root := mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Duration(i)*time.Minute))
+		ids = append(ids, root.ID) // ids[0] oldest, ids[2] newest
+	}
+
+	first, err := db.Entries.ListTimelineDesc(t.Context(), nil, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].ID != ids[2] || first[1].ID != ids[1] {
+		t.Fatalf("first page = %v, want [%s, %s]", entryIDs(first), ids[2], ids[1])
+	}
+
+	cursor := &domain.Cursor{CreatedAt: first[len(first)-1].CreatedAt, ID: first[len(first)-1].ID}
+	second, err := db.Entries.ListTimelineDesc(t.Context(), cursor, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].ID != ids[0] {
+		t.Fatalf("second page = %v, want [%s]", entryIDs(second), ids[0])
+	}
+
+	third, err := db.Entries.ListTimelineDesc(t.Context(), &domain.Cursor{CreatedAt: second[0].CreatedAt, ID: second[0].ID}, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 0 {
+		t.Errorf("expected no entries past the last page, got %d", len(third))
+	}
+}
+
+func TestEntryRepository_ListTimelineDesc_ExcludesArchivedAndHiddenByDefault(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	now := time.Now()
+
+	visible := mustCreateThreadAndRoot(t, db, actorID, now)
+	hidden := mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Minute))
+	if err := db.Entries.SetHidden(t.Context(), hidden.ID, true, now); err != nil {
+		t.Fatal(err)
+	}
+
+	visibleOnly, err := db.Entries.ListTimelineDesc(t.Context(), nil, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visibleOnly) != 1 || visibleOnly[0].ID != visible.ID {
+		t.Errorf("ListTimelineDesc(includeHidden=false) = %v, want only %s", entryIDs(visibleOnly), visible.ID)
+	}
+}
+
+func entryIDs(entries []domain.Entry) []string {
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+	}
+	return ids
+}
+
+func TestEntryRepository_CountByAuthor(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	otherActor, err := db.Actors.GetByType(t.Context(), domain.ActorAssistant)
+	if err != nil {
+		t.Fatalf("get assistant actor: %v", err)
+	}
+	other := otherActor.ID
+	now := time.Now()
+
+	if n, err := db.Entries.CountByAuthor(t.Context(), actorID); err != nil || n != 0 {
+		t.Fatalf("CountByAuthor(no entries) = (%d, %v), want (0, nil)", n, err)
+	}
+
+	root := mustCreateThreadAndRoot(t, db, actorID, now)
+	if err := db.Entries.SetHidden(t.Context(), root.ID, true, now); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Minute))
+
+	n, err := db.Entries.CountByAuthor(t.Context(), actorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("CountByAuthor = %d, want 2 (hidden entries still count)", n)
+	}
+
+	if n, err := db.Entries.CountByAuthor(t.Context(), other); err != nil || n != 0 {
+		t.Errorf("CountByAuthor(other actor) = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
 func TestEntryRepository_SetProcessingStatus(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)

@@ -1,0 +1,18 @@
+name: aria_client_contract_test
+description: >-
+  Contract tests that drive miauth-private-portal's note API through
+  misskey_dart, the same client library Aria uses, in place of the
+  unautomated real-Aria E2E acceptance step for Issue #7. See
+  docs/compat/aria-v1.5.11.md's "Issue #7 implementation notes" and
+  AGENTS.md's "Tests and verification" section.
+publish_to: "none"
+
+environment:
+  sdk: ">=3.11.0 <4.0.0"
+
+dev_dependencies:
+  test: ^1.30.0
+  misskey_dart:
+    git:
+      url: https://github.com/poppingmoon/misskey_dart
+      ref: 14176c515a005a9fb01d3e6365a49b5a5d387a92

@@ -1,4 +1,4 @@
-.PHONY: check fmt fmt-check vet test test-race build run tidy
+.PHONY: check fmt fmt-check vet test test-race build run tidy contract-test
 
 GO_FILES := $(shell git ls-files '*.go')
 
@@ -31,3 +31,14 @@ run: build
 
 tidy:
 	go mod tidy
+
+# contract-test runs Issue #7's misskey_dart contract test suite against
+# a real bin/server (scripts/run-contract-tests.sh; see fetch_doc
+# key='plan' section 9 and docs/compat/aria-v1.5.11.md's "Issue #7
+# implementation notes"). It builds and runs cmd/fakemisskey, a
+# test-only stand-in for the upstream Misskey instance that
+# unconditionally approves every session — deliberately not part of the
+# `build` target or the Dockerfile. Requires the Dart SDK in addition to
+# this target's own Go build.
+contract-test:
+	./scripts/run-contract-tests.sh

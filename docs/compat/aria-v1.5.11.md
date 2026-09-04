@@ -527,6 +527,89 @@ contracts; the later issue owns implementation and evidence.
 | No AppFlowy/notebook export in MVP | #4, #13 | Notebook/AppFlowy export is Future #14 |
 | No arbitrary crawling, SMTP, mail mutation, or autonomous unlimited tools | #11, #12, #13 | Additional source adapters are Future #17; mail stays read-only |
 
+## Issue #7 implementation notes
+
+Issue #7 implements the endpoint handlers this document specifies. The
+decisions below fix behavior this document left 要実機確認 (needs
+real-instance verification); **no real Aria/Misskey end-to-end
+verification has been performed for this issue** — the 要実機確認 labels
+above remain accurate and unchanged. These decisions must be revisited
+against a real Aria client before any release gate treats them as
+verified.
+
+- **Error shape**: implemented as `{"error":{"id","code","message","kind","info"}}`
+  with locally-chosen `code` strings (`INVALID_PARAM`, `NO_SUCH_NOTE`,
+  `UNSUPPORTED_FEATURE`, `AUTHENTICATION_FAILED`, `INTERNAL_ERROR`), all
+  returned with a 400 status except authentication failures (401) and
+  internal errors (500). These are this implementation's contract, not a
+  confirmed match to a real Misskey instance's codes/statuses.
+- **Missing, archived, and hidden notes** are never distinguished:
+  `/api/notes/show`, the conversation ancestor chain, the children list,
+  and `/api/notes/create`'s `replyId` all treat an unknown, archived, or
+  hidden note ID identically (`NO_SUCH_NOTE` for the requested/reply-target
+  ID itself; silently excluded when it appears inside a list). Replying to
+  a hidden/archived note is rejected rather than silently succeeding, even
+  though `timeline.CreateReply`'s own parent lookup does not filter by
+  visibility — the httpserver handler checks this itself, the same way it
+  does for every note-reading endpoint.
+- **Home timeline pagination** is newest-first via a dedicated
+  `EntryRepository.ListTimelineDesc` (see internal/domain/entry.go), never
+  the oldest-first `ListTimeline` cursor. `limit` defaults to 30 and
+  clamps to 100; `untilId` resolves through the referenced entry's
+  `(created_at, id)` and pages strictly older. `sinceId`/`sinceDate`/
+  `untilDate` are not implemented (accepted-and-ignored is not applicable
+  since they are simply never read).
+- **Conversation ordering**: the ancestor chain is oldest-first (root,
+  then its child, ..., then the subject's direct parent), excluding the
+  subject note itself.
+- **Children pagination**: continues `ListChildren`'s existing
+  oldest-first order (no separate newest-first children query exists);
+  `untilId` resumes after the matching child. The lookup searches
+  `ListChildren`'s full result, including archived/hidden children, so an
+  anchor that was visible on an earlier page but has since been
+  hidden/archived still resolves to its correct position and pagination
+  keeps surfacing later visible children — mirroring `/api/notes/timeline`'s
+  `GetEntry`-based `untilId` lookup, which likewise ignores visibility when
+  resolving the cursor. Only an `untilId` that matches no child at all
+  (a stale/unknown ID, never part of this note's children) yields an empty
+  page rather than restarting from the first page, matching the home
+  timeline's unknown-`untilId` handling.
+- **`/api/i`** always returns the `MeDetailed` superset regardless of
+  which of Aria's two call sites is asking (its extra required fields
+  parse successfully as the token-login fallback's minimal `{id,
+  username}` shape too). `isModerator`/`isAdmin` are `true` (the single
+  owner is this deployment's only login-capable, administrator-equivalent
+  actor); `alwaysMarkNsfw`/`carefulBot`/`autoAcceptFollowed` are `false`.
+- **`notesCount`** is now real on both `/api/i` and
+  `/api/miauth/{session}/check`'s `UserDetailedNotMe`, counting every
+  entry (including archived/hidden ones) authored by the actor.
+- **`/api/notes/create`** rejects `visibleUserIds`, `reactionAcceptance`,
+  `renoteId`, `channelId`, `poll`, `scheduledAt`, a non-empty `fileIds`,
+  and any `visibility` other than `"public"` with an explicit
+  `UNSUPPORTED_FEATURE` error rather than silently ignoring them.
+- **`/api/notes/children`**'s `depth` request field is accepted but not
+  otherwise enforced: `ListChildren` already returns only direct children
+  regardless of the requested depth.
+- **Real Aria end-to-end verification substitute**: this issue's
+  acceptance criteria call for a real Aria v1.5.11 login → post → reload
+  → reply → conversation run. That has not been performed. In its place,
+  `contract/aria_client` (a Dart package depending on the pinned
+  `misskey_dart` commit above, run via `make contract-test` /
+  `scripts/run-contract-tests.sh`) decodes real responses from a running
+  `bin/server` with the actual generated parser Aria itself uses, and
+  asserts on the decoded fields (created-note round trip, timeline
+  ordering and `untilId` paging, `notesCount` accounting,
+  `NO_SUCH_NOTE`/`MisskeyException` decoding). This is judged sufficient
+  to close Issue #7 without a real device run: the specific residual risk
+  the wire-shape 要実機確認 labels above exist for — Aria's real decoder
+  rejecting a response this service considers valid — is exactly what
+  this suite exercises. What it cannot cover is anything about the real
+  Aria *application* beyond its HTTP client library: UI rendering, its
+  MiAuth browser/deep-link consent flow end to end (`cmd/fakemisskey`
+  approves unconditionally rather than reproducing a consent screen), and
+  any real Misskey server's actual behavior where this document still
+  says 要実機確認. Those remain open until a real device run happens.
+
 ## Non-goals and implementation boundary
 
 This document does not implement endpoint handlers, a database, migrations,

@@ -14,6 +14,7 @@ import (
 
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
 // Options configures the HTTP server. It intentionally contains only
@@ -42,6 +43,11 @@ type Options struct {
 	MiAuthService  *miauth.Service
 	LocalOrigin    string
 	IdentityOrigin string
+
+	// TimelineService additionally configures Issue #7's minimal
+	// Aria/Misskey-compatible note routes; see NewServer. A nil
+	// TimelineService (or a nil MiAuthService) registers none of them.
+	TimelineService *timeline.Service
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

@@ -1,0 +1,21 @@
+# Keep local secrets and runtime state out of the build context; the
+# server reads .env/DB_PATH from the container's environment/volume
+# instead (see README.md's Container section).
+.env
+.env.*
+!.env.example
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+.git/
+bin/
+dist/
+tmp/
+*.log
+
+.DS_Store
+.idea/
+.vscode/

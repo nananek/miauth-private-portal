@@ -1,10 +1,11 @@
 # Configuration
 
 This document covers the configuration and HTTP-routing foundation added by
-Issue #3, the SQLite persistence layer added by Issue #4, and the bridged
-MiAuth authentication flow added by Issue #5. It does not cover the post API
-or LLM configuration; those are added by later issues and will extend this
-document rather than replace it. The normative design for MiAuth is
+Issue #3, the SQLite persistence layer added by Issue #4, the bridged
+MiAuth authentication flow added by Issue #5, and the Aria/Misskey-compatible
+note API added by Issue #7. It does not cover LLM configuration; that is
+added by a later issue and will extend this document rather than replace
+it. The normative design for MiAuth is
 [`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
 (ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -201,6 +202,54 @@ first-login-wins path.
   expected to add an editable, database-backed profile so an operator does
   not need to edit config to change them.
 
+## Note API
+
+Issue #7 adds the minimal Aria/Misskey-compatible note surface
+[`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md) specifies. This
+section covers only the operational surface (routes, scopes, wiring); the
+wire contract itself (request/response shapes, error codes, pagination and
+visibility decisions) is normative there, in its "Issue #7 implementation
+notes" section.
+
+### Routes
+
+| Route | Auth | Scope |
+| --- | --- | --- |
+| `POST /api/meta` | Anonymous | — |
+| `POST /api/endpoints` | Anonymous | — |
+| `POST /api/i` | `i` token | `read:account` |
+| `POST /api/notes/create` | `i` token | `write:notes` |
+| `POST /api/notes/timeline` | `i` token | `read:notes` |
+| `POST /api/notes/show` | `i` token | `read:notes` |
+| `POST /api/notes/conversation` | `i` token | `read:notes` |
+| `POST /api/notes/children` | `i` token | `read:notes` |
+
+These routes register only when `httpserver.Options.TimelineService` is
+also set alongside `MiAuthService` (see `internal/httpserver.NewServer`);
+`cmd/server` always wires both. `POST /api/notes/update` and the
+WebSocket `/streaming` timeline channel are deliberately not implemented
+(docs/compat/aria-v1.5.11.md classifies both **不要** for this MVP), so
+`POST /api/endpoints` never advertises `notes/update`.
+
+### Wiring
+
+`internal/timeline.Service` is the use-case layer these handlers call
+into; `cmd/server` constructs it from the same `*sqlite.DB` as
+`internal/miauth.Service` (one `db.Repos`, two independent services, no
+shared mutable state beyond the database itself).
+
+### Contract testing
+
+`cmd/fakemisskey` and `contract/aria_client` (run via `make
+contract-test`) are test-only tooling that verifies this note API surface
+against `misskey_dart`, the client library Aria itself uses — see
+[README.md](../../README.md#contract-tests) and
+`docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for what
+it covers. `cmd/fakemisskey` unconditionally approves every MiAuth
+session; it is never reachable from a production deployment, since
+neither the `build` Makefile target nor the `Dockerfile` build or copy
+it.
+
 ## SQLite
 
 `internal/storage/sqlite.Open` is the only place in this service that opens
@@ -273,3 +322,18 @@ cancelled `context.Context`), marks the registry not-ready, and calls
 in-flight requests do not finish within that window, it force-closes
 remaining connections via `http.Server.Close` rather than hanging
 indefinitely.
+
+## Running in a container
+
+See the README's [Container](../../README.md#container) section for the
+`docker build`/`docker run` commands and volume/uid requirements. Two
+configuration points specific to a container deployment:
+
+- `.env` is never baked into the image (`.dockerignore` excludes it):
+  configure a container deployment entirely through environment
+  variables (`docker run -e`, a Compose `environment:` block, or your
+  orchestrator's equivalent), never a mounted `.env` file.
+- The "set but empty" startup error above (an unresolved
+  `${VAR}` in a Compose file or an orchestrator's env-from-secret
+  wiring) is a common way a container-based deployment trips this check;
+  the fix is the same — unset the variable rather than passing it empty.
