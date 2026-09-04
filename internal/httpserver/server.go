@@ -26,6 +26,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
 // Server wraps an http.ServeMux, applying access-log middleware to every
@@ -35,6 +36,7 @@ type Server struct {
 	logger *slog.Logger
 
 	miauth         *miauth.Service
+	timeline       *timeline.Service
 	localOrigin    string
 	identityOrigin string
 }
@@ -48,11 +50,21 @@ type Server struct {
 // MiAuthService registers none of them, leaving a Server with only the
 // health routes — the shape every httpserver test predating Issue #5
 // still expects.
+//
+// opts.TimelineService additionally configures Issue #7's minimal
+// Aria/Misskey-compatible note routes (POST /api/meta, /api/i,
+// /api/endpoints, /api/notes/create, /api/notes/timeline,
+// /api/notes/show, /api/notes/conversation, /api/notes/children). They
+// register only when both opts.MiAuthService and opts.TimelineService
+// are non-nil: every protected note route authenticates through
+// RequireScope (which needs the MiAuth service), and there is no
+// meaningful note API without a timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
 	s := &Server{
 		mux:            http.NewServeMux(),
 		logger:         logger,
 		miauth:         opts.MiAuthService,
+		timeline:       opts.TimelineService,
 		localOrigin:    opts.LocalOrigin,
 		identityOrigin: opts.IdentityOrigin,
 	}
@@ -69,6 +81,17 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("GET /miauth/callback", http.HandlerFunc(s.handleMiAuthCallback))
 		s.Handle("GET /miauth/bootstrap/{gate}", http.HandlerFunc(s.handleMiAuthBootstrapStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
+	}
+
+	if opts.MiAuthService != nil && opts.TimelineService != nil {
+		s.Handle("POST /api/meta", http.HandlerFunc(s.handleMeta))
+		s.Handle("POST /api/endpoints", http.HandlerFunc(s.handleEndpoints))
+		s.Handle("POST /api/i", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleAPII)))
+		s.Handle("POST /api/notes/create", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesCreate)))
+		s.Handle("POST /api/notes/timeline", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesTimeline)))
+		s.Handle("POST /api/notes/show", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesShow)))
+		s.Handle("POST /api/notes/conversation", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesConversation)))
+		s.Handle("POST /api/notes/children", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesChildren)))
 	}
 
 	return s

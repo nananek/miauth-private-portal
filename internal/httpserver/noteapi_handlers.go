@@ -1,0 +1,473 @@
+package httpserver
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
+)
+
+// defaultTimelineLimit and maxTimelineLimit bound /api/notes/timeline and
+// /api/notes/children paging. docs/compat/aria-v1.5.11.md leaves the
+// server's exact limit bounds 要実機確認 (needs real-instance
+// verification); Aria's observed request always sends limit: 30, and 100
+// is a conventional Misskey-style upper clamp chosen for this
+// implementation rather than an unbounded caller-supplied value.
+const (
+	defaultTimelineLimit = 30
+	maxTimelineLimit     = 100
+)
+
+// writeJSON writes status and v as this service's default JSON success
+// response.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// decodeJSONBody decodes r's JSON body into T, treating an empty body the
+// same as `{}` (docs/compat/aria-v1.5.11.md: several endpoints, e.g.
+// /api/meta and /api/endpoints, send an empty object). It reports false
+// only for actually malformed JSON.
+func decodeJSONBody[T any](r *http.Request) (T, bool) {
+	var v T
+	if r.Body == nil {
+		return v, true
+	}
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return v, true
+		}
+		return v, false
+	}
+	return v, true
+}
+
+// entryVisible reports whether e should ever be projected onto a wire
+// Note: an archived or hidden entry must not be, matching notes/show's
+// "unify not-found and hidden" treatment used consistently across every
+// note-reading endpoint below.
+func entryVisible(e domain.Entry) bool {
+	return e.ArchivedAt == nil && e.HiddenAt == nil
+}
+
+// handleMeta handles POST /api/meta, anonymous and body-independent
+// (Aria sends `{}`). It returns only LOCAL_ORIGIN, never IDENTITY_ORIGIN
+// (docs/compat/aria-v1.5.11.md and ADR-0001 both require the two origins
+// stay distinct and client-invisible to each other).
+func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, metaResponse{URI: s.localOrigin, Features: metaFeatures{MiAuth: true}})
+}
+
+type metaResponse struct {
+	URI      string       `json:"uri"`
+	Features metaFeatures `json:"features"`
+}
+
+type metaFeatures struct {
+	MiAuth bool `json:"miauth"`
+}
+
+// implementedEndpoints is POST /api/endpoints' anonymous response: only
+// the note-API paths this issue actually implements, so Aria's edit-path
+// probe (docs/compat/aria-v1.5.11.md) never sees notes/update advertised.
+var implementedEndpoints = []string{
+	"meta",
+	"endpoints",
+	"i",
+	"notes/create",
+	"notes/timeline",
+	"notes/show",
+	"notes/conversation",
+	"notes/children",
+}
+
+func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, implementedEndpoints)
+}
+
+// handleAPII handles POST /api/i. See meDetailed's doc comment for why
+// this always returns the MeDetailed superset regardless of which of
+// Aria's two observed call sites is asking.
+func (s *Server) handleAPII(w http.ResponseWriter, r *http.Request) {
+	actorID := LocalActorIDFromContext(r.Context())
+	owner, err := s.miauth.DescribeOwner(r.Context(), actorID)
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newMeDetailed(owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
+}
+
+// notesCreateRequest is the subset of Aria's create/reply request this
+// service accepts. Every field beyond text/replyId/visibility/fileIds is
+// present only so handleNotesCreate can detect it and fail explicitly
+// (AGENTS.md: "Unsupported endpoints must fail explicitly and
+// consistently; do not return fabricated success" — the same rule
+// applies to unsupported fields on a supported endpoint).
+type notesCreateRequest struct {
+	Text               *string         `json:"text"`
+	ReplyID            *string         `json:"replyId"`
+	Visibility         *string         `json:"visibility"`
+	FileIDs            []string        `json:"fileIds"`
+	VisibleUserIDs     []string        `json:"visibleUserIds"`
+	ReactionAcceptance *string         `json:"reactionAcceptance"`
+	RenoteID           *string         `json:"renoteId"`
+	ChannelID          *string         `json:"channelId"`
+	Poll               json.RawMessage `json:"poll"`
+	ScheduledAt        *int64          `json:"scheduledAt"`
+}
+
+type createdNoteResponse struct {
+	CreatedNote note `json:"createdNote"`
+}
+
+func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesCreateRequest](r)
+	if !ok {
+		writeInvalidParam(w, "malformed request body")
+		return
+	}
+
+	switch {
+	case len(req.VisibleUserIDs) > 0:
+		writeUnsupportedFeature(w, "visibleUserIds")
+		return
+	case req.ReactionAcceptance != nil:
+		writeUnsupportedFeature(w, "reactionAcceptance")
+		return
+	case req.RenoteID != nil:
+		writeUnsupportedFeature(w, "renoteId")
+		return
+	case req.ChannelID != nil:
+		writeUnsupportedFeature(w, "channelId")
+		return
+	case len(req.Poll) > 0 && string(req.Poll) != "null":
+		writeUnsupportedFeature(w, "poll")
+		return
+	case req.ScheduledAt != nil:
+		writeUnsupportedFeature(w, "scheduledAt")
+		return
+	case len(req.FileIDs) > 0:
+		writeUnsupportedFeature(w, "fileIds")
+		return
+	case req.Visibility != nil && *req.Visibility != "public":
+		writeUnsupportedFeature(w, "visibility")
+		return
+	}
+
+	if req.Text == nil || *req.Text == "" {
+		writeInvalidParam(w, "text is required")
+		return
+	}
+
+	var entry domain.Entry
+	var err error
+	if req.ReplyID != nil && *req.ReplyID != "" {
+		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, nil)
+		if errors.Is(err, timeline.ErrParentNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+	} else {
+		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, nil)
+	}
+	if err != nil {
+		s.logger.Error("create note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: newNote(entry, newUserLiteFromOwner(owner))})
+}
+
+type notesTimelineRequest struct {
+	Limit   *int    `json:"limit"`
+	UntilID *string `json:"untilId"`
+	// WithRenotes, WithFiles, and AllowPartial are accepted and ignored:
+	// Aria always sends them, but this service has no renote/file
+	// filtering or partial-result concept to honor them with (see
+	// docs/compat/aria-v1.5.11.md's timeline notes).
+	WithRenotes  *bool `json:"withRenotes"`
+	WithFiles    *bool `json:"withFiles"`
+	AllowPartial *bool `json:"allowPartial"`
+}
+
+// handleNotesTimeline handles POST /api/notes/timeline: the home
+// timeline's initial load, reload, and untilId-paginated older pages,
+// always newest-first (see EntryRepository.ListTimelineDesc).
+// sinceId/sinceDate/untilDate are not implemented: Aria's home-timeline
+// call path never sends them (docs/compat/aria-v1.5.11.md).
+func (s *Server) handleNotesTimeline(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesTimelineRequest](r)
+	if !ok {
+		writeInvalidParam(w, "malformed request body")
+		return
+	}
+
+	limit := defaultTimelineLimit
+	if req.Limit != nil && *req.Limit > 0 {
+		limit = *req.Limit
+	}
+	if limit > maxTimelineLimit {
+		limit = maxTimelineLimit
+	}
+
+	var before *domain.Cursor
+	if req.UntilID != nil && *req.UntilID != "" {
+		anchor, err := s.timeline.GetEntry(r.Context(), *req.UntilID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				// A stale/unknown untilId has nothing older to page to;
+				// an empty page is the pagination-loop-safe response
+				// (Aria stops paging on an empty result), not an error.
+				writeJSON(w, http.StatusOK, []note{})
+				return
+			}
+			s.logger.Error("resolve timeline untilId failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		before = &domain.Cursor{CreatedAt: anchor.CreatedAt, ID: anchor.ID}
+	}
+
+	entries, err := s.timeline.GetTimelineDesc(r.Context(), before, limit, false)
+	if err != nil {
+		s.logger.Error("get timeline failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	notes := make([]note, 0, len(entries))
+	for _, e := range entries {
+		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+	}
+	writeJSON(w, http.StatusOK, notes)
+}
+
+type notesShowRequest struct {
+	NoteID string `json:"noteId"`
+}
+
+// handleNotesShow handles POST /api/notes/show: one note by ID, or the
+// uniform NO_SUCH_NOTE error for an unknown, archived, or hidden ID (see
+// writeNoSuchNote).
+func (s *Server) handleNotesShow(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesShowRequest](r)
+	if !ok || req.NoteID == "" {
+		writeInvalidParam(w, "noteId is required")
+		return
+	}
+
+	entry, err := s.timeline.GetEntry(r.Context(), req.NoteID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+		s.logger.Error("get note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	if !entryVisible(entry) {
+		writeNoSuchNote(w)
+		return
+	}
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newNote(entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner)))
+}
+
+type notesConversationRequest struct {
+	NoteID string `json:"noteId"`
+}
+
+// handleNotesConversation handles POST /api/notes/conversation: the
+// subject note's ancestor chain, oldest-first (root, then its child, ...,
+// then the subject's direct parent), excluding the subject itself and
+// any archived/hidden ancestor. Ordering direction is this issue's fixed
+// decision for a call path docs/compat/aria-v1.5.11.md leaves 要実機確認.
+func (s *Server) handleNotesConversation(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesConversationRequest](r)
+	if !ok || req.NoteID == "" {
+		writeInvalidParam(w, "noteId is required")
+		return
+	}
+
+	subject, err := s.timeline.GetEntry(r.Context(), req.NoteID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+		s.logger.Error("get note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	if !entryVisible(subject) {
+		writeNoSuchNote(w)
+		return
+	}
+
+	thread, err := s.timeline.GetThread(r.Context(), subject.ThreadID)
+	if err != nil {
+		s.logger.Error("get thread failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	byID := make(map[string]domain.Entry, len(thread))
+	for _, e := range thread {
+		byID[e.ID] = e
+	}
+
+	var chain []domain.Entry
+	for cur := subject.ParentEntryID; cur != nil; {
+		e, ok := byID[*cur]
+		if !ok {
+			break
+		}
+		chain = append(chain, e)
+		cur = e.ParentEntryID
+	}
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	notes := make([]note, 0, len(chain))
+	for _, e := range chain {
+		if !entryVisible(e) {
+			continue
+		}
+		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+	}
+	writeJSON(w, http.StatusOK, notes)
+}
+
+type notesChildrenRequest struct {
+	NoteID  string  `json:"noteId"`
+	Depth   *int    `json:"depth"`
+	UntilID *string `json:"untilId"`
+	Limit   *int    `json:"limit"`
+}
+
+// handleNotesChildren handles POST /api/notes/children: the subject
+// note's direct replies only (depth 1; deeper descendants are out of
+// scope, matching EntryRepository.ListChildren), excluding archived/
+// hidden children, paginated by continuing after untilId in the same
+// oldest-first order ListChildren already returns.
+func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesChildrenRequest](r)
+	if !ok || req.NoteID == "" {
+		writeInvalidParam(w, "noteId is required")
+		return
+	}
+
+	subject, err := s.timeline.GetEntry(r.Context(), req.NoteID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+		s.logger.Error("get note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	if !entryVisible(subject) {
+		writeNoSuchNote(w)
+		return
+	}
+
+	children, err := s.timeline.GetChildren(r.Context(), req.NoteID)
+	if err != nil {
+		s.logger.Error("get children failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	visible := make([]domain.Entry, 0, len(children))
+	for _, c := range children {
+		if entryVisible(c) {
+			visible = append(visible, c)
+		}
+	}
+
+	limit := defaultTimelineLimit
+	if req.Limit != nil && *req.Limit > 0 {
+		limit = *req.Limit
+	}
+	if limit > maxTimelineLimit {
+		limit = maxTimelineLimit
+	}
+	page := paginateAfterID(visible, req.UntilID, limit)
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	notes := make([]note, 0, len(page))
+	for _, e := range page {
+		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+	}
+	writeJSON(w, http.StatusOK, notes)
+}
+
+// paginateAfterID returns the entries strictly after the one matching
+// untilID in entries' existing order, up to limit items. If untilID is
+// nil/empty or not found, it returns from the start. This continues
+// GetChildren's existing oldest-first order rather than introducing a
+// second, newest-first children query: Issue #7's plan defers a
+// dedicated ListChildrenDesc repository method until pagination
+// performance actually requires it.
+func paginateAfterID(entries []domain.Entry, untilID *string, limit int) []domain.Entry {
+	start := 0
+	if untilID != nil && *untilID != "" {
+		for i, e := range entries {
+			if e.ID == *untilID {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start > len(entries) {
+		start = len(entries)
+	}
+	end := start + limit
+	if end > len(entries) {
+		end = len(entries)
+	}
+	return entries[start:end]
+}

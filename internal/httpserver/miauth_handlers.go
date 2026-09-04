@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,8 +176,29 @@ func (s *Server) handleMiAuthCheck(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(checkSuccessResponse{
 		OK:    true,
 		Token: result.Token,
-		User:  newUserDetailedNotMe(result),
+		User: newUserDetailedNotMe(
+			result.OwnerActorID, result.OwnerUsername, result.OwnerDisplayName, result.OwnerCreatedAt,
+			s.notesCountForOwner(r.Context(), result.OwnerActorID),
+		),
 	})
+}
+
+// notesCountForOwner returns the owner's total entry count for a
+// notesCount projection, or 0 if this Server has no TimelineService
+// wired (every httpserver test predating Issue #7) or the count lookup
+// fails. A failure here is best-effort bookkeeping, not authentication or
+// authorization, so it must never turn an otherwise successful response
+// into an error.
+func (s *Server) notesCountForOwner(ctx context.Context, ownerActorID string) int {
+	if s.timeline == nil {
+		return 0
+	}
+	n, err := s.timeline.CountByAuthor(ctx, ownerActorID)
+	if err != nil {
+		s.logger.Error("count owner entries failed", "request_id", logging.RequestIDFromContext(ctx), "error", err.Error())
+		return 0
+	}
+	return n
 }
 
 func writePlainTextPage(w http.ResponseWriter, status int, body string) {

@@ -1,19 +1,14 @@
 package httpserver
 
-import (
-	"time"
-
-	"github.com/nananek/miauth-private-portal/internal/miauth"
-)
+import "time"
 
 // userDetailedNotMe is the Misskey-compatible projection
 // docs/compat/aria-v1.5.11.md's UserDetailedNotMe minimum requires as
-// the check success response's `user` field. Only the fields backed by
-// real data are populated (id, username, name, createdAt); every
-// boolean is an honest false and every count an honest 0 rather than
-// fabricated data, since Issue #5 implements no notes, follower, or
-// moderation functionality — those all remain 0/false until a later
-// issue actually implements the behavior they describe.
+// the check success response's `user` field. Every boolean is an honest
+// false, since this deployment implements no follower or moderation
+// functionality for its single owner. notesCount is real (Issue #7 wires
+// it to internal/timeline.Service.CountByAuthor); it was an honest 0
+// before Issue #7 implemented any note functionality to count.
 type userDetailedNotMe struct {
 	ID             string  `json:"id"`
 	Username       string  `json:"username"`
@@ -29,17 +24,18 @@ type userDetailedNotMe struct {
 	NotesCount     int     `json:"notesCount"`
 }
 
-func newUserDetailedNotMe(result miauth.CheckResult) userDetailedNotMe {
+func newUserDetailedNotMe(actorID, username, displayName string, createdAt time.Time, notesCount int) userDetailedNotMe {
 	var name *string
-	if result.OwnerDisplayName != "" {
-		displayName := result.OwnerDisplayName
-		name = &displayName
+	if displayName != "" {
+		dn := displayName
+		name = &dn
 	}
 	return userDetailedNotMe{
-		ID:        result.OwnerActorID,
-		Username:  result.OwnerUsername,
-		Name:      name,
-		CreatedAt: result.OwnerCreatedAt.UTC().Format(time.RFC3339),
+		ID:         actorID,
+		Username:   username,
+		Name:       name,
+		CreatedAt:  createdAt.UTC().Format(time.RFC3339),
+		NotesCount: notesCount,
 	}
 }
 
