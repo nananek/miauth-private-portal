@@ -11,12 +11,8 @@ type Repos struct {
 	Actors          ActorRepository
 	Threads         ThreadRepository
 	Entries         EntryRepository
-	BootstrapGates  BootstrapGateRepository
 	LocalMiAuth     LocalMiAuthSessionRepository
-	UpstreamMiAuth  UpstreamMiAuthSessionRepository
 	APITokens       APITokenRepository
-	OwnerBindings   OwnerBindingRepository
-	UpstreamTokens  UpstreamTokenRepository
 	UserTags        UserTagRepository
 	Classifications LLMClassificationRepository
 	Generations     LLMGenerationRepository

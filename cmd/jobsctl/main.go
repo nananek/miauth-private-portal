@@ -1,7 +1,7 @@
 // Command jobsctl provides host-local inspection and manual recovery for
 // durable jobs. It deliberately exposes no HTTP surface: permission to operate
 // on the queue is the permission to access this deployment's database and run
-// this binary, matching bootstrapctl's operator boundary.
+// this binary, matching miauthctl's operator boundary.
 package main
 
 import (

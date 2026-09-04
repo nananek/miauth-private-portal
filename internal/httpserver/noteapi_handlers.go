@@ -60,9 +60,7 @@ func entryVisible(e domain.Entry) bool {
 }
 
 // handleMeta handles POST /api/meta, anonymous and body-independent
-// (Aria sends `{}`). It returns only LOCAL_ORIGIN, never IDENTITY_ORIGIN
-// (docs/compat/aria-v1.5.11.md and ADR-0001 both require the two origins
-// stay distinct and client-invisible to each other).
+// (Aria sends `{}`). It returns the configured LOCAL_ORIGIN.
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, metaResponse{URI: s.localOrigin, Features: metaFeatures{MiAuth: true}})
 }

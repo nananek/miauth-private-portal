@@ -37,12 +37,10 @@ type Options struct {
 	MaxRequestBodyBytes int64
 	ShutdownGracePeriod time.Duration
 
-	// MiAuthService, LocalOrigin, and IdentityOrigin configure Issue #5's
-	// MiAuth routes; see NewServer. A nil MiAuthService registers none of
-	// them.
-	MiAuthService  *miauth.Service
-	LocalOrigin    string
-	IdentityOrigin string
+	// MiAuthService and LocalOrigin configure the local MiAuth routes; see
+	// NewServer. A nil MiAuthService registers none of them.
+	MiAuthService *miauth.Service
+	LocalOrigin   string
 
 	// TimelineService additionally configures Issue #7's minimal
 	// Aria/Misskey-compatible note routes; see NewServer. A nil

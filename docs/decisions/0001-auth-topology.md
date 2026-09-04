@@ -1,6 +1,6 @@
 # ADR-0001: Separate local and upstream MiAuth boundaries
 
-- Status: Accepted for Issue #2; implementation is tracked by Issues #5 and #7
+- Status: Superseded by ADR-0002 (see `0002-ssh-cli-auth.md`)
 - Date: 2026-09-03
 - Scope: single-owner MVP
 

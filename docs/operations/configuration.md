@@ -1,15 +1,15 @@
 # Configuration
 
 This document covers the configuration and HTTP-routing foundation added by
-Issue #3, the SQLite persistence layer added by Issue #4, the bridged
-MiAuth authentication flow added by Issue #5, the Aria/Misskey-compatible
+Issue #3, the SQLite persistence layer added by Issue #4, the local MiAuth
+authentication flow added by Issues #5 and #28, the Aria/Misskey-compatible
 note API added by Issue #7, the durable job worker added by Issue #8, the
 LLM reply/follow-up generation added by Issue #9, and the LLM post
 classification added by Issue #10. The normative design for MiAuth is
-[`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
-(ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
+[`docs/decisions/0002-ssh-cli-auth.md`](../decisions/0002-ssh-cli-auth.md)
+(ADR-0002) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
-the bootstrap tool), not the protocol design itself.
+the operator tool), not the protocol design itself.
 
 ## Loading order
 
@@ -54,7 +54,7 @@ catch that class of mistake during local development.
 | `HTTP_PORT` | no | `8080` | 1-65535. |
 | `HTTP_READ_TIMEOUT` | no | `5s` | `time.ParseDuration` format, must be positive. |
 | `HTTP_READ_HEADER_TIMEOUT` | no | `5s` | Same format/rules. |
-| `HTTP_WRITE_TIMEOUT` | no | `15s` | Same format/rules. Must be at least `1s` greater than `UPSTREAM_HTTP_TIMEOUT`, leaving time to return an upstream timeout response. |
+| `HTTP_WRITE_TIMEOUT` | no | `15s` | Same format/rules. |
 | `HTTP_IDLE_TIMEOUT` | no | `60s` | Same format/rules. |
 | `HTTP_MAX_BODY_BYTES` | no | `1048576` (1 MiB) | Enforced via `http.MaxBytesReader` on every request. |
 | `HTTP_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Bounds how long graceful shutdown waits before forcing connections closed. |
@@ -63,11 +63,8 @@ catch that class of mistake during local development.
 | `DB_PATH` | no | `./data/portal.db` | SQLite database file path; its parent directory is created if missing. Must not be empty. |
 | `DB_BUSY_TIMEOUT_MS` | no | `5000` | Positive integer milliseconds passed to SQLite's `busy_timeout` pragma. |
 | `DB_MAX_OPEN_CONNS` | no | `8` | 1-100. Bounds the SQLite connection pool. |
-| `LOCAL_ORIGIN` | yes | — | This service's own public origin (ADR-0001 `LOCAL_ORIGIN`). Scheme+host only: no userinfo, path beyond `""`/`"/"`, query, or fragment. Must be `https` in production. |
-| `IDENTITY_ORIGIN` | yes | — | The fixed upstream Misskey origin used for owner verification (ADR-0001 `IDENTITY_ORIGIN`). Same format/production rules as `LOCAL_ORIGIN`. Never supplied by a client request. |
-| `ALLOWED_MISSKEY_USER_ID` | no | `""` (bootstrap-only) | The opaque upstream Misskey user ID allowed to bind as this deployment's single owner. Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. |
-| `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). Commas inside a callback path or query are retained; a separator is a comma followed by the next absolute URL scheme. A non-HTTPS scheme is explicitly allowed here, unlike the two origins above. |
-| `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive and at least `1s` shorter than `HTTP_WRITE_TIMEOUT`. |
+| `LOCAL_ORIGIN` | yes | — | This service's public origin. Scheme+host only: no userinfo, path beyond `""`/`"/"`, query, or fragment. Must be `https` in production. |
+| `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). Commas inside a callback path or query are retained; a separator is a comma followed by the next absolute URL scheme. A non-HTTPS scheme is explicitly allowed. |
 | `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
 | `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
 | `JOBS_WORKER_ID` | no | hostname + PID | Human-readable worker identity used in logs and as a lease-owner prefix. Each claim appends a random fencing value, so a reclaim never reuses the previous lease generation. Set a deployment-unique value when operational logs need one; an empty config-file value uses the generated default. |
@@ -81,7 +78,7 @@ catch that class of mistake during local development.
 | `JOBS_MAX_CONCURRENT` | no | `4` | Maximum handlers running in this process, 1-64. |
 | `JOBS_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Time allowed for handlers to finish after shutdown starts. Remaining handlers are cancelled and immediately requeued. |
 | `LLM_ENABLED` | no | `false` | Gates Issue #9's reply/follow-up generation entirely. While `false`, `notes/create` never evaluates the reply policy and no `llm_generation` job is ever enqueued or handler-registered, and no request ever reaches `LLM_BASE_URL`. |
-| `LLM_BASE_URL` | required if `LLM_ENABLED=true` | `""` | OpenAI-compatible API base (for example `https://api.openai.com/v1`), trailing slash trimmed. A path is expected and allowed, unlike `LOCAL_ORIGIN`/`IDENTITY_ORIGIN`. Must be `https` in production. |
+| `LLM_BASE_URL` | required if `LLM_ENABLED=true` | `""` | OpenAI-compatible API base (for example `https://api.openai.com/v1`), trailing slash trimmed. A path is expected and allowed, unlike `LOCAL_ORIGIN`. Must be `https` in production. |
 | `LLM_API_KEY` | no | `""` | Bearer credential sent to `LLM_BASE_URL`; omitted from the request entirely when empty (self-hosted providers that need no key). Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. |
 | `LLM_MODEL` | required if `LLM_ENABLED=true` | `""` | Model name passed to the provider and recorded as `LLMGeneration.Model`. |
 | `LLM_TIMEOUT` | no | `30s` | Bounds every HTTP call this service makes to `LLM_BASE_URL`. |
@@ -123,19 +120,16 @@ so code must not concatenate secrets into arbitrary log fields.
 The HTTP access-log middleware (`internal/logging.AccessLog`) logs the
 **route pattern** a handler was registered under (for example
 `/miauth/{session}`), never the raw request path, query string, headers,
-or body. ADR-0001 fixes Aria's `{session}` route value, the upstream MiAuth
-`state`, and local API tokens as secrets that must never reach a log line;
+or body. ADR-0002 fixes Aria's `{session}` route value and local API tokens
+as secrets that must never reach a log line;
 Issue #5's MiAuth handlers rely on this pattern-only logging to satisfy
 that, and additionally never construct a log attribute containing any of
 those values in the first place (see
 [`TestMiAuthFlow_NeverLogsSensitiveValues`](../../internal/httpserver/miauth_handlers_test.go)).
 
 `Config.Redacted()` is the one place that decides which config fields are
-safe to print. Issue #5 adds the first field this genuinely applies to:
-`ALLOWED_MISSKEY_USER_ID` is shown only as `<set>`/`<unset>`, never its
-value, per its acceptance criteria (an unauthorized login attempt's
-generic denial must never let the allowlisted ID leak into a log or
-response).
+safe to print. Authentication secrets are not configuration fields in the
+SSH+CLI design.
 
 ## HTTP routing
 
@@ -147,15 +141,13 @@ which `ServeMux` already expresses directly. AGENTS.md requires a concrete
 reason for any new dependency, and none exists yet for a third-party
 router; if a future issue's routing needs (regex constraints, richer
 sub-router middleware composition, etc.) outgrow `ServeMux`, record that
-decision in a new ADR at that time. `docs/decisions/0002-*` is already
-reserved by the Open WebUI roadmap's OWUI-C track, so this decision is
-intentionally not filed as an ADR here.
+decision in a new ADR at that time.
 
 ## MiAuth
 
-Issue #5 adds the bridged MiAuth flow ADR-0001 designs. This section covers
+Issue #28 replaces the upstream bridge with the local flow ADR-0002 designs. This section covers
 only the operational surface; the protocol itself (state machines, owner
-binding rules, threat model) is normative in ADR-0001, and the exact wire
+state transitions, and threat model) is normative in ADR-0002, and the exact wire
 shapes Aria expects are normative in
 [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md).
 
@@ -163,15 +155,11 @@ shapes Aria expects are normative in
 
 | Route | Purpose |
 | --- | --- |
-| `GET /miauth/{session}` | Aria's entry point. Starts (or idempotently resumes) the local session and redirects the browser to `IDENTITY_ORIGIN` for owner verification. |
-| `GET /miauth/callback` | The fixed internal callback `IDENTITY_ORIGIN` redirects back to, shared by the ordinary and bootstrap flows. Not part of Aria's contract; never call it directly. |
-| `GET /miauth/bootstrap/{gate}` | Operator-only entry point reached with a gate value from `cmd/bootstrapctl`. Refuses once an owner is already bound. |
+| `GET /miauth/{session}` | Aria's entry point. Starts (or idempotently resumes) a pending local session. Redirects immediately to an allowlisted client callback when supplied; otherwise shows a waiting page. |
 | `POST /api/miauth/{session}/check` | Aria polls this to complete the flow. Every non-success outcome (pending, denied, expired, replayed) responds identically with `200 {"ok":false}`. |
 
-Every non-success outcome across these routes is deliberately generic: an
-unauthorized login attempt, a wrong upstream user, a state mismatch, and an
-unknown session all render the same response, so a probing request cannot
-learn which case applies or exfiltrate the allowlisted user ID.
+Every non-success check outcome is deliberately generic. HTTP never approves
+a session; approval requires host access and `miauthctl`.
 
 ### Effective scopes
 
@@ -185,47 +173,37 @@ the full reasoning. Scope enforcement is exact-match only
 (`internal/httpserver.RequireScope`); Aria requesting a scope this service
 does not implement never grants a capability.
 
-### Session and gate lifetimes
+### Session lifetime
 
-Local and upstream MiAuth sessions expire after 10 minutes; the operator
-bootstrap gate expires after 15 minutes. These are ADR-0001's fixed,
-accepted design, not operator-configurable settings — the same treatment
+Local MiAuth sessions expire after 10 minutes. This is ADR-0002's fixed,
+accepted design, not an operator-configurable setting — the same treatment
 this document's SQLite section gives `foreign_keys`/`journal_mode` below.
 
-### Binding the owner
+### Approving sessions and managing tokens
 
-With `ALLOWED_MISSKEY_USER_ID` set, the first successful MiAuth login from
-that upstream user ID binds them as the owner; no further action is needed.
-
-With `ALLOWED_MISSKEY_USER_ID` unset, the deployment stays unbound until an
-operator runs `cmd/bootstrapctl` against the same `DB_PATH`:
+Connect to the server host through SSH and run `miauthctl` against the same
+configuration and `DB_PATH` as the server:
 
 ```sh
-go run ./cmd/bootstrapctl
+go run ./cmd/miauthctl list
+go run ./cmd/miauthctl approve <session-id>
 ```
 
-It refuses if an owner is already bound, otherwise prints a single-use URL
-under `LOCAL_ORIGIN` valid for 15 minutes. The operator opens it, as the
-owner, from the upstream Misskey account to bind. `cmd/bootstrapctl`
-exposes no HTTP endpoint of its own — the printed URL is reachable only by
-whoever can already run the command, which is what satisfies ADR-0001's
-"shown only through the operator channel" requirement instead of a public
-first-login-wins path.
+`approve` shows the session ID, creation time and age, requested permissions,
+and callback, then requires typing `yes`. Use `--yes` only in trusted
+automation. `reject <session-id>` denies a pending request. `tokens` lists
+issued local API tokens by ID without exposing their hashes or raw values;
+`revoke <token-id>` revokes one. The first approved session creates the sole
+Owner actor and later approvals reuse it.
 
-### Deliberately out of scope for Issue #5
+### Deliberately out of scope
 
-- Persisting the upstream Misskey token: `internal/provider/misskey.Client`
-  uses it only within a single check call to read the verified user ID,
-  then discards it. Encryption-at-rest wiring
-  (`domain.UpstreamTokenRepository`) is deferred to whichever future issue
-  first needs to read upstream data.
-- Browser session cookies: security relies on the crypto/rand upstream
-  `state` plus TTL and atomic consume, not a same-browser confirmation
-  cookie.
+- Managing SSH access, host accounts, or operating-system audit policy.
+- Browser session cookies; authorization occurs through the host-local CLI.
 - `POST /api/meta` and `POST /api/i`: assigned to Issue #7's minimal
   Aria/Misskey surface.
 - Self-service profile editing (`POST /api/i/update`): `OWNER_USERNAME`/
-  `OWNER_DISPLAY_NAME` are config-only for Issue #5; a fast-follow issue is
+`OWNER_DISPLAY_NAME` remain config-only; a fast-follow issue is
   expected to add an editable, database-backed profile so an operator does
   not need to edit config to change them.
 
@@ -267,15 +245,12 @@ shared mutable state beyond the database itself).
 
 ### Contract testing
 
-`cmd/fakemisskey` and `contract/aria_client` (run via `make
-contract-test`) are test-only tooling that verifies this note API surface
+`contract/aria_client` (run via `make contract-test`) verifies this note API surface
 against `misskey_dart`, the client library Aria itself uses — see
 [README.md](../../README.md#contract-tests) and
 `docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for what
-it covers. `cmd/fakemisskey` unconditionally approves every MiAuth
-session; it is never reachable from a production deployment, since
-neither the `build` Makefile target nor the `Dockerfile` build or copy
-it.
+it covers. The script creates a pending local session and approves it with
+`miauthctl approve --yes` before running the Dart suite.
 
 ## SQLite
 

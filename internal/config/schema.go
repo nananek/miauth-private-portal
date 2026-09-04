@@ -23,10 +23,7 @@ const (
 	KeyDBMaxOpenConns        = "DB_MAX_OPEN_CONNS"
 
 	KeyLocalOrigin          = "LOCAL_ORIGIN"
-	KeyIdentityOrigin       = "IDENTITY_ORIGIN"
-	KeyAllowedMisskeyUserID = "ALLOWED_MISSKEY_USER_ID"
 	KeyAriaClientCallbacks  = "ARIA_CLIENT_CALLBACKS"
-	KeyUpstreamHTTPTimeout  = "UPSTREAM_HTTP_TIMEOUT"
 	KeyOwnerUsername        = "OWNER_USERNAME"
 	KeyOwnerDisplayName     = "OWNER_DISPLAY_NAME"
 	KeyJobsWorkerID         = "JOBS_WORKER_ID"
@@ -74,10 +71,7 @@ var knownKeyOrder = []string{
 	KeyDBBusyTimeoutMS,
 	KeyDBMaxOpenConns,
 	KeyLocalOrigin,
-	KeyIdentityOrigin,
-	KeyAllowedMisskeyUserID,
 	KeyAriaClientCallbacks,
-	KeyUpstreamHTTPTimeout,
 	KeyOwnerUsername,
 	KeyOwnerDisplayName,
 	KeyJobsWorkerID,

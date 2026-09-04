@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -25,9 +24,6 @@ func TestHandleMeta_AnonymousReturnsLocalOriginOnly(t *testing.T) {
 	}
 	if !resp.Features.MiAuth {
 		t.Error("features.miauth = false, want true")
-	}
-	if strings.Contains(rec.Body.String(), testIdentityOrigin) {
-		t.Errorf("response leaked IDENTITY_ORIGIN: %s", rec.Body.String())
 	}
 }
 

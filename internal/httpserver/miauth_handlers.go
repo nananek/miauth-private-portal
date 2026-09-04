@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,24 +12,10 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 )
 
-const (
-	// miauthServiceName is the `name` this service presents to the
-	// upstream Misskey MiAuth page as the requesting application.
-	miauthServiceName = "miauth-private-portal"
-	// upstreamMinimalPermission is this service's own minimal
-	// server-side scope for owner verification against IDENTITY_ORIGIN.
-	// ADR-0001 §4 forbids forwarding Aria's broad requested permission
-	// list to the upstream identity provider unchanged; this is that
-	// separate, minimal allowlist. read:account is enough to identify
-	// the verified user.
-	upstreamMinimalPermission = "read:account"
-)
-
 // handleMiAuthStart handles GET /miauth/{session}, Aria's entry point
-// for adding an account. It starts or idempotently resumes the local
-// session and its linked upstream verification session, then redirects
-// the browser to the fixed IDENTITY_ORIGIN MiAuth page. The response is
-// an interactive browser flow, not parsed by Aria as JSON
+// for adding an account. It creates or resumes an unapproved local
+// session for an operator to inspect and approve through SSH. The
+// response is an interactive browser flow, not parsed by Aria as JSON
 // (docs/compat/aria-v1.5.11.md), so failures render a minimal plain-text
 // page rather than a Misskey-compatible error body.
 func (s *Server) handleMiAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +27,7 @@ func (s *Server) handleMiAuthStart(w http.ResponseWriter, r *http.Request) {
 		clientCallback = &cb
 	}
 
-	started, err := s.miauth.StartLocalSession(r.Context(), routeSessionID, permission, clientCallback)
+	err := s.miauth.StartLocalSession(r.Context(), routeSessionID, permission, clientCallback)
 	if err != nil {
 		// ErrClientCallbackNotAllowed and ErrSessionUnavailable are both
 		// rendered identically: neither reveals which case applies, and
@@ -54,86 +39,20 @@ func (s *Server) handleMiAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, s.upstreamMiAuthURL(started), http.StatusFound)
-}
-
-// handleMiAuthBootstrapStart handles GET /miauth/bootstrap/{gate}, the
-// operator-only entry point reached only by someone who already
-// possesses a gate value printed by cmd/bootstrapctl. It is otherwise
-// identical to handleMiAuthStart's redirect construction.
-func (s *Server) handleMiAuthBootstrapStart(w http.ResponseWriter, r *http.Request) {
-	gateID := r.PathValue("gate")
-
-	started, err := s.miauth.StartBootstrapSession(r.Context(), gateID)
-	if err != nil {
-		// A generic 404 either way: an already-bound deployment, an
-		// unknown gate, an expired gate, and an already-consumed gate
-		// are all indistinguishable to whoever is probing this URL.
-		if !errors.Is(err, miauth.ErrBootstrapUnavailable) {
-			s.logger.Error("miauth bootstrap start failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
-		}
-		writePlainTextPage(w, http.StatusNotFound, "Not found.")
-		return
-	}
-
-	http.Redirect(w, r, s.upstreamMiAuthURL(started), http.StatusFound)
-}
-
-// upstreamMiAuthURL builds the fixed IDENTITY_ORIGIN MiAuth URL for
-// started, shared by the ordinary and bootstrap flows. The internal
-// callback embeds both the upstream session's id and its crypto/rand
-// state as its own query parameters — Misskey has no notion of this
-// service's own state value, so it must be carried in the callback URL
-// this service controls, not derived from anything Misskey adds. Misskey
-// treats the callback URL as opaque and appends its own `session=`
-// parameter when redirecting back without stripping the ones already
-// present; handleMiAuthCallback reads id/state from what this service
-// itself embedded and ignores that echoed value.
-func (s *Server) upstreamMiAuthURL(started miauth.StartedSession) string {
-	callback := s.localOrigin + "/miauth/callback?" + url.Values{
-		"id":    {started.UpstreamSessionID},
-		"state": {started.UpstreamState},
-	}.Encode()
-
-	v := url.Values{}
-	v.Set("name", miauthServiceName)
-	v.Set("permission", upstreamMinimalPermission)
-	v.Set("callback", callback)
-	return fmt.Sprintf("%s/miauth/%s?%s", s.identityOrigin, url.PathEscape(started.UpstreamSessionID), v.Encode())
-}
-
-// handleMiAuthCallback handles the fixed internal GET /miauth/callback
-// endpoint shared by both the ordinary Aria-triggered flow and the
-// operator bootstrap flow. It never reveals why an attempt failed
-// (ADR-0001: unauthorized users get a generic denial that never leaks
-// the allowlisted ID or token information).
-func (s *Server) handleMiAuthCallback(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	state := r.URL.Query().Get("state")
-
-	result, err := s.miauth.HandleUpstreamCallback(r.Context(), id, state)
-	if err != nil {
-		if !errors.Is(err, miauth.ErrCallbackInvalid) && !errors.Is(err, miauth.ErrUpstreamVerification) && !errors.Is(err, miauth.ErrOwnerBindingDenied) {
-			s.logger.Error("miauth callback failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
-		}
-		writePlainTextPage(w, http.StatusBadRequest, "Authentication failed. Please try again from Aria.")
-		return
-	}
-
-	if result.ClientCallback != nil {
-		redirectURL, err := clientCallbackURL(*result.ClientCallback, result.RouteSessionID)
+	if clientCallback != nil {
+		redirectURL, err := clientCallbackURL(*clientCallback, routeSessionID)
 		if err != nil {
 			// The configured callback was exact-match validated at startup.
 			// Avoid logging its raw value here in case an operator included
 			// sensitive query data in it despite that recommendation.
 			s.logger.Error("miauth client callback construction failed", "request_id", logging.RequestIDFromContext(r.Context()))
-			writePlainTextPage(w, http.StatusInternalServerError, "Authentication failed. Please try again from Aria.")
+			writePlainTextPage(w, http.StatusInternalServerError, "This sign-in request cannot be started.")
 			return
 		}
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
-	writePlainTextPage(w, http.StatusOK, "Success. You can return to Aria.")
+	writePlainTextPage(w, http.StatusOK, "Waiting for the operator to approve this sign-in via SSH. You can close this page; Aria will continue automatically once approved.")
 }
 
 func clientCallbackURL(callback, routeSessionID string) (string, error) {

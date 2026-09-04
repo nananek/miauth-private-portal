@@ -11,8 +11,7 @@ import (
 )
 
 var expectedTables = []string{
-	"actors", "owner_bindings", "upstream_tokens", "bootstrap_gates", "miauth_local_sessions",
-	"miauth_upstream_sessions", "api_tokens", "threads", "entries", "user_tags", "llm_classifications",
+	"actors", "miauth_local_sessions", "api_tokens", "threads", "entries", "user_tags", "llm_classifications",
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
 	"external_sources", "external_items",
 }
@@ -34,12 +33,20 @@ func TestMigrate_FreshDatabase(t *testing.T) {
 		}
 		versions = append(versions, v)
 	}
-	if len(versions) != 9 {
-		t.Fatalf("applied migration count = %d, want 9 (versions: %v)", len(versions), versions)
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVersions := make([]int, len(migrations))
+	for i, migration := range migrations {
+		wantVersions[i] = migration.version
+	}
+	if len(versions) != len(wantVersions) {
+		t.Fatalf("applied migrations = %v, want %v", versions, wantVersions)
 	}
 	for i, v := range versions {
-		if v != i+1 {
-			t.Fatalf("applied migrations = %v, want 1..9 in order", versions)
+		if v != wantVersions[i] {
+			t.Fatalf("applied migrations = %v, want %v", versions, wantVersions)
 		}
 	}
 
@@ -49,6 +56,14 @@ func TestMigrate_FreshDatabase(t *testing.T) {
 			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
 		if err != nil {
 			t.Errorf("table %s was not created: %v", table, err)
+		}
+	}
+	for _, dropped := range []string{"upstream_tokens", "owner_bindings", "miauth_upstream_sessions", "bootstrap_gates"} {
+		var name string
+		err := db.sqlDB.QueryRowContext(t.Context(),
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, dropped).Scan(&name)
+		if err == nil {
+			t.Errorf("legacy table %s exists in fresh schema", dropped)
 		}
 	}
 }
@@ -74,14 +89,9 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 9 {
-		t.Fatalf("embedded migration count = %d, want 9", len(migrations))
-	}
-
-	// Simulate a database already migrated up to version 7, one release
-	// behind the embedded schema.
+	// Simulate a database on the old upstream-verification schema.
 	for _, m := range migrations {
-		if m.version > 7 {
+		if m.version > 8 {
 			continue
 		}
 		if err := applyOne(ctx, sqlDB, m); err != nil {
@@ -90,10 +100,28 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	}
 
 	var name string
-	err = sqlDB.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_sources'`).Scan(&name)
-	if err == nil {
-		t.Fatal("external_sources should not exist before migration 8 is applied")
+	const ownerID = "existing-owner"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO owner_bindings (id, local_actor_id, identity_origin, upstream_user_id, bound_at)
+		 VALUES (1, ?, 'https://misskey.example', 'owner-upstream', '2024-01-01T00:00:00Z')`, ownerID); err != nil {
+		t.Fatalf("seed owner binding: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO miauth_local_sessions
+		 (route_session_id, state, status, requested_permissions, local_actor_id, created_at, expires_at, consumed_at)
+		 VALUES ('existing-session', 'legacy-state', 'consumed', 'read:account', ?,
+		 '2024-01-01T00:00:00Z', '2024-01-01T00:10:00Z', '2024-01-01T00:01:00Z')`, ownerID); err != nil {
+		t.Fatalf("seed local session: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO api_tokens
+		 (id, token_hash, local_actor_id, miauth_local_session_id, scopes, created_at)
+		 VALUES ('existing-token', 'existing-hash', ?, 'existing-session', 'read:account', '2024-01-01T00:01:00Z')`, ownerID); err != nil {
+		t.Fatalf("seed API token: %v", err)
 	}
 
 	db := &DB{sqlDB: sqlDB}
@@ -102,16 +130,29 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	}
 
 	if err := sqlDB.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_sources'`).Scan(&name); err != nil {
-		t.Fatalf("external_sources should exist after migration 8 is applied: %v", err)
+		`SELECT id FROM actors WHERE actor_type = 'owner'`).Scan(&name); err != nil {
+		t.Fatalf("owner actor should survive migration 10: %v", err)
+	}
+	if name != ownerID {
+		t.Fatalf("owner actor id = %q, want %q", name, ownerID)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM api_tokens WHERE id = 'existing-token'`).Scan(&name); err != nil {
+		t.Fatalf("local API token should survive migration 10: %v", err)
+	}
+	for _, dropped := range []string{"upstream_tokens", "owner_bindings", "miauth_upstream_sessions", "bootstrap_gates"} {
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, dropped).Scan(&name)
+		if err == nil {
+			t.Errorf("legacy table %s still exists", dropped)
+		}
 	}
 
 	var count int
 	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 9 {
-		t.Errorf("schema_migrations count = %d, want 9", count)
+	if count != len(migrations) {
+		t.Errorf("schema_migrations count = %d, want %d", count, len(migrations))
 	}
 }
 

@@ -1,8 +1,6 @@
 // Package openai implements internal/llmreply.Provider against a real
-// OpenAI-compatible chat-completions endpoint. It is the outbound
-// counterpart to internal/llmreply, exactly as internal/provider/misskey
-// is to internal/miauth: a narrow adapter behind a use-case-owned
-// interface (AGENTS.md: "put provider boundaries behind narrow
+// OpenAI-compatible chat-completions endpoint. It is a narrow adapter
+// behind a use-case-owned interface (AGENTS.md: "put provider boundaries behind narrow
 // interfaces"), so internal/llmreply never depends on net/http or a
 // specific provider. Client is deliberately generic over
 // baseURL/apiKey/model so a future provider that also speaks the

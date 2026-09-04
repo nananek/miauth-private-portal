@@ -11,13 +11,10 @@ import (
 	"time"
 )
 
-// validAuthEnv is the minimal set of Auth env vars every test that
-// expects Load to succeed must supply, now that LOCAL_ORIGIN and
-// IDENTITY_ORIGIN are required in every environment.
+// validAuthEnv is the minimal Auth configuration required by tests.
 func validAuthEnv() map[string]string {
 	return map[string]string{
-		KeyLocalOrigin:    "https://portal.example",
-		KeyIdentityOrigin: "https://misskey.example",
+		KeyLocalOrigin: "https://portal.example",
 	}
 }
 
@@ -125,10 +122,8 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			MaxOpenConns: 8,
 		},
 		Auth: AuthConfig{
-			LocalOrigin:         "https://portal.example",
-			IdentityOrigin:      "https://misskey.example",
-			UpstreamHTTPTimeout: 10 * time.Second,
-			OwnerUsername:       "owner",
+			LocalOrigin:   "https://portal.example",
+			OwnerUsername: "owner",
 		},
 		Jobs: defaultJobsConfig(),
 		LLM:  defaultLLMConfig(),
@@ -154,7 +149,7 @@ func TestLoad_MissingConfigFileIsNotError(t *testing.T) {
 }
 
 func TestLoad_FileValuesApplied(t *testing.T) {
-	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\nIDENTITY_ORIGIN=https://misskey.example\n")
+	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\n")
 	cfg, err := Load(LoadOptions{
 		ConfigFilePath: path,
 		Getenv:         getenvFromMap(nil),
@@ -168,7 +163,7 @@ func TestLoad_FileValuesApplied(t *testing.T) {
 }
 
 func TestLoad_EnvOverridesFile(t *testing.T) {
-	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\nIDENTITY_ORIGIN=https://misskey.example\n")
+	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\n")
 	cfg, err := Load(LoadOptions{
 		ConfigFilePath: path,
 		Getenv:         getenvFromMap(map[string]string{KeyHTTPPort: "7070"}),
@@ -206,6 +201,18 @@ func TestLoad_UnknownKeyInFileFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "FOO_BAR") || !strings.Contains(err.Error(), "unknown") {
 		t.Errorf("error %q does not report FOO_BAR as unknown", err.Error())
+	}
+}
+
+func TestLoad_RemovedUpstreamAuthKeysAreRejected(t *testing.T) {
+	for _, key := range []string{"IDENTITY_ORIGIN", "ALLOWED_MISSKEY_USER_ID", "UPSTREAM_HTTP_TIMEOUT"} {
+		t.Run(key, func(t *testing.T) {
+			path := writeTempEnvFile(t, "APP_ENV=development\nLOCAL_ORIGIN=https://portal.example\n"+key+"=removed\n")
+			_, err := Load(LoadOptions{ConfigFilePath: path, Getenv: getenvFromMap(nil)})
+			if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "unknown") {
+				t.Fatalf("error = %v, want unknown-key error for %s", err, key)
+			}
+		})
 	}
 }
 
@@ -449,10 +456,8 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			MaxOpenConns: 8,
 		},
 		Auth: AuthConfig{
-			LocalOrigin:         "https://portal.example",
-			IdentityOrigin:      "https://misskey.example",
-			UpstreamHTTPTimeout: 10 * time.Second,
-			OwnerUsername:       "owner",
+			LocalOrigin:   "https://portal.example",
+			OwnerUsername: "owner",
 		},
 		Jobs: defaultJobsConfig(),
 	}
@@ -541,27 +546,13 @@ func TestHTTPConfig_Addr(t *testing.T) {
 
 func TestLoad_MissingLocalOrigin(t *testing.T) {
 	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-		KeyAppEnv:         "development",
-		KeyIdentityOrigin: "https://misskey.example",
+		KeyAppEnv: "development",
 	})})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if !strings.Contains(err.Error(), KeyLocalOrigin) {
 		t.Errorf("error %q does not mention %s", err.Error(), KeyLocalOrigin)
-	}
-}
-
-func TestLoad_MissingIdentityOrigin(t *testing.T) {
-	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-		KeyAppEnv:      "development",
-		KeyLocalOrigin: "https://portal.example",
-	})})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), KeyIdentityOrigin) {
-		t.Errorf("error %q does not mention %s", err.Error(), KeyIdentityOrigin)
 	}
 }
 
@@ -574,9 +565,8 @@ func TestLoad_OriginRejectsPathQueryFragmentUserinfo(t *testing.T) {
 	}
 	for _, v := range cases {
 		_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-			KeyAppEnv:         "development",
-			KeyLocalOrigin:    v,
-			KeyIdentityOrigin: "https://misskey.example",
+			KeyAppEnv:      "development",
+			KeyLocalOrigin: v,
 		})})
 		if err == nil {
 			t.Errorf("LOCAL_ORIGIN=%q: expected error, got nil", v)
@@ -590,25 +580,23 @@ func TestLoad_OriginRejectsPathQueryFragmentUserinfo(t *testing.T) {
 
 func TestLoad_DevelopmentAcceptsHTTPOrigin(t *testing.T) {
 	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-		KeyAppEnv:         "development",
-		KeyLocalOrigin:    "http://localhost:8080",
-		KeyIdentityOrigin: "https://misskey.example",
+		KeyAppEnv:      "development",
+		KeyLocalOrigin: "http://localhost:8080",
 	})})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// TestLoad_OriginTrimsTrailingSlash backs the fix for a LOCAL_ORIGIN or
-// IDENTITY_ORIGIN configured with trailing slashes: it must be
+// TestLoad_OriginTrimsTrailingSlash backs the fix for LOCAL_ORIGIN
+// configured with trailing slashes: it must be
 // normalized to a bare origin, not stored as-is, or every URL this
 // service builds by naively concatenating "origin + /path" ends up with
 // a double slash.
 func TestLoad_OriginTrimsTrailingSlash(t *testing.T) {
 	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-		KeyAppEnv:         "development",
-		KeyLocalOrigin:    "https://portal.example//",
-		KeyIdentityOrigin: "https://misskey.example///",
+		KeyAppEnv:      "development",
+		KeyLocalOrigin: "https://portal.example//",
 	})})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -616,18 +604,14 @@ func TestLoad_OriginTrimsTrailingSlash(t *testing.T) {
 	if cfg.Auth.LocalOrigin != "https://portal.example" {
 		t.Errorf("LocalOrigin = %q, want no trailing slash", cfg.Auth.LocalOrigin)
 	}
-	if cfg.Auth.IdentityOrigin != "https://misskey.example" {
-		t.Errorf("IdentityOrigin = %q, want no trailing slash", cfg.Auth.IdentityOrigin)
-	}
 }
 
 func TestLoad_ProductionRejectsHTTPOrigin(t *testing.T) {
 	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
-		KeyAppEnv:         "production",
-		KeyLogFormat:      "json",
-		KeyLogLevel:       "info",
-		KeyLocalOrigin:    "http://portal.example",
-		KeyIdentityOrigin: "https://misskey.example",
+		KeyAppEnv:      "production",
+		KeyLogFormat:   "json",
+		KeyLogLevel:    "info",
+		KeyLocalOrigin: "http://portal.example",
 	})})
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -751,69 +735,6 @@ func TestLoad_OwnerDisplayNameOptional(t *testing.T) {
 		t.Errorf("OwnerDisplayName = %q, want Nana", cfg.Auth.OwnerDisplayName)
 	}
 }
-
-func TestLoad_UpstreamHTTPTimeoutDefaultAndValidation(t *testing.T) {
-	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
-		KeyAppEnv: "development",
-	}))})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Auth.UpstreamHTTPTimeout != 10*time.Second {
-		t.Errorf("UpstreamHTTPTimeout = %v, want 10s", cfg.Auth.UpstreamHTTPTimeout)
-	}
-
-	_, err = Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
-		KeyAppEnv:              "development",
-		KeyUpstreamHTTPTimeout: "0s",
-	}))})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), KeyUpstreamHTTPTimeout) {
-		t.Errorf("error %q does not mention %s", err.Error(), KeyUpstreamHTTPTimeout)
-	}
-}
-
-func TestLoad_WriteTimeoutMustExceedUpstreamTimeout(t *testing.T) {
-	for _, writeTimeout := range []string{"10s", "10.5s"} {
-		_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
-			KeyAppEnv:              "development",
-			KeyHTTPWriteTimeout:    writeTimeout,
-			KeyUpstreamHTTPTimeout: "10s",
-		}))})
-		if err == nil {
-			t.Errorf("HTTP_WRITE_TIMEOUT=%s: expected error, got nil", writeTimeout)
-			continue
-		}
-		if !strings.Contains(err.Error(), KeyHTTPWriteTimeout) || !strings.Contains(err.Error(), KeyUpstreamHTTPTimeout) {
-			t.Errorf("error %q does not explain the timeout relationship", err.Error())
-		}
-	}
-}
-
-// TestConfig_Redacted_NeverExposesAllowedMisskeyUserID backs Issue #5's
-// acceptance criteria: the allowlisted upstream user ID must never reach
-// a log line or response, so Redacted must show only whether it is set.
-func TestConfig_Redacted_NeverExposesAllowedMisskeyUserID(t *testing.T) {
-	const secretUserID = "super-secret-upstream-user-id"
-	cfg := Config{
-		Auth: AuthConfig{AllowedMisskeyUserID: secretUserID},
-	}
-	redacted := cfg.Redacted()
-	if strings.Contains(redacted[KeyAllowedMisskeyUserID], secretUserID) {
-		t.Errorf("Redacted()[%s] leaked the raw value: %q", KeyAllowedMisskeyUserID, redacted[KeyAllowedMisskeyUserID])
-	}
-	if redacted[KeyAllowedMisskeyUserID] != "<set>" {
-		t.Errorf("Redacted()[%s] = %q, want <set>", KeyAllowedMisskeyUserID, redacted[KeyAllowedMisskeyUserID])
-	}
-
-	unsetRedacted := Config{}.Redacted()
-	if unsetRedacted[KeyAllowedMisskeyUserID] != "<unset>" {
-		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyAllowedMisskeyUserID, unsetRedacted[KeyAllowedMisskeyUserID])
-	}
-}
-
 func TestLoad_LLMDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
 	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv: "development",
@@ -1031,8 +952,7 @@ func TestLoad_LLMClassificationBoundsRejectOutOfRangeValues(t *testing.T) {
 
 // TestConfig_Redacted_NeverExposesLLMAPIKey documents the same secret
 // treatment AGENTS.md and Issue #9's acceptance criteria require for
-// LLM_API_KEY as TestConfig_Redacted_NeverExposesAllowedMisskeyUserID
-// gives ALLOWED_MISSKEY_USER_ID.
+// LLM_API_KEY.
 func TestConfig_Redacted_NeverExposesLLMAPIKey(t *testing.T) {
 	const secretKey = "sk-super-secret"
 	cfg := Config{LLM: LLMConfig{APIKey: secretKey}}

@@ -4,12 +4,12 @@ import 'package:misskey_dart/misskey_dart.dart';
 
 /// The running server's API base, e.g. `http://localhost:18080/api/`.
 /// scripts/run-contract-tests.sh sets TEST_API_URL after starting
-/// bin/server and bin/fakemisskey.
+/// bin/server and approving its MiAuth session through miauthctl.
 Uri testApiUrl() => Uri.parse(_requiredEnv('TEST_API_URL'));
 
 /// An authenticated [Misskey] client using the local API token
-/// scripts/run-contract-tests.sh obtained by driving a real (fake-
-/// upstream-backed) MiAuth flow before invoking `dart test`. apiUrl is
+/// scripts/run-contract-tests.sh obtained by driving a local MiAuth flow
+/// and host-local CLI approval before invoking `dart test`. apiUrl is
 /// passed explicitly so misskey_dart never derives it from serverUrl's
 /// path segments; see docs/compat/aria-v1.5.11.md's "Issue #7
 /// implementation notes" for why this substitutes for a real Aria E2E

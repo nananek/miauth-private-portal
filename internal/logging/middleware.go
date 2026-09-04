@@ -41,7 +41,7 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 // method, pattern, status, duration, and request ID. It deliberately logs
 // pattern (the route string a handler was registered under, e.g.
 // "/miauth/{session}") rather than the raw request path, because a future
-// route can embed a bearer secret in its path (see ADR-0001's Aria MiAuth
+// route can embed a bearer secret in its path (see ADR-0002's Aria MiAuth
 // {session} route); the raw path, query string, headers, and body are
 // never logged here.
 //

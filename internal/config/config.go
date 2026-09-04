@@ -86,34 +86,16 @@ type JobsConfig struct {
 	ShutdownGracePeriod time.Duration
 }
 
-// AuthConfig configures the bridged MiAuth flow ADR-0001 defines: this
-// service's own public origin, the fixed upstream Misskey origin used for
-// owner verification, the single-owner allowlist, and the Aria client
-// return-callback allowlist.
+// AuthConfig configures the local MiAuth flow defined by ADR-0002.
 type AuthConfig struct {
-	// LocalOrigin is this service's own configured public origin (ADR-0001
-	// LOCAL_ORIGIN). Aria's /miauth and /api/* calls, and this service's
-	// own internal MiAuth callback, are always rooted here.
+	// LocalOrigin is this service's configured public origin.
 	LocalOrigin string
-	// IdentityOrigin is the fixed upstream Misskey origin used for owner
-	// verification (ADR-0001 IDENTITY_ORIGIN). It is never supplied by a
-	// client request.
-	IdentityOrigin string
-	// AllowedMisskeyUserID is the opaque upstream Misskey user ID allowed
-	// to bind as this deployment's single owner. Empty means the service
-	// is unbound until an operator completes the bootstrap-gate flow
-	// (ADR-0001 §2). It is never logged or returned to a client; see
-	// Redacted.
-	AllowedMisskeyUserID string
 	// AriaClientCallbacks is the exact-match allowlist of client return
 	// callbacks Aria may supply to GET /miauth/{session} (for example
 	// Android's aria://aria/miauth). A non-HTTPS scheme is explicitly
-	// permitted here (ADR-0001 §1); an empty list rejects any
+	// permitted here; an empty list rejects any
 	// client-supplied callback.
 	AriaClientCallbacks []string
-	// UpstreamHTTPTimeout bounds every HTTP call this service makes to
-	// IdentityOrigin.
-	UpstreamHTTPTimeout time.Duration
 	// OwnerUsername is the Misskey-compatible username this service
 	// reports for the local owner actor until Issue #5's follow-up adds
 	// self-service profile editing.
@@ -322,7 +304,6 @@ var allowedEnvironments = []string{string(EnvDevelopment), string(EnvStaging), s
 const (
 	httpPortMin, httpPortMax                     = 1, 65535
 	httpMaxRequestBodyBytesMin                   = 1
-	httpWriteTimeoutUpstreamMargin               = time.Second
 	dbBusyTimeoutMSMin, dbBusyTimeoutMSMax       = 1, 600_000
 	dbMaxOpenConnsMin, dbMaxOpenConnsMax         = 1, 100
 	jobsClaimBatchSizeMin, jobsClaimBatchSizeMax = 1, 100
@@ -359,11 +340,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 
 	cfg.Auth.LocalOrigin = strings.TrimRight(values[KeyLocalOrigin], "/")
 	validateOrigin(&errs, KeyLocalOrigin, cfg.Auth.LocalOrigin, cfg.Env)
-	cfg.Auth.IdentityOrigin = strings.TrimRight(values[KeyIdentityOrigin], "/")
-	validateOrigin(&errs, KeyIdentityOrigin, cfg.Auth.IdentityOrigin, cfg.Env)
-	cfg.Auth.AllowedMisskeyUserID = parseOptionalString(values, KeyAllowedMisskeyUserID, "")
 	cfg.Auth.AriaClientCallbacks = parseOptionalCallbackList(values, KeyAriaClientCallbacks, &errs)
-	cfg.Auth.UpstreamHTTPTimeout = parseOptionalDuration(values, KeyUpstreamHTTPTimeout, 10*time.Second, &errs)
 	cfg.Auth.OwnerUsername = parseOptionalString(values, KeyOwnerUsername, "owner")
 	validateOwnerUsername(&errs, KeyOwnerUsername, cfg.Auth.OwnerUsername)
 	cfg.Auth.OwnerDisplayName = parseOptionalString(values, KeyOwnerDisplayName, "")
@@ -428,16 +405,7 @@ func (c Config) Validate() error {
 	validateIntBounds(&errs, KeyDBMaxOpenConns, c.DB.MaxOpenConns, dbMaxOpenConnsMin, dbMaxOpenConnsMax)
 
 	validateOrigin(&errs, KeyLocalOrigin, c.Auth.LocalOrigin, c.Env)
-	validateOrigin(&errs, KeyIdentityOrigin, c.Auth.IdentityOrigin, c.Env)
 	validateCallbackEntries(&errs, KeyAriaClientCallbacks, c.Auth.AriaClientCallbacks)
-	validatePositiveDuration(&errs, KeyUpstreamHTTPTimeout, c.Auth.UpstreamHTTPTimeout)
-	if c.HTTP.WriteTimeout > 0 && c.Auth.UpstreamHTTPTimeout > 0 &&
-		c.HTTP.WriteTimeout-c.Auth.UpstreamHTTPTimeout < httpWriteTimeoutUpstreamMargin {
-		errs = append(errs, FieldError{
-			Key:    KeyHTTPWriteTimeout,
-			Reason: "must be at least 1s greater than " + KeyUpstreamHTTPTimeout + " so an upstream timeout can still be returned to the client",
-		})
-	}
 	validateOwnerUsername(&errs, KeyOwnerUsername, c.Auth.OwnerUsername)
 
 	validatePositiveDuration(&errs, KeyJobsPollInterval, c.Jobs.PollInterval)
@@ -518,30 +486,23 @@ func (c Config) Redacted() map[string]string {
 		KeyDBBusyTimeoutMS:       strconv.FormatInt(c.DB.BusyTimeout.Milliseconds(), 10),
 		KeyDBMaxOpenConns:        strconv.Itoa(c.DB.MaxOpenConns),
 		KeyLocalOrigin:           c.Auth.LocalOrigin,
-		KeyIdentityOrigin:        c.Auth.IdentityOrigin,
-		// AllowedMisskeyUserID is the single-owner allowlist value: the
-		// acceptance criteria for Issue #5 require it never reach a log
-		// or response, so only whether it is set is shown here, never
-		// the value itself.
-		KeyAllowedMisskeyUserID: redactedSetOrUnset(c.Auth.AllowedMisskeyUserID),
-		KeyAriaClientCallbacks:  strings.Join(c.Auth.AriaClientCallbacks, ","),
-		KeyUpstreamHTTPTimeout:  c.Auth.UpstreamHTTPTimeout.String(),
-		KeyOwnerUsername:        c.Auth.OwnerUsername,
-		KeyOwnerDisplayName:     c.Auth.OwnerDisplayName,
-		KeyJobsWorkerID:         c.Jobs.WorkerID,
-		KeyJobsPollInterval:     c.Jobs.PollInterval.String(),
-		KeyJobsClaimBatchSize:   strconv.Itoa(c.Jobs.ClaimBatchSize),
-		KeyJobsLeaseDuration:    c.Jobs.LeaseDuration.String(),
-		KeyJobsLeaseRenewMargin: c.Jobs.LeaseRenewMargin.String(),
-		KeyJobsMaxAttempts:      strconv.Itoa(c.Jobs.MaxAttempts),
-		KeyJobsBackoffBase:      c.Jobs.BackoffBase.String(),
-		KeyJobsBackoffMax:       c.Jobs.BackoffMax.String(),
-		KeyJobsMaxConcurrent:    strconv.Itoa(c.Jobs.MaxConcurrentJobs),
-		KeyJobsShutdownGrace:    c.Jobs.ShutdownGracePeriod.String(),
-		KeyLLMEnabled:           strconv.FormatBool(c.LLM.Enabled),
-		KeyLLMBaseURL:           c.LLM.BaseURL,
+		KeyAriaClientCallbacks:   strings.Join(c.Auth.AriaClientCallbacks, ","),
+		KeyOwnerUsername:         c.Auth.OwnerUsername,
+		KeyOwnerDisplayName:      c.Auth.OwnerDisplayName,
+		KeyJobsWorkerID:          c.Jobs.WorkerID,
+		KeyJobsPollInterval:      c.Jobs.PollInterval.String(),
+		KeyJobsClaimBatchSize:    strconv.Itoa(c.Jobs.ClaimBatchSize),
+		KeyJobsLeaseDuration:     c.Jobs.LeaseDuration.String(),
+		KeyJobsLeaseRenewMargin:  c.Jobs.LeaseRenewMargin.String(),
+		KeyJobsMaxAttempts:       strconv.Itoa(c.Jobs.MaxAttempts),
+		KeyJobsBackoffBase:       c.Jobs.BackoffBase.String(),
+		KeyJobsBackoffMax:        c.Jobs.BackoffMax.String(),
+		KeyJobsMaxConcurrent:     strconv.Itoa(c.Jobs.MaxConcurrentJobs),
+		KeyJobsShutdownGrace:     c.Jobs.ShutdownGracePeriod.String(),
+		KeyLLMEnabled:            strconv.FormatBool(c.LLM.Enabled),
+		KeyLLMBaseURL:            c.LLM.BaseURL,
 		// LLM_API_KEY is a secret credential for a third-party endpoint:
-		// like AllowedMisskeyUserID, only whether it is set is shown here.
+		// only whether it is set is shown here.
 		KeyLLMAPIKey:                                 redactedSetOrUnset(c.LLM.APIKey),
 		KeyLLMModel:                                  c.LLM.Model,
 		KeyLLMTimeout:                                c.LLM.Timeout.String(),
@@ -556,8 +517,8 @@ func (c Config) Redacted() map[string]string {
 	}
 }
 
-func redactedSetOrUnset(v string) string {
-	if v == "" {
+func redactedSetOrUnset(value string) string {
+	if value == "" {
 		return "<unset>"
 	}
 	return "<set>"
@@ -685,10 +646,10 @@ func validatePositiveDuration(errs *[]FieldError, key string, d time.Duration) b
 	return true
 }
 
-// validateOrigin backs LOCAL_ORIGIN and IDENTITY_ORIGIN: both are
-// required in every environment (there is no safe default redirect
+// validateOrigin backs LOCAL_ORIGIN. It is required in every environment
+// (there is no safe default redirect
 // target), must be an absolute URL naming only a scheme and a host (no
-// userinfo, path beyond "" or "/", query, or fragment — ADR-0001 fixes
+// userinfo, path beyond "" or "/", query, or fragment — ADR-0002 fixes
 // these as origins, never paths), and must be https in production.
 func validateOrigin(errs *[]FieldError, key, v string, env Environment) bool {
 	if v == "" {
@@ -712,7 +673,7 @@ func validateOrigin(errs *[]FieldError, key, v string, env Environment) bool {
 }
 
 // validateLLMBaseURL checks LLM_BASE_URL when the LLM feature is enabled.
-// Unlike validateOrigin (LOCAL_ORIGIN/IDENTITY_ORIGIN), a path is expected
+// Unlike validateOrigin (LOCAL_ORIGIN), a path is expected
 // and allowed here: OpenAI-compatible base URLs commonly include one (for
 // example "https://api.openai.com/v1"), so only the scheme and host are
 // constrained, not the path/query.
@@ -772,9 +733,8 @@ func splitCallbackList(v string) []string {
 
 // validateCallbackEntries checks each ARIA_CLIENT_CALLBACKS entry is a
 // URL with a non-empty scheme. Unlike validateOrigin, a non-HTTPS scheme
-// (Aria's aria://aria/miauth deep link) is explicitly allowed here per
-// ADR-0001 §1: these are exact-match client return destinations, never
-// used as an upstream redirect target.
+// (Aria's aria://aria/miauth deep link) is explicitly allowed here: these
+// are exact-match client return destinations.
 func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool {
 	ok := true
 	for _, p := range list {

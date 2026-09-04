@@ -16,7 +16,6 @@ func setJobsctlTestEnv(t *testing.T, dbPath string) {
 	t.Helper()
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("LOCAL_ORIGIN", "https://portal.example")
-	t.Setenv("IDENTITY_ORIGIN", "https://misskey.example")
 	t.Setenv("DB_PATH", dbPath)
 }
 
