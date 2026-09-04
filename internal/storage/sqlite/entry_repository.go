@@ -41,6 +41,16 @@ func (r *entryRepository) ListByThread(ctx context.Context, threadID string) ([]
 	return scanEntries(rows)
 }
 
+func (r *entryRepository) ListChildren(ctx context.Context, parentEntryID string) ([]domain.Entry, error) {
+	rows, err := r.q.QueryContext(ctx,
+		entrySelectColumns+` FROM entries WHERE parent_entry_id = ? ORDER BY created_at, id`, parentEntryID)
+	if err != nil {
+		return nil, fmt.Errorf("list child entries: %w", err)
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
 func (r *entryRepository) ListTimeline(ctx context.Context, page domain.Page, includeHidden bool) ([]domain.Entry, error) {
 	query := entrySelectColumns + ` FROM entries WHERE 1 = 1`
 	var args []any
@@ -66,6 +76,15 @@ func (r *entryRepository) ListTimeline(ctx context.Context, page domain.Page, in
 	}
 	defer rows.Close()
 	return scanEntries(rows)
+}
+
+func (r *entryRepository) UpdateBody(ctx context.Context, id, body string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE entries SET body = ?, updated_at = ? WHERE id = ?`, body, formatTime(at), id)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
 }
 
 func (r *entryRepository) SetProcessingStatus(ctx context.Context, id string, status domain.ProcessingStatus, at time.Time) error {
