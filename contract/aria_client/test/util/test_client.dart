@@ -16,7 +16,11 @@ Uri testApiUrl() => Uri.parse(_requiredEnv('TEST_API_URL'));
 /// run.
 Misskey buildTestClient() {
   final apiUrl = testApiUrl();
-  return Misskey(token: _requiredEnv('TEST_TOKEN'), serverUrl: apiUrl, apiUrl: apiUrl);
+  return Misskey(
+    token: _requiredEnv('TEST_TOKEN'),
+    serverUrl: apiUrl,
+    apiUrl: apiUrl,
+  );
 }
 
 /// An anonymous [Misskey] client (no `i` token), for endpoints Aria calls

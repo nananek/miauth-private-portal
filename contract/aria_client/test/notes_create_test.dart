@@ -17,29 +17,39 @@ void main() {
     expect(created.replyId, isNull);
   });
 
-  test('POST /api/notes/create with replyId decodes the created reply', () async {
-    final misskey = buildTestClient();
-    final rootText = 'reply parent ${DateTime.now().microsecondsSinceEpoch}';
-    final root = await misskey.notes.create(NotesCreateRequest(text: rootText));
+  test(
+    'POST /api/notes/create with replyId decodes the created reply',
+    () async {
+      final misskey = buildTestClient();
+      final rootText = 'reply parent ${DateTime.now().microsecondsSinceEpoch}';
+      final root = await misskey.notes.create(
+        NotesCreateRequest(text: rootText),
+      );
 
-    final replyText = 'reply body ${DateTime.now().microsecondsSinceEpoch}';
-    final reply = await misskey.notes.create(
-      NotesCreateRequest(text: replyText, replyId: root!.id),
-    );
+      final replyText = 'reply body ${DateTime.now().microsecondsSinceEpoch}';
+      final reply = await misskey.notes.create(
+        NotesCreateRequest(text: replyText, replyId: root!.id),
+      );
 
-    expect(reply, isNotNull);
-    expect(reply!.replyId, equals(root.id));
-    expect(reply.text, equals(replyText));
-  });
+      expect(reply, isNotNull);
+      expect(reply!.replyId, equals(root.id));
+      expect(reply.text, equals(replyText));
+    },
+  );
 
-  test('POST /api/notes/create rejects an unknown replyId as NO_SUCH_NOTE', () async {
-    final misskey = buildTestClient();
+  test(
+    'POST /api/notes/create rejects an unknown replyId as NO_SUCH_NOTE',
+    () async {
+      final misskey = buildTestClient();
 
-    await expectLater(
-      misskey.notes.create(NotesCreateRequest(text: 'orphan reply', replyId: 'does-not-exist')),
-      throwsA(
-        isA<MisskeyException>().having((e) => e.code, 'code', 'NO_SUCH_NOTE'),
-      ),
-    );
-  });
+      await expectLater(
+        misskey.notes.create(
+          NotesCreateRequest(text: 'orphan reply', replyId: 'does-not-exist'),
+        ),
+        throwsA(
+          isA<MisskeyException>().having((e) => e.code, 'code', 'NO_SUCH_NOTE'),
+        ),
+      );
+    },
+  );
 }

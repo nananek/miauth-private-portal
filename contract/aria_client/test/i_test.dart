@@ -23,7 +23,11 @@ void main() {
     final misskey = buildTestClient();
 
     final before = await misskey.i.i();
-    await misskey.notes.create(NotesCreateRequest(text: 'notesCount probe ${DateTime.now().microsecondsSinceEpoch}'));
+    await misskey.notes.create(
+      NotesCreateRequest(
+        text: 'notesCount probe ${DateTime.now().microsecondsSinceEpoch}',
+      ),
+    );
     final after = await misskey.i.i();
 
     expect(after.notesCount, equals(before.notesCount + 1));
