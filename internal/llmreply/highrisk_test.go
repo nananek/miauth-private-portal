@@ -19,6 +19,7 @@ func TestIsHighRisk(t *testing.T) {
 		{name: "legal english", body: "Do I need legal advice for this contract?", want: true},
 		{name: "medical english", body: "Got a diagnosis today from my doctor", want: true},
 		{name: "financial english", body: "Looking for investment advice on index funds", want: true},
+		{name: "legal english mixed case", body: "Signing a Loan Agreement tomorrow, nervous about it", want: true},
 		{name: "unrelated", body: "Fixed a bug in the timeline pagination logic", want: false},
 	}
 	for _, tt := range tests {

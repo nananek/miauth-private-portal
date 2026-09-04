@@ -9,15 +9,19 @@ import "strings"
 // trigger lists, a hardcoded v1 constant rather than operator-configurable.
 var highRiskMarkers = []string{
 	// legal
-	"訴訟", "弁護士", "契約書", "法律", "違法", "loan agreement",
+	"訴訟", "弁護士", "契約書", "法律", "違法",
 	// medical
 	"診断", "処方", "症状", "通院", "医師", "病院", "薬",
 	// financial
 	"投資", "資産運用", "確定申告", "税金", "住宅ローン",
 }
 
+// highRiskMarkersLower holds English phrases, matched case-insensitively
+// against a lowercased body: unlike highRiskMarkers' Japanese entries
+// (case does not apply), an English phrase belongs here, never in
+// highRiskMarkers, or it would only match one exact casing.
 var highRiskMarkersLower = []string{
-	"legal advice", "lawsuit", "contract law", "sue me", "sue them",
+	"legal advice", "lawsuit", "contract law", "sue me", "sue them", "loan agreement",
 	"medical advice", "diagnosis", "symptom", "prescription", "treatment",
 	"financial advice", "investment advice", "tax advice", "stock tip",
 }
