@@ -83,6 +83,19 @@ func newTestJob(now time.Time, idempotencyKey *string) domain.Job {
 	}
 }
 
+func newTestGeneration(targetEntryID string, kind domain.GenerationKind, at time.Time) domain.LLMGeneration {
+	return domain.LLMGeneration{
+		ID:            domain.NewID(),
+		TargetEntryID: targetEntryID,
+		Kind:          kind,
+		Provider:      "test-provider",
+		Model:         "test-model",
+		PromptVersion: "test-v1",
+		Status:        domain.GenerationPending,
+		RequestedAt:   at,
+	}
+}
+
 func requireEntryBody(t *testing.T, db *sqlite.DB, entryID, want string) domain.Entry {
 	t.Helper()
 	entry, err := db.Entries.Get(t.Context(), entryID)

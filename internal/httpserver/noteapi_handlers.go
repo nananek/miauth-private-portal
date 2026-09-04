@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
@@ -167,6 +169,8 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	job := s.llmReplyJob(*req.Text)
+
 	var entry domain.Entry
 	var err error
 	if req.ReplyID != nil && *req.ReplyID != "" {
@@ -190,13 +194,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, nil)
+		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, job)
 		if errors.Is(err, timeline.ErrParentNotFound) {
 			writeNoSuchNote(w)
 			return
 		}
 	} else {
-		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, nil)
+		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, job)
 	}
 	if err != nil {
 		s.logger.Error("create note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
@@ -211,6 +215,48 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: newNote(entry, newUserLiteFromOwner(owner))})
+}
+
+// llmReplyJob decides whether posting body should enqueue an
+// Issue #9 "llm_generation" job, evaluating only internal/llmreply's
+// synchronous, LLM-call-free policy (internal/llmreply.DecideReply)
+// against body itself — never the wider thread, which the job handler
+// fetches only once actually claimed. It returns nil whenever
+// s.llmEnabled is false (LLM_ENABLED's safe default: no job is ever
+// enqueued and no request ever reaches a provider) or the policy does
+// not call for generation. The returned Job has no SourceEntryID yet:
+// timeline.Service.CreateRoot/CreateReply's enqueueForEntry sets it
+// atomically to the entry actually created, in the same transaction
+// (AGENTS.md: "Commit the post and durable job intent atomically").
+func (s *Server) llmReplyJob(body string) *domain.Job {
+	if !s.llmEnabled {
+		return nil
+	}
+	decision := llmreply.DecideReply(body)
+	if !decision.ShouldGenerate {
+		return nil
+	}
+	payload, err := llmreply.NewJobPayload(decision)
+	if err != nil {
+		// decision's fields are plain strings; NewJobPayload can only
+		// fail here on an encoding bug, never on post content. Skip
+		// generation rather than fail the note creation itself
+		// (AGENTS.md: "Failure of an LLM...must never make a user post
+		// disappear").
+		s.logger.Warn("llm reply job payload encode failed", "error_category", "encode_error")
+		return nil
+	}
+	now := time.Now().UTC()
+	return &domain.Job{
+		ID:             domain.NewID(),
+		JobType:        llmreply.JobType,
+		Payload:        payload,
+		PayloadVersion: 1,
+		State:          domain.JobPending,
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
 }
 
 type notesTimelineRequest struct {

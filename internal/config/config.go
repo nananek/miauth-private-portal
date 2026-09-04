@@ -36,6 +36,7 @@ type Config struct {
 	DB   DBConfig
 	Auth AuthConfig
 	Jobs JobsConfig
+	LLM  LLMConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -121,6 +122,34 @@ type AuthConfig struct {
 	// owner's UserDetailedNotMe.name. Empty means null (unset), matching
 	// Misskey's own nullable name field.
 	OwnerDisplayName string
+}
+
+// LLMConfig configures Issue #9's OpenAI-compatible reply/follow-up
+// generation job. Enabled defaults to false: no generation job is ever
+// enqueued and no request ever reaches BaseURL until an operator
+// explicitly turns this on, so a fresh deployment cannot accidentally
+// leak post content to a third-party endpoint.
+type LLMConfig struct {
+	// Enabled gates every generation job enqueue in internal/httpserver
+	// and internal/llmreply. False is the safe default.
+	Enabled bool
+	// BaseURL is the OpenAI-compatible API base (for example
+	// "https://api.openai.com/v1" or a self-hosted equivalent).
+	// internal/provider/openai appends the chat-completions path to it.
+	BaseURL string
+	// APIKey authenticates against BaseURL. Never logged or returned to
+	// a client; see Redacted.
+	APIKey string
+	Model  string
+	// Timeout bounds every HTTP call this service makes to BaseURL.
+	Timeout time.Duration
+	// MaxOutputTokens bounds a single generation's completion length.
+	MaxOutputTokens int
+	// ThreadContextMaxMessages and ThreadContextMaxChars bound how much
+	// prior thread history internal/llmreply's prompt builder includes,
+	// so a long thread cannot make a single generation request unbounded.
+	ThreadContextMaxMessages int
+	ThreadContextMaxChars    int
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -267,6 +296,10 @@ const (
 	jobsClaimBatchSizeMin, jobsClaimBatchSizeMax = 1, 100
 	jobsMaxAttemptsMin, jobsMaxAttemptsMax       = 1, 100
 	jobsMaxConcurrentMin, jobsMaxConcurrentMax   = 1, 64
+
+	llmMaxOutputTokensMin, llmMaxOutputTokensMax                   = 1, 32768
+	llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax = 1, 500
+	llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax       = 1, 200_000
 )
 
 func parse(values map[string]string) (Config, []FieldError) {
@@ -313,6 +346,15 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Jobs.BackoffMax = parseOptionalDuration(values, KeyJobsBackoffMax, 10*time.Minute, &errs)
 	cfg.Jobs.MaxConcurrentJobs = parseOptionalInt(values, KeyJobsMaxConcurrent, 4, jobsMaxConcurrentMin, jobsMaxConcurrentMax, &errs)
 	cfg.Jobs.ShutdownGracePeriod = parseOptionalDuration(values, KeyJobsShutdownGrace, 15*time.Second, &errs)
+
+	cfg.LLM.Enabled = parseOptionalBool(values, KeyLLMEnabled, false, &errs)
+	cfg.LLM.BaseURL = strings.TrimRight(parseOptionalString(values, KeyLLMBaseURL, ""), "/")
+	cfg.LLM.APIKey = parseOptionalString(values, KeyLLMAPIKey, "")
+	cfg.LLM.Model = parseOptionalString(values, KeyLLMModel, "")
+	cfg.LLM.Timeout = parseOptionalDuration(values, KeyLLMTimeout, 30*time.Second, &errs)
+	cfg.LLM.MaxOutputTokens = parseOptionalInt(values, KeyLLMMaxOutputTokens, 1024, llmMaxOutputTokensMin, llmMaxOutputTokensMax, &errs)
+	cfg.LLM.ThreadContextMaxMessages = parseOptionalInt(values, KeyLLMThreadContextMaxMessages, 20, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax, &errs)
+	cfg.LLM.ThreadContextMaxChars = parseOptionalInt(values, KeyLLMThreadContextMaxChars, 8000, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax, &errs)
 
 	return cfg, errs
 }
@@ -376,6 +418,21 @@ func (c Config) Validate() error {
 	validateIntBounds(&errs, KeyJobsMaxConcurrent, c.Jobs.MaxConcurrentJobs, jobsMaxConcurrentMin, jobsMaxConcurrentMax)
 	validatePositiveDuration(&errs, KeyJobsShutdownGrace, c.Jobs.ShutdownGracePeriod)
 
+	// LLM fields are only required/bound-checked when the feature is
+	// actually enabled: LLM_ENABLED defaults to false, and a disabled
+	// deployment must not fail startup over an unset or zero-value LLM
+	// setting it will never use.
+	if c.LLM.Enabled {
+		validateLLMBaseURL(&errs, KeyLLMBaseURL, c.LLM.BaseURL, c.Env)
+		if c.LLM.Model == "" {
+			errs = append(errs, FieldError{Key: KeyLLMModel, Reason: "required when " + KeyLLMEnabled + "=true"})
+		}
+		validatePositiveDuration(&errs, KeyLLMTimeout, c.LLM.Timeout)
+		validateIntBounds(&errs, KeyLLMMaxOutputTokens, c.LLM.MaxOutputTokens, llmMaxOutputTokensMin, llmMaxOutputTokensMax)
+		validateIntBounds(&errs, KeyLLMThreadContextMaxMessages, c.LLM.ThreadContextMaxMessages, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax)
+		validateIntBounds(&errs, KeyLLMThreadContextMaxChars, c.LLM.ThreadContextMaxChars, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax)
+	}
+
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
 			errs = append(errs, FieldError{Key: KeyLogFormat, Reason: "must be json in production"})
@@ -432,6 +489,16 @@ func (c Config) Redacted() map[string]string {
 		KeyJobsBackoffMax:       c.Jobs.BackoffMax.String(),
 		KeyJobsMaxConcurrent:    strconv.Itoa(c.Jobs.MaxConcurrentJobs),
 		KeyJobsShutdownGrace:    c.Jobs.ShutdownGracePeriod.String(),
+		KeyLLMEnabled:           strconv.FormatBool(c.LLM.Enabled),
+		KeyLLMBaseURL:           c.LLM.BaseURL,
+		// LLM_API_KEY is a secret credential for a third-party endpoint:
+		// like AllowedMisskeyUserID, only whether it is set is shown here.
+		KeyLLMAPIKey:                   redactedSetOrUnset(c.LLM.APIKey),
+		KeyLLMModel:                    c.LLM.Model,
+		KeyLLMTimeout:                  c.LLM.Timeout.String(),
+		KeyLLMMaxOutputTokens:          strconv.Itoa(c.LLM.MaxOutputTokens),
+		KeyLLMThreadContextMaxMessages: strconv.Itoa(c.LLM.ThreadContextMaxMessages),
+		KeyLLMThreadContextMaxChars:    strconv.Itoa(c.LLM.ThreadContextMaxChars),
 	}
 }
 
@@ -506,6 +573,19 @@ func parseOptionalInt64(values map[string]string, key string, def, min int64, er
 	return n
 }
 
+func parseOptionalBool(values map[string]string, key string, def bool, errs *[]FieldError) bool {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be a boolean (true/false)"})
+		return def
+	}
+	return b
+}
+
 func parseOptionalDuration(values map[string]string, key string, def time.Duration, errs *[]FieldError) time.Duration {
 	v, ok := values[key]
 	if !ok || v == "" {
@@ -568,6 +648,28 @@ func validateOrigin(errs *[]FieldError, key, v string, env Environment) bool {
 	}
 	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must contain only a scheme and a host, no userinfo, path, query, or fragment"})
+		return false
+	}
+	if env == EnvProduction && u.Scheme != "https" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be https in production"})
+		return false
+	}
+	return true
+}
+
+// validateLLMBaseURL checks LLM_BASE_URL when the LLM feature is enabled.
+// Unlike validateOrigin (LOCAL_ORIGIN/IDENTITY_ORIGIN), a path is expected
+// and allowed here: OpenAI-compatible base URLs commonly include one (for
+// example "https://api.openai.com/v1"), so only the scheme and host are
+// constrained, not the path/query.
+func validateLLMBaseURL(errs *[]FieldError, key, v string, env Environment) bool {
+	if v == "" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "required when " + KeyLLMEnabled + "=true"})
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be an absolute http(s) URL"})
 		return false
 	}
 	if env == EnvProduction && u.Scheme != "https" {

@@ -207,6 +207,120 @@ func TestCreateReply_RollsBackEntryAndThreadTouchWhenJobConflicts(t *testing.T) 
 	}
 }
 
+func TestCreateGeneratedReply_CreatesEntryAndCompletesGeneration(t *testing.T) {
+	ts := newTestService(t)
+	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := newTestGeneration(root.ID, domain.GenerationReply, ts.clock.Now())
+	if err := ts.db.Generations.Create(t.Context(), gen); err != nil {
+		t.Fatal(err)
+	}
+
+	ts.clock.Advance(time.Minute)
+	promptTokens, completionTokens := 12, 34
+	reply, err := ts.CreateGeneratedReply(t.Context(), root.ID, domain.EntryLLMReply, "generated reply", gen.ID, &promptTokens, &completionTokens)
+	if err != nil {
+		t.Fatalf("CreateGeneratedReply: %v", err)
+	}
+	if reply.ThreadID != root.ThreadID {
+		t.Errorf("reply.ThreadID = %q, want parent's %q", reply.ThreadID, root.ThreadID)
+	}
+	if reply.ParentEntryID == nil || *reply.ParentEntryID != root.ID {
+		t.Errorf("reply.ParentEntryID = %v, want %q", reply.ParentEntryID, root.ID)
+	}
+	assistant, err := ts.db.Actors.GetByType(t.Context(), domain.ActorAssistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.AuthorActorID != assistant.ID {
+		t.Errorf("reply.AuthorActorID = %q, want assistant %q", reply.AuthorActorID, assistant.ID)
+	}
+
+	stored, err := ts.db.Generations.Get(t.Context(), gen.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.GenerationComplete {
+		t.Errorf("generation Status = %q, want complete", stored.Status)
+	}
+	if stored.ResultEntryID == nil || *stored.ResultEntryID != reply.ID {
+		t.Errorf("generation ResultEntryID = %v, want %q", stored.ResultEntryID, reply.ID)
+	}
+	if stored.Body == nil || *stored.Body != "generated reply" {
+		t.Errorf("generation Body = %v, want %q", stored.Body, "generated reply")
+	}
+	if stored.PromptTokens == nil || *stored.PromptTokens != 12 || stored.CompletionTokens == nil || *stored.CompletionTokens != 34 {
+		t.Errorf("generation tokens = (%v, %v), want (12, 34)", stored.PromptTokens, stored.CompletionTokens)
+	}
+	if stored.GeneratedAt == nil || !stored.GeneratedAt.Equal(ts.clock.Now()) {
+		t.Errorf("generation GeneratedAt = %v, want %v", stored.GeneratedAt, ts.clock.Now())
+	}
+}
+
+func TestCreateGeneratedReply_RejectsNonAssistantKind(t *testing.T) {
+	ts := newTestService(t)
+	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := newTestGeneration(root.ID, domain.GenerationReply, ts.clock.Now())
+	if err := ts.db.Generations.Create(t.Context(), gen); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, kind := range []domain.EntryKind{domain.EntryUserPost, domain.EntryNews, domain.EntryMail, domain.EntrySystem, "unknown"} {
+		if _, err := ts.CreateGeneratedReply(t.Context(), root.ID, kind, "body", gen.ID, nil, nil); !errors.Is(err, ErrInvalidKind) {
+			t.Errorf("CreateGeneratedReply(%q) error = %v, want ErrInvalidKind", kind, err)
+		}
+	}
+}
+
+// TestCreateGeneratedReply_RollsBackEntryWhenGenerationNotPending verifies
+// the same atomicity CreateReply's job-conflict tests give a durable job
+// intent: if the generation row is no longer pending (already completed
+// or failed by an earlier delivery of the same job), the reply entry and
+// thread touch must not be persisted either.
+func TestCreateGeneratedReply_RollsBackEntryWhenGenerationNotPending(t *testing.T) {
+	ts := newTestService(t)
+	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := ts.db.Threads.Get(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := newTestGeneration(root.ID, domain.GenerationReply, ts.clock.Now())
+	if err := ts.db.Generations.Create(t.Context(), gen); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.db.Generations.Fail(t.Context(), gen.ID, "test_failure", ts.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	ts.clock.Advance(time.Minute)
+	if _, err := ts.CreateGeneratedReply(t.Context(), root.ID, domain.EntryLLMReply, "generated", gen.ID, nil, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("CreateGeneratedReply() error = %v, want ErrConflict", err)
+	}
+
+	thread, err := ts.GetThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(thread) != 1 || thread[0].ID != root.ID {
+		t.Errorf("failed CreateGeneratedReply left thread entries = %v, want only root", thread)
+	}
+	after, err := ts.db.Threads.Get(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("failed CreateGeneratedReply touched thread at %v, want unchanged %v", after.UpdatedAt, before.UpdatedAt)
+	}
+}
+
 func TestEditPost_UpdatesOwnersPostAndEnqueuesJob(t *testing.T) {
 	ts := newTestService(t)
 	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "before", nil)

@@ -39,6 +39,15 @@ const (
 	KeyJobsBackoffMax       = "JOBS_BACKOFF_MAX"
 	KeyJobsMaxConcurrent    = "JOBS_MAX_CONCURRENT"
 	KeyJobsShutdownGrace    = "JOBS_SHUTDOWN_GRACE_PERIOD"
+
+	KeyLLMEnabled                  = "LLM_ENABLED"
+	KeyLLMBaseURL                  = "LLM_BASE_URL"
+	KeyLLMAPIKey                   = "LLM_API_KEY"
+	KeyLLMModel                    = "LLM_MODEL"
+	KeyLLMTimeout                  = "LLM_TIMEOUT"
+	KeyLLMMaxOutputTokens          = "LLM_MAX_OUTPUT_TOKENS"
+	KeyLLMThreadContextMaxMessages = "LLM_THREAD_CONTEXT_MAX_MESSAGES"
+	KeyLLMThreadContextMaxChars    = "LLM_THREAD_CONTEXT_MAX_CHARS"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -75,6 +84,14 @@ var knownKeyOrder = []string{
 	KeyJobsBackoffMax,
 	KeyJobsMaxConcurrent,
 	KeyJobsShutdownGrace,
+	KeyLLMEnabled,
+	KeyLLMBaseURL,
+	KeyLLMAPIKey,
+	KeyLLMModel,
+	KeyLLMTimeout,
+	KeyLLMMaxOutputTokens,
+	KeyLLMThreadContextMaxMessages,
+	KeyLLMThreadContextMaxChars,
 }
 
 func isKnownKey(key string) bool {

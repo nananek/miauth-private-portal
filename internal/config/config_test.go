@@ -35,6 +35,16 @@ func defaultJobsConfig() JobsConfig {
 	}
 }
 
+func defaultLLMConfig() LLMConfig {
+	return LLMConfig{
+		Enabled:                  false,
+		Timeout:                  30 * time.Second,
+		MaxOutputTokens:          1024,
+		ThreadContextMaxMessages: 20,
+		ThreadContextMaxChars:    8000,
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -117,6 +127,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			OwnerUsername:       "owner",
 		},
 		Jobs: defaultJobsConfig(),
+		LLM:  defaultLLMConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -796,5 +807,133 @@ func TestConfig_Redacted_NeverExposesAllowedMisskeyUserID(t *testing.T) {
 	unsetRedacted := Config{}.Redacted()
 	if unsetRedacted[KeyAllowedMisskeyUserID] != "<unset>" {
 		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyAllowedMisskeyUserID, unsetRedacted[KeyAllowedMisskeyUserID])
+	}
+}
+
+func TestLoad_LLMDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.LLM, defaultLLMConfig()) {
+		t.Errorf("LLM = %+v, want %+v", cfg.LLM, defaultLLMConfig())
+	}
+}
+
+func TestLoad_LLMEnabledRequiresBaseURLAndModel(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:     "development",
+		KeyLLMEnabled: "true",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLLMBaseURL) || !strings.Contains(err.Error(), KeyLLMModel) {
+		t.Errorf("error %q does not mention %s and %s", err.Error(), KeyLLMBaseURL, KeyLLMModel)
+	}
+}
+
+func TestLoad_LLMEnabledWithRequiredFieldsSucceeds(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:     "development",
+		KeyLLMEnabled: "true",
+		KeyLLMBaseURL: "https://api.openai.example/v1/",
+		KeyLLMAPIKey:  "sk-test",
+		KeyLLMModel:   "gpt-test",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.LLM.Enabled {
+		t.Error("LLM.Enabled = false, want true")
+	}
+	if cfg.LLM.BaseURL != "https://api.openai.example/v1" {
+		t.Errorf("LLM.BaseURL = %q, want trailing slash trimmed", cfg.LLM.BaseURL)
+	}
+	if cfg.LLM.APIKey != "sk-test" {
+		t.Errorf("LLM.APIKey = %q, want sk-test", cfg.LLM.APIKey)
+	}
+	if cfg.LLM.Model != "gpt-test" {
+		t.Errorf("LLM.Model = %q, want gpt-test", cfg.LLM.Model)
+	}
+}
+
+func TestLoad_LLMEnabledRejectsNonHTTPSBaseURLInProduction(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:     "production",
+		KeyLogFormat:  "json",
+		KeyLLMEnabled: "true",
+		KeyLLMBaseURL: "http://api.openai.example/v1",
+		KeyLLMModel:   "gpt-test",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLLMBaseURL) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLLMBaseURL)
+	}
+}
+
+func TestLoad_LLMInvalidBoolFailsClosed(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:     "development",
+		KeyLLMEnabled: "not-a-bool",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLLMEnabled) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLLMEnabled)
+	}
+}
+
+func TestLoad_LLMBoundsRejectOutOfRangeValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"max output tokens too low", KeyLLMMaxOutputTokens, "0"},
+		{"max output tokens too high", KeyLLMMaxOutputTokens, "999999"},
+		{"thread context messages too low", KeyLLMThreadContextMaxMessages, "0"},
+		{"thread context chars too low", KeyLLMThreadContextMaxChars, "0"},
+		{"timeout not a duration", KeyLLMTimeout, "not-a-duration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+				KeyAppEnv: "development",
+				tt.key:    tt.val,
+			}))})
+			if err == nil {
+				t.Fatalf("%s=%s: expected error, got nil", tt.key, tt.val)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.key)
+			}
+		})
+	}
+}
+
+// TestConfig_Redacted_NeverExposesLLMAPIKey documents the same secret
+// treatment AGENTS.md and Issue #9's acceptance criteria require for
+// LLM_API_KEY as TestConfig_Redacted_NeverExposesAllowedMisskeyUserID
+// gives ALLOWED_MISSKEY_USER_ID.
+func TestConfig_Redacted_NeverExposesLLMAPIKey(t *testing.T) {
+	const secretKey = "sk-super-secret"
+	cfg := Config{LLM: LLMConfig{APIKey: secretKey}}
+	redacted := cfg.Redacted()
+	if strings.Contains(redacted[KeyLLMAPIKey], secretKey) {
+		t.Errorf("Redacted()[%s] leaked the raw value: %q", KeyLLMAPIKey, redacted[KeyLLMAPIKey])
+	}
+	if redacted[KeyLLMAPIKey] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyLLMAPIKey, redacted[KeyLLMAPIKey])
+	}
+
+	unsetRedacted := Config{}.Redacted()
+	if unsetRedacted[KeyLLMAPIKey] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyLLMAPIKey, unsetRedacted[KeyLLMAPIKey])
 	}
 }

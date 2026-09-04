@@ -48,6 +48,12 @@ type Options struct {
 	// Aria/Misskey-compatible note routes; see NewServer. A nil
 	// TimelineService (or a nil MiAuthService) registers none of them.
 	TimelineService *timeline.Service
+
+	// LLMEnabled gates Issue #9's notes/create enqueue hook: when false
+	// (LLM_ENABLED's safe default), handleNotesCreate never evaluates the
+	// reply/follow-up policy and never enqueues an "llm_generation" job,
+	// regardless of post content.
+	LLMEnabled bool
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

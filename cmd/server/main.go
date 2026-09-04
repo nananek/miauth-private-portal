@@ -14,9 +14,11 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/jobs"
+	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/provider/misskey"
+	"github.com/nananek/miauth-private-portal/internal/provider/openai"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
@@ -91,9 +93,31 @@ func run() error {
 		LocalOrigin:         cfg.Auth.LocalOrigin,
 		IdentityOrigin:      cfg.Auth.IdentityOrigin,
 		TimelineService:     timelineSvc,
+		LLMEnabled:          cfg.LLM.Enabled,
 	}
 
 	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
+
+	// Registered only when the feature is on: no Provider (and therefore
+	// no request to LLM_BASE_URL) is ever constructed while LLM_ENABLED
+	// is false. If it is later turned off after having been on, any
+	// already-enqueued "llm_generation" job is left pending rather than
+	// dropped — internal/jobs treats an unregistered job type as
+	// retryable, the same recovery path a rolling deployment relies on.
+	if cfg.LLM.Enabled {
+		llmProvider := openai.NewClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model, cfg.LLM.Timeout)
+		llmReplySvc := llmreply.NewService(db.Repos, timelineSvc, llmProvider, llmreply.Config{
+			ProviderName:    "openai",
+			Model:           cfg.LLM.Model,
+			MaxOutputTokens: cfg.LLM.MaxOutputTokens,
+			ThreadContext: llmreply.ContextBudget{
+				MaxMessages: cfg.LLM.ThreadContextMaxMessages,
+				MaxChars:    cfg.LLM.ThreadContextMaxChars,
+			},
+			MaxAttempts: cfg.Jobs.MaxAttempts,
+		}, logger)
+		jobsManager.Register(llmreply.JobType, llmReplySvc.Handle)
+	}
 
 	// The HTTP server and durable worker share one lifecycle. If either
 	// component exits unexpectedly, cancel the sibling and wait for its

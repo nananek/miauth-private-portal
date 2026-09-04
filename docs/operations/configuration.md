@@ -2,10 +2,9 @@
 
 This document covers the configuration and HTTP-routing foundation added by
 Issue #3, the SQLite persistence layer added by Issue #4, the bridged
-MiAuth authentication flow added by Issue #5, and the Aria/Misskey-compatible
-note API added by Issue #7, and the durable job worker added by Issue #8. It
-does not cover LLM configuration; that is added by a later issue and will
-extend this document rather than replace it. The normative design for MiAuth is
+MiAuth authentication flow added by Issue #5, the Aria/Misskey-compatible
+note API added by Issue #7, the durable job worker added by Issue #8, and
+the LLM reply/follow-up generation added by Issue #9. The normative design for MiAuth is
 [`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
 (ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -80,6 +79,14 @@ catch that class of mistake during local development.
 | `JOBS_BACKOFF_MAX` | no | `10m` | Upper bound for exponential retry delay. Positive. The worker applies fixed ±20% jitter within the base/max bounds. |
 | `JOBS_MAX_CONCURRENT` | no | `4` | Maximum handlers running in this process, 1-64. |
 | `JOBS_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Time allowed for handlers to finish after shutdown starts. Remaining handlers are cancelled and immediately requeued. |
+| `LLM_ENABLED` | no | `false` | Gates Issue #9's reply/follow-up generation entirely. While `false`, `notes/create` never evaluates the reply policy and no `llm_generation` job is ever enqueued or handler-registered, and no request ever reaches `LLM_BASE_URL`. |
+| `LLM_BASE_URL` | required if `LLM_ENABLED=true` | `""` | OpenAI-compatible API base (for example `https://api.openai.com/v1`), trailing slash trimmed. A path is expected and allowed, unlike `LOCAL_ORIGIN`/`IDENTITY_ORIGIN`. Must be `https` in production. |
+| `LLM_API_KEY` | no | `""` | Bearer credential sent to `LLM_BASE_URL`; omitted from the request entirely when empty (self-hosted providers that need no key). Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. |
+| `LLM_MODEL` | required if `LLM_ENABLED=true` | `""` | Model name passed to the provider and recorded as `LLMGeneration.Model`. |
+| `LLM_TIMEOUT` | no | `30s` | Bounds every HTTP call this service makes to `LLM_BASE_URL`. |
+| `LLM_MAX_OUTPUT_TOKENS` | no | `1024` | 1-32768. Upper bound on one generation's completion length. |
+| `LLM_THREAD_CONTEXT_MAX_MESSAGES` | no | `20` | 1-500. Maximum prior thread entries included as generation context. |
+| `LLM_THREAD_CONTEXT_MAX_CHARS` | no | `8000` | 1-200000. Maximum combined character length of included prior thread context. |
 
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
@@ -347,6 +354,84 @@ durable retry path rather than introducing a shutdown-only state transition.
 Worker liveness is not registered as a separate health checker: readiness
 already verifies the shared SQLite dependency, while queue inactivity by
 itself is not a reliable failure signal.
+
+## LLM reply generation
+
+Issue #9 generates versioned LLM replies and follow-up questions to a
+post, asynchronously through the durable job worker above, so an LLM
+outage, timeout, or malformed response never affects `notes/create`
+itself: `POST /api/notes/create` always creates the post and returns
+`200` first, and any generation failure is visible only in the
+`llm_generations` table (`internal/domain.LLMGenerationRepository`), not
+as an error on the create request.
+
+### Enqueue decision
+
+`handleNotesCreate` (`internal/httpserver`) decides synchronously, from
+the new post's body alone, whether to enqueue an `llm_generation` job:
+`internal/llmreply.DecideReply` applies a versioned v1 heuristic (see its
+package comment) that returns at most one of `reply` (an explicit
+request — a question mark, or a fixed table of Japanese/English trigger
+phrases) or `follow_up_question` (a fixed table of "still working
+through this" markers), never both. The heuristic's trigger lists are
+hardcoded Go constants for v1, not configurable; a future issue would add
+that if an operator actually needs to tune them. When `LLM_ENABLED` is
+`false`, this decision is never evaluated and no job is ever enqueued.
+
+The job intent is passed into `timeline.Service.CreateRoot`/`CreateReply`
+so it commits in the same transaction as the entry it targets
+(`Job.SourceEntryID` is set atomically to the new entry's ID), matching
+this service's existing "commit the post and durable job intent
+atomically" rule for every other job producer.
+
+### Generation job
+
+`internal/llmreply.Service.Handle`, registered under job type
+`llm_generation` only while `LLM_ENABLED=true`, does the actual work once
+the job worker claims it:
+
+1. Derives a deterministic generation ID (`"llmgen:" + job.ID`) and
+   inserts a `pending` `LLMGeneration` row. A conflict here means this
+   exact job was already delivered before: a `complete`/`failed` row
+   means the delivery is a duplicate to skip; a still-`pending` row means
+   an earlier attempt crashed before finishing, and this attempt resumes
+   it.
+2. Builds the prompt: `internal/llmreply.BuildThreadContext` takes the
+   target entry's thread, drops hidden/archived entries (a user's
+   visibility choice extends to not feeding it back into a new reply),
+   and bounds what remains by `LLM_THREAD_CONTEXT_MAX_MESSAGES` and
+   `LLM_THREAD_CONTEXT_MAX_CHARS`. `BuildMessages` assembles the system
+   prompt (a persona, an always-on qualified-language instruction, a
+   kind-specific instruction, and — only when
+   `internal/llmreply.isHighRisk` detects a legal/medical/financial topic
+   in the target post — an additional disclaimer instruction) followed by
+   the bounded context and the target post itself.
+3. Calls `internal/provider/openai.Client.Complete` (an OpenAI-compatible
+   `POST {LLM_BASE_URL}/chat/completions`), bounded by `LLM_TIMEOUT` and
+   `LLM_MAX_OUTPUT_TOKENS`.
+4. On success, `timeline.Service.CreateGeneratedReply` atomically creates
+   the `llm_reply`/`llm_follow_up` entry and marks the generation
+   `complete`, linked to it, in one transaction.
+5. On failure, the error is classified into one of
+   `internal/llmreply.Category`'s values (`auth`, `client_error`,
+   `malformed_response`, and `content_refusal` are permanent; `timeout`,
+   `rate_limit`, `server_error`, and `transport` are retryable). A
+   permanent failure marks the generation `failed` immediately. A
+   retryable failure marks it `failed` only once this is the job's last
+   configured attempt (`JOBS_MAX_ATTEMPTS`); otherwise the generation
+   stays `pending` and an ordinary job retry follows.
+
+Every provider-classified error is logged only by its `Category`
+constant; the request body, response body, and any upstream error text
+(which can echo request content back) never reach a log line, matching
+this service's existing "never log LLM prompts or response bodies" rule.
+
+### Replying to a follow-up question
+
+A generated `llm_follow_up` entry is an ordinary timeline entry: when the
+user answers it with `replyId` set to that entry's ID, `notes/create`'s
+existing `CreateReply` path handles it exactly like any other reply,
+landing in the same thread. No separate answer-routing endpoint exists.
 
 ## Health and readiness
 
