@@ -617,6 +617,38 @@ func (s *Service) VerifyToken(ctx context.Context, rawToken, requiredScope strin
 	return tok.LocalActorID, nil
 }
 
+// OwnerProfile is the owner projection internal/httpserver builds
+// Misskey-compatible wire responses from outside of a fresh Check call
+// (Issue #7's POST /api/i, in particular). Its fields mirror CheckResult's
+// owner-related fields so both call sites feed the same wire constructor.
+type OwnerProfile struct {
+	ActorID     string
+	Username    string
+	DisplayName string
+	CreatedAt   time.Time
+}
+
+// DescribeOwner returns the owner's profile for actorID, the local actor
+// ID VerifyToken resolves a verified API token to. This deployment only
+// ever issues local API tokens to the single bound owner (AGENTS.md: no
+// general user login), so any actorID reaching here from
+// httpserver.LocalActorIDFromContext already names the owner actor; this
+// just re-fetches its CreatedAt and layers the configured
+// username/display name on top, the same projection CheckResult carries
+// right after a successful Check.
+func (s *Service) DescribeOwner(ctx context.Context, actorID string) (OwnerProfile, error) {
+	actor, err := s.repos.Actors.Get(ctx, actorID)
+	if err != nil {
+		return OwnerProfile{}, err
+	}
+	return OwnerProfile{
+		ActorID:     actor.ID,
+		Username:    s.cfg.OwnerUsername,
+		DisplayName: s.cfg.OwnerDisplayName,
+		CreatedAt:   actor.CreatedAt,
+	}, nil
+}
+
 // IssueBootstrapGate creates a new operator bootstrap gate, refusing
 // once an OwnerBinding already exists (ErrAlreadyBound). It is the
 // helper cmd/bootstrapctl calls, so the TTL and randomness logic live

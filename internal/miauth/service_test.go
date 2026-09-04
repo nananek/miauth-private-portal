@@ -513,6 +513,38 @@ func TestCheck_ConcurrentCallsHaveExactlyOneWinner(t *testing.T) {
 	}
 }
 
+func TestDescribeOwner(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.OwnerDisplayName = "Test Owner"
+	ts := newTestService(t, cfg)
+	beginAndAuthorize(t, ts, "route-1")
+	result, err := ts.Check(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), result.OwnerActorID)
+	if err != nil {
+		t.Fatalf("DescribeOwner: %v", err)
+	}
+	if profile.ActorID != result.OwnerActorID {
+		t.Errorf("ActorID = %q, want %q", profile.ActorID, result.OwnerActorID)
+	}
+	if profile.Username != cfg.OwnerUsername {
+		t.Errorf("Username = %q, want %q", profile.Username, cfg.OwnerUsername)
+	}
+	if profile.DisplayName != cfg.OwnerDisplayName {
+		t.Errorf("DisplayName = %q, want %q", profile.DisplayName, cfg.OwnerDisplayName)
+	}
+	if !profile.CreatedAt.Equal(result.OwnerCreatedAt) {
+		t.Errorf("CreatedAt = %v, want %v", profile.CreatedAt, result.OwnerCreatedAt)
+	}
+
+	if _, err := ts.DescribeOwner(t.Context(), "missing-actor"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("DescribeOwner(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestVerifyToken(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
 	beginAndAuthorize(t, ts, "route-1")
