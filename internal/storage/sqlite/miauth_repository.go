@@ -204,6 +204,20 @@ func (r *upstreamMiAuthSessionRepository) Get(ctx context.Context, id string) (d
 	return scanUpstreamMiAuthSession(row)
 }
 
+// GetByLocalSessionID backs idempotent resume of GET /miauth/{session}:
+// local_session_id is UNIQUE, so at most one row can match.
+func (r *upstreamMiAuthSessionRepository) GetByLocalSessionID(ctx context.Context, localSessionID string) (domain.UpstreamMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx, upstreamMiAuthSelectColumns+` WHERE local_session_id = ?`, localSessionID)
+	return scanUpstreamMiAuthSession(row)
+}
+
+// GetByBootstrapGateID is GetByLocalSessionID's counterpart for the
+// operator bootstrap flow: bootstrap_gate_id is UNIQUE.
+func (r *upstreamMiAuthSessionRepository) GetByBootstrapGateID(ctx context.Context, bootstrapGateID string) (domain.UpstreamMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx, upstreamMiAuthSelectColumns+` WHERE bootstrap_gate_id = ?`, bootstrapGateID)
+	return scanUpstreamMiAuthSession(row)
+}
+
 func (r *upstreamMiAuthSessionRepository) Authorize(ctx context.Context, id, upstreamUserID string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE miauth_upstream_sessions SET status = 'authorized', upstream_user_id = ?, authorized_at = ?

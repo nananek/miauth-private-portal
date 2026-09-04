@@ -164,6 +164,67 @@ func TestLocalMiAuthSessionRepository_Deny_RejectsAlreadyAuthorized(t *testing.T
 	}
 }
 
+func TestUpstreamMiAuthSessionRepository_GetByLocalSessionID(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	local := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), local); err != nil {
+		t.Fatal(err)
+	}
+	upstream := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), LocalSessionID: &local.RouteSessionID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.UpstreamMiAuth.Create(t.Context(), upstream); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.UpstreamMiAuth.GetByLocalSessionID(t.Context(), local.RouteSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != upstream.ID {
+		t.Errorf("ID = %q, want %q", got.ID, upstream.ID)
+	}
+
+	if _, err := db.UpstreamMiAuth.GetByLocalSessionID(t.Context(), "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByLocalSessionID() for unknown local session error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUpstreamMiAuthSessionRepository_GetByBootstrapGateID(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	gate := domain.BootstrapGate{
+		ID: domain.NewID(), Status: domain.BootstrapGateIssued, CreatedAt: now, ExpiresAt: now.Add(15 * time.Minute),
+	}
+	if err := db.BootstrapGates.Create(t.Context(), gate); err != nil {
+		t.Fatal(err)
+	}
+	upstream := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), BootstrapGateID: &gate.ID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.UpstreamMiAuth.Create(t.Context(), upstream); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.UpstreamMiAuth.GetByBootstrapGateID(t.Context(), gate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != upstream.ID {
+		t.Errorf("ID = %q, want %q", got.ID, upstream.ID)
+	}
+
+	if _, err := db.UpstreamMiAuth.GetByBootstrapGateID(t.Context(), "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByBootstrapGateID() for unknown gate error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestUpstreamMiAuthSessionRepository_Deny(t *testing.T) {
 	db := newTestDB(t)
 	now := time.Now()

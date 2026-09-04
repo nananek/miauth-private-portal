@@ -165,6 +165,16 @@ type LocalMiAuthSessionRepository interface {
 type UpstreamMiAuthSessionRepository interface {
 	Create(ctx context.Context, s UpstreamMiAuthSession) error
 	Get(ctx context.Context, id string) (UpstreamMiAuthSession, error)
+	// GetByLocalSessionID looks up the upstream session bound to a given
+	// local (Aria-facing) session, backed by that column's UNIQUE
+	// constraint. It is what makes a repeated GET /miauth/{session}
+	// idempotent: the handler resumes the same upstream session instead
+	// of violating the UNIQUE constraint by creating a second one.
+	GetByLocalSessionID(ctx context.Context, localSessionID string) (UpstreamMiAuthSession, error)
+	// GetByBootstrapGateID is GetByLocalSessionID's counterpart for the
+	// operator bootstrap flow, backed by that column's UNIQUE
+	// constraint.
+	GetByBootstrapGateID(ctx context.Context, bootstrapGateID string) (UpstreamMiAuthSession, error)
 	Authorize(ctx context.Context, id, upstreamUserID string, at time.Time) error
 	// Consume atomically transitions an authorized session to consumed.
 	// It returns ErrConflict if the session is not currently authorized.
