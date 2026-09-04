@@ -4,11 +4,32 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 )
+
+// validAuthEnv is the minimal set of Auth env vars every test that
+// expects Load to succeed must supply, now that LOCAL_ORIGIN and
+// IDENTITY_ORIGIN are required in every environment.
+func validAuthEnv() map[string]string {
+	return map[string]string{
+		KeyLocalOrigin:    "https://portal.example",
+		KeyIdentityOrigin: "https://misskey.example",
+	}
+}
+
+func mergeMaps(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
 
 func getenvFromMap(m map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
@@ -50,9 +71,9 @@ func TestLoad_MissingRequiredAppEnv(t *testing.T) {
 }
 
 func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
-	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv: "development",
-	})})
+	}))})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,9 +96,19 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			BusyTimeout:  5 * time.Second,
 			MaxOpenConns: 8,
 		},
+		Auth: AuthConfig{
+			LocalOrigin:         "https://portal.example",
+			IdentityOrigin:      "https://misskey.example",
+			UpstreamHTTPTimeout: 10 * time.Second,
+			OwnerUsername:       "owner",
+		},
 	}
 
-	if *cfg != want {
+	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
+	// longer comparable with ==; reflect.DeepEqual is the correct
+	// replacement (both are nil here, so it also confirms an unset
+	// ARIA_CLIENT_CALLBACKS yields nil rather than an empty slice).
+	if !reflect.DeepEqual(*cfg, want) {
 		t.Errorf("got %+v, want %+v", *cfg, want)
 	}
 }
@@ -85,7 +116,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 func TestLoad_MissingConfigFileIsNotError(t *testing.T) {
 	_, err := Load(LoadOptions{
 		ConfigFilePath: filepath.Join(t.TempDir(), "does-not-exist.env"),
-		Getenv:         getenvFromMap(map[string]string{KeyAppEnv: "development"}),
+		Getenv:         getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{KeyAppEnv: "development"})),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -93,7 +124,7 @@ func TestLoad_MissingConfigFileIsNotError(t *testing.T) {
 }
 
 func TestLoad_FileValuesApplied(t *testing.T) {
-	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\n")
+	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\nIDENTITY_ORIGIN=https://misskey.example\n")
 	cfg, err := Load(LoadOptions{
 		ConfigFilePath: path,
 		Getenv:         getenvFromMap(nil),
@@ -107,7 +138,7 @@ func TestLoad_FileValuesApplied(t *testing.T) {
 }
 
 func TestLoad_EnvOverridesFile(t *testing.T) {
-	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\n")
+	path := writeTempEnvFile(t, "APP_ENV=development\nHTTP_PORT=9090\nLOCAL_ORIGIN=https://portal.example\nIDENTITY_ORIGIN=https://misskey.example\n")
 	cfg, err := Load(LoadOptions{
 		ConfigFilePath: path,
 		Getenv:         getenvFromMap(map[string]string{KeyHTTPPort: "7070"}),
@@ -208,10 +239,10 @@ func TestLoad_InvalidDBMaxOpenConns(t *testing.T) {
 }
 
 func TestLoad_DBPathOverride(t *testing.T) {
-	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv: "development",
 		KeyDBPath: "/data/custom.db",
-	})})
+	}))})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,9 +265,9 @@ func TestLoad_InvalidLogLevel(t *testing.T) {
 }
 
 func TestLoad_ProductionRequiresJSONLog(t *testing.T) {
-	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv: "production",
-	})})
+	}))})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -246,11 +277,11 @@ func TestLoad_ProductionRequiresJSONLog(t *testing.T) {
 }
 
 func TestLoad_ProductionRejectsDebugLog(t *testing.T) {
-	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv:    "production",
 		KeyLogFormat: "json",
 		KeyLogLevel:  "debug",
-	})})
+	}))})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -260,11 +291,11 @@ func TestLoad_ProductionRejectsDebugLog(t *testing.T) {
 }
 
 func TestLoad_ProductionAcceptsValidSettings(t *testing.T) {
-	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv:    "production",
 		KeyLogFormat: "json",
 		KeyLogLevel:  "info",
-	})})
+	}))})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -286,9 +317,9 @@ func TestLoad_ErrorMessagesNeverContainRawValues(t *testing.T) {
 
 func TestLoad_OnlyKnownEnvironmentVariablesAreQueried(t *testing.T) {
 	var queried []string
-	_, err := Load(LoadOptions{Getenv: recordingGetenv(map[string]string{
+	_, err := Load(LoadOptions{Getenv: recordingGetenv(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv: "development",
-	}, &queried)})
+	}), &queried)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,6 +418,12 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			BusyTimeout:  5 * time.Second,
 			MaxOpenConns: 8,
 		},
+		Auth: AuthConfig{
+			LocalOrigin:         "https://portal.example",
+			IdentityOrigin:      "https://misskey.example",
+			UpstreamHTTPTimeout: 10 * time.Second,
+			OwnerUsername:       "owner",
+		},
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -398,5 +435,227 @@ func TestHTTPConfig_Addr(t *testing.T) {
 	h := HTTPConfig{Host: "127.0.0.1", Port: 9090}
 	if got, want := h.Addr(), "127.0.0.1:9090"; got != want {
 		t.Errorf("Addr() = %q, want %q", got, want)
+	}
+}
+
+func TestLoad_MissingLocalOrigin(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:         "development",
+		KeyIdentityOrigin: "https://misskey.example",
+	})})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLocalOrigin) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLocalOrigin)
+	}
+}
+
+func TestLoad_MissingIdentityOrigin(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:      "development",
+		KeyLocalOrigin: "https://portal.example",
+	})})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyIdentityOrigin) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyIdentityOrigin)
+	}
+}
+
+func TestLoad_OriginRejectsPathQueryFragmentUserinfo(t *testing.T) {
+	cases := []string{
+		"https://portal.example/miauth",
+		"https://portal.example?x=1",
+		"https://portal.example#frag",
+		"https://user:pass@portal.example",
+	}
+	for _, v := range cases {
+		_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+			KeyAppEnv:         "development",
+			KeyLocalOrigin:    v,
+			KeyIdentityOrigin: "https://misskey.example",
+		})})
+		if err == nil {
+			t.Errorf("LOCAL_ORIGIN=%q: expected error, got nil", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), KeyLocalOrigin) {
+			t.Errorf("LOCAL_ORIGIN=%q: error %q does not mention %s", v, err.Error(), KeyLocalOrigin)
+		}
+	}
+}
+
+func TestLoad_DevelopmentAcceptsHTTPOrigin(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:         "development",
+		KeyLocalOrigin:    "http://localhost:8080",
+		KeyIdentityOrigin: "https://misskey.example",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_ProductionRejectsHTTPOrigin(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:         "production",
+		KeyLogFormat:      "json",
+		KeyLogLevel:       "info",
+		KeyLocalOrigin:    "http://portal.example",
+		KeyIdentityOrigin: "https://misskey.example",
+	})})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLocalOrigin) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLocalOrigin)
+	}
+}
+
+func TestLoad_AriaClientCallbacks_ParsesAndAcceptsNonHTTPSScheme(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyAriaClientCallbacks: "aria://aria/miauth, https://portal.example/return",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"aria://aria/miauth", "https://portal.example/return"}
+	if !reflect.DeepEqual(cfg.Auth.AriaClientCallbacks, want) {
+		t.Errorf("AriaClientCallbacks = %v, want %v", cfg.Auth.AriaClientCallbacks, want)
+	}
+}
+
+func TestLoad_AriaClientCallbacks_RejectsEmptyEntry(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyAriaClientCallbacks: "aria://aria/miauth,,https://portal.example/return",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyAriaClientCallbacks) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyAriaClientCallbacks)
+	}
+}
+
+func TestLoad_AriaClientCallbacks_RejectsEntryWithoutScheme(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyAriaClientCallbacks: "not-a-url",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyAriaClientCallbacks) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyAriaClientCallbacks)
+	}
+}
+
+func TestLoad_OwnerUsernameDefault(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.OwnerUsername != "owner" {
+		t.Errorf("OwnerUsername = %q, want owner", cfg.Auth.OwnerUsername)
+	}
+}
+
+func TestLoad_OwnerUsernameOverride(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:        "development",
+		KeyOwnerUsername: "nananek",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.OwnerUsername != "nananek" {
+		t.Errorf("OwnerUsername = %q, want nananek", cfg.Auth.OwnerUsername)
+	}
+}
+
+func TestLoad_OwnerUsernameRejectsInvalidCharacters(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:        "development",
+		KeyOwnerUsername: "not valid!",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyOwnerUsername) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyOwnerUsername)
+	}
+}
+
+func TestLoad_OwnerDisplayNameOptional(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.OwnerDisplayName != "" {
+		t.Errorf("OwnerDisplayName = %q, want empty (null)", cfg.Auth.OwnerDisplayName)
+	}
+
+	cfg, err = Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:           "development",
+		KeyOwnerDisplayName: "Nana",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.OwnerDisplayName != "Nana" {
+		t.Errorf("OwnerDisplayName = %q, want Nana", cfg.Auth.OwnerDisplayName)
+	}
+}
+
+func TestLoad_UpstreamHTTPTimeoutDefaultAndValidation(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.UpstreamHTTPTimeout != 10*time.Second {
+		t.Errorf("UpstreamHTTPTimeout = %v, want 10s", cfg.Auth.UpstreamHTTPTimeout)
+	}
+
+	_, err = Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyUpstreamHTTPTimeout: "0s",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyUpstreamHTTPTimeout) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyUpstreamHTTPTimeout)
+	}
+}
+
+// TestConfig_Redacted_NeverExposesAllowedMisskeyUserID backs Issue #5's
+// acceptance criteria: the allowlisted upstream user ID must never reach
+// a log line or response, so Redacted must show only whether it is set.
+func TestConfig_Redacted_NeverExposesAllowedMisskeyUserID(t *testing.T) {
+	const secretUserID = "super-secret-upstream-user-id"
+	cfg := Config{
+		Auth: AuthConfig{AllowedMisskeyUserID: secretUserID},
+	}
+	redacted := cfg.Redacted()
+	if strings.Contains(redacted[KeyAllowedMisskeyUserID], secretUserID) {
+		t.Errorf("Redacted()[%s] leaked the raw value: %q", KeyAllowedMisskeyUserID, redacted[KeyAllowedMisskeyUserID])
+	}
+	if redacted[KeyAllowedMisskeyUserID] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyAllowedMisskeyUserID, redacted[KeyAllowedMisskeyUserID])
+	}
+
+	unsetRedacted := Config{}.Redacted()
+	if unsetRedacted[KeyAllowedMisskeyUserID] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyAllowedMisskeyUserID, unsetRedacted[KeyAllowedMisskeyUserID])
 	}
 }

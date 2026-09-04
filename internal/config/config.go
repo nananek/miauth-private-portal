@@ -8,7 +8,9 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -32,6 +34,7 @@ type Config struct {
 	HTTP HTTPConfig
 	Log  LogConfig
 	DB   DBConfig
+	Auth AuthConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -64,6 +67,44 @@ type DBConfig struct {
 	Path         string
 	BusyTimeout  time.Duration
 	MaxOpenConns int
+}
+
+// AuthConfig configures the bridged MiAuth flow ADR-0001 defines: this
+// service's own public origin, the fixed upstream Misskey origin used for
+// owner verification, the single-owner allowlist, and the Aria client
+// return-callback allowlist.
+type AuthConfig struct {
+	// LocalOrigin is this service's own configured public origin (ADR-0001
+	// LOCAL_ORIGIN). Aria's /miauth and /api/* calls, and this service's
+	// own internal MiAuth callback, are always rooted here.
+	LocalOrigin string
+	// IdentityOrigin is the fixed upstream Misskey origin used for owner
+	// verification (ADR-0001 IDENTITY_ORIGIN). It is never supplied by a
+	// client request.
+	IdentityOrigin string
+	// AllowedMisskeyUserID is the opaque upstream Misskey user ID allowed
+	// to bind as this deployment's single owner. Empty means the service
+	// is unbound until an operator completes the bootstrap-gate flow
+	// (ADR-0001 §2). It is never logged or returned to a client; see
+	// Redacted.
+	AllowedMisskeyUserID string
+	// AriaClientCallbacks is the exact-match allowlist of client return
+	// callbacks Aria may supply to GET /miauth/{session} (for example
+	// Android's aria://aria/miauth). A non-HTTPS scheme is explicitly
+	// permitted here (ADR-0001 §1); an empty list rejects any
+	// client-supplied callback.
+	AriaClientCallbacks []string
+	// UpstreamHTTPTimeout bounds every HTTP call this service makes to
+	// IdentityOrigin.
+	UpstreamHTTPTimeout time.Duration
+	// OwnerUsername is the Misskey-compatible username this service
+	// reports for the local owner actor until Issue #5's follow-up adds
+	// self-service profile editing.
+	OwnerUsername string
+	// OwnerDisplayName is the optional display name reported as the
+	// owner's UserDetailedNotMe.name. Empty means null (unset), matching
+	// Misskey's own nullable name field.
+	OwnerDisplayName string
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -231,6 +272,17 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.DB.BusyTimeout = time.Duration(busyTimeoutMS) * time.Millisecond
 	cfg.DB.MaxOpenConns = parseOptionalInt(values, KeyDBMaxOpenConns, 8, dbMaxOpenConnsMin, dbMaxOpenConnsMax, &errs)
 
+	cfg.Auth.LocalOrigin = values[KeyLocalOrigin]
+	validateOrigin(&errs, KeyLocalOrigin, cfg.Auth.LocalOrigin, cfg.Env)
+	cfg.Auth.IdentityOrigin = values[KeyIdentityOrigin]
+	validateOrigin(&errs, KeyIdentityOrigin, cfg.Auth.IdentityOrigin, cfg.Env)
+	cfg.Auth.AllowedMisskeyUserID = parseOptionalString(values, KeyAllowedMisskeyUserID, "")
+	cfg.Auth.AriaClientCallbacks = parseOptionalCallbackList(values, KeyAriaClientCallbacks, &errs)
+	cfg.Auth.UpstreamHTTPTimeout = parseOptionalDuration(values, KeyUpstreamHTTPTimeout, 10*time.Second, &errs)
+	cfg.Auth.OwnerUsername = parseOptionalString(values, KeyOwnerUsername, "owner")
+	validateOwnerUsername(&errs, KeyOwnerUsername, cfg.Auth.OwnerUsername)
+	cfg.Auth.OwnerDisplayName = parseOptionalString(values, KeyOwnerDisplayName, "")
+
 	return cfg, errs
 }
 
@@ -263,6 +315,12 @@ func (c Config) Validate() error {
 		errs = append(errs, FieldError{Key: KeyDBBusyTimeoutMS, Reason: fmt.Sprintf("must be an integer between %d and %d", dbBusyTimeoutMSMin, dbBusyTimeoutMSMax)})
 	}
 	validateIntBounds(&errs, KeyDBMaxOpenConns, c.DB.MaxOpenConns, dbMaxOpenConnsMin, dbMaxOpenConnsMax)
+
+	validateOrigin(&errs, KeyLocalOrigin, c.Auth.LocalOrigin, c.Env)
+	validateOrigin(&errs, KeyIdentityOrigin, c.Auth.IdentityOrigin, c.Env)
+	validateCallbackEntries(&errs, KeyAriaClientCallbacks, c.Auth.AriaClientCallbacks)
+	validatePositiveDuration(&errs, KeyUpstreamHTTPTimeout, c.Auth.UpstreamHTTPTimeout)
+	validateOwnerUsername(&errs, KeyOwnerUsername, c.Auth.OwnerUsername)
 
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
@@ -299,7 +357,25 @@ func (c Config) Redacted() map[string]string {
 		KeyDBPath:                c.DB.Path,
 		KeyDBBusyTimeoutMS:       strconv.FormatInt(c.DB.BusyTimeout.Milliseconds(), 10),
 		KeyDBMaxOpenConns:        strconv.Itoa(c.DB.MaxOpenConns),
+		KeyLocalOrigin:           c.Auth.LocalOrigin,
+		KeyIdentityOrigin:        c.Auth.IdentityOrigin,
+		// AllowedMisskeyUserID is the single-owner allowlist value: the
+		// acceptance criteria for Issue #5 require it never reach a log
+		// or response, so only whether it is set is shown here, never
+		// the value itself.
+		KeyAllowedMisskeyUserID: redactedSetOrUnset(c.Auth.AllowedMisskeyUserID),
+		KeyAriaClientCallbacks:  strings.Join(c.Auth.AriaClientCallbacks, ","),
+		KeyUpstreamHTTPTimeout:  c.Auth.UpstreamHTTPTimeout.String(),
+		KeyOwnerUsername:        c.Auth.OwnerUsername,
+		KeyOwnerDisplayName:     c.Auth.OwnerDisplayName,
 	}
+}
+
+func redactedSetOrUnset(v string) string {
+	if v == "" {
+		return "<unset>"
+	}
+	return "<set>"
 }
 
 func parseRequiredEnum(values map[string]string, key string, allowed []string, errs *[]FieldError) string {
@@ -406,6 +482,84 @@ func validateInt64Min(errs *[]FieldError, key string, n, min int64) bool {
 func validatePositiveDuration(errs *[]FieldError, key string, d time.Duration) bool {
 	if d <= 0 {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must be a positive duration (e.g. 5s)"})
+		return false
+	}
+	return true
+}
+
+// validateOrigin backs LOCAL_ORIGIN and IDENTITY_ORIGIN: both are
+// required in every environment (there is no safe default redirect
+// target), must be an absolute URL naming only a scheme and a host (no
+// userinfo, path beyond "" or "/", query, or fragment — ADR-0001 fixes
+// these as origins, never paths), and must be https in production.
+func validateOrigin(errs *[]FieldError, key, v string, env Environment) bool {
+	if v == "" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "required"})
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be an absolute http(s) origin URL"})
+		return false
+	}
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must contain only a scheme and a host, no userinfo, path, query, or fragment"})
+		return false
+	}
+	if env == EnvProduction && u.Scheme != "https" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be https in production"})
+		return false
+	}
+	return true
+}
+
+// parseOptionalCallbackList splits ARIA_CLIENT_CALLBACKS on commas,
+// trims whitespace around each entry, and validates the result. An
+// unset or empty value yields nil: no client callback is accepted.
+func parseOptionalCallbackList(values map[string]string, key string, errs *[]FieldError) []string {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	list := make([]string, len(parts))
+	for i, p := range parts {
+		list[i] = strings.TrimSpace(p)
+	}
+	validateCallbackEntries(errs, key, list)
+	return list
+}
+
+// validateCallbackEntries checks each ARIA_CLIENT_CALLBACKS entry is a
+// URL with a non-empty scheme. Unlike validateOrigin, a non-HTTPS scheme
+// (Aria's aria://aria/miauth deep link) is explicitly allowed here per
+// ADR-0001 §1: these are exact-match client return destinations, never
+// used as an upstream redirect target.
+func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool {
+	ok := true
+	for _, p := range list {
+		if p == "" {
+			*errs = append(*errs, FieldError{Key: key, Reason: "must not contain an empty entry"})
+			ok = false
+			continue
+		}
+		u, err := url.Parse(p)
+		if err != nil || u.Scheme == "" {
+			*errs = append(*errs, FieldError{Key: key, Reason: "each entry must be a URL with a non-empty scheme"})
+			ok = false
+		}
+	}
+	return ok
+}
+
+// ownerUsernamePattern mirrors Misskey's own username character set
+// closely enough for this service's purposes: non-empty, ASCII letters,
+// digits, and underscores only.
+var ownerUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+func validateOwnerUsername(errs *[]FieldError, key, v string) bool {
+	if !ownerUsernamePattern.MatchString(v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be a non-empty string of ASCII letters, digits, and underscores"})
 		return false
 	}
 	return true
