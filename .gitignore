@@ -27,6 +27,13 @@ tmp/
 .env.*
 !.env.example
 
+# Local SQLite databases
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+/data/
+
 # Editor and OS files
 .DS_Store
 Thumbs.db

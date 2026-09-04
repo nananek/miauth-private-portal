@@ -31,6 +31,7 @@ type Config struct {
 	Env  Environment
 	HTTP HTTPConfig
 	Log  LogConfig
+	DB   DBConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -55,6 +56,14 @@ func (h HTTPConfig) Addr() string {
 type LogConfig struct {
 	Level  string
 	Format string
+}
+
+// DBConfig bounds the SQLite database file path, busy timeout, and
+// connection pool size (internal/storage/sqlite.Open).
+type DBConfig struct {
+	Path         string
+	BusyTimeout  time.Duration
+	MaxOpenConns int
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -187,6 +196,18 @@ func loadConfigFile(path string) (map[string]string, error) {
 // Validate (which re-checks an already-typed Config built by hand).
 var allowedEnvironments = []string{string(EnvDevelopment), string(EnvStaging), string(EnvProduction)}
 
+// Field bound constants shared by parse (which validates the raw
+// config-file/env-var string) and Validate (which re-checks an
+// already-typed Config built by hand), so the two paths cannot drift
+// apart the way they once did (DB_BUSY_TIMEOUT_MS's upper bound was
+// present in parse but missing from Validate until it was fixed).
+const (
+	httpPortMin, httpPortMax               = 1, 65535
+	httpMaxRequestBodyBytesMin             = 1
+	dbBusyTimeoutMSMin, dbBusyTimeoutMSMax = 1, 600_000
+	dbMaxOpenConnsMin, dbMaxOpenConnsMax   = 1, 100
+)
+
 func parse(values map[string]string) (Config, []FieldError) {
 	var errs []FieldError
 	var cfg Config
@@ -194,16 +215,21 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Env = Environment(parseRequiredEnum(values, KeyAppEnv, allowedEnvironments, &errs))
 
 	cfg.HTTP.Host = parseOptionalString(values, KeyHTTPHost, "0.0.0.0")
-	cfg.HTTP.Port = parseOptionalInt(values, KeyHTTPPort, 8080, 1, 65535, &errs)
+	cfg.HTTP.Port = parseOptionalInt(values, KeyHTTPPort, 8080, httpPortMin, httpPortMax, &errs)
 	cfg.HTTP.ReadTimeout = parseOptionalDuration(values, KeyHTTPReadTimeout, 5*time.Second, &errs)
 	cfg.HTTP.ReadHeaderTimeout = parseOptionalDuration(values, KeyHTTPReadHeaderTimeout, 5*time.Second, &errs)
 	cfg.HTTP.WriteTimeout = parseOptionalDuration(values, KeyHTTPWriteTimeout, 10*time.Second, &errs)
 	cfg.HTTP.IdleTimeout = parseOptionalDuration(values, KeyHTTPIdleTimeout, 60*time.Second, &errs)
-	cfg.HTTP.MaxRequestBodyBytes = parseOptionalInt64(values, KeyHTTPMaxBodyBytes, 1<<20, 1, &errs)
+	cfg.HTTP.MaxRequestBodyBytes = parseOptionalInt64(values, KeyHTTPMaxBodyBytes, 1<<20, httpMaxRequestBodyBytesMin, &errs)
 	cfg.HTTP.ShutdownGracePeriod = parseOptionalDuration(values, KeyHTTPShutdownGrace, 15*time.Second, &errs)
 
 	cfg.Log.Level = parseOptionalEnum(values, KeyLogLevel, "info", []string{"debug", "info", "warn", "error"}, &errs)
 	cfg.Log.Format = parseOptionalEnum(values, KeyLogFormat, "text", []string{"json", "text"}, &errs)
+
+	cfg.DB.Path = parseOptionalString(values, KeyDBPath, "./data/portal.db")
+	busyTimeoutMS := parseOptionalInt(values, KeyDBBusyTimeoutMS, 5000, dbBusyTimeoutMSMin, dbBusyTimeoutMSMax, &errs)
+	cfg.DB.BusyTimeout = time.Duration(busyTimeoutMS) * time.Millisecond
+	cfg.DB.MaxOpenConns = parseOptionalInt(values, KeyDBMaxOpenConns, 8, dbMaxOpenConnsMin, dbMaxOpenConnsMax, &errs)
 
 	return cfg, errs
 }
@@ -222,13 +248,21 @@ func (c Config) Validate() error {
 		errs = append(errs, FieldError{Key: KeyAppEnv, Reason: "must be one of " + strings.Join(allowedEnvironments, ", ")})
 	}
 
-	validateIntBounds(&errs, KeyHTTPPort, c.HTTP.Port, 1, 65535)
+	validateIntBounds(&errs, KeyHTTPPort, c.HTTP.Port, httpPortMin, httpPortMax)
 	validatePositiveDuration(&errs, KeyHTTPReadTimeout, c.HTTP.ReadTimeout)
 	validatePositiveDuration(&errs, KeyHTTPReadHeaderTimeout, c.HTTP.ReadHeaderTimeout)
 	validatePositiveDuration(&errs, KeyHTTPWriteTimeout, c.HTTP.WriteTimeout)
 	validatePositiveDuration(&errs, KeyHTTPIdleTimeout, c.HTTP.IdleTimeout)
-	validateInt64Min(&errs, KeyHTTPMaxBodyBytes, c.HTTP.MaxRequestBodyBytes, 1)
+	validateInt64Min(&errs, KeyHTTPMaxBodyBytes, c.HTTP.MaxRequestBodyBytes, httpMaxRequestBodyBytesMin)
 	validatePositiveDuration(&errs, KeyHTTPShutdownGrace, c.HTTP.ShutdownGracePeriod)
+
+	if c.DB.Path == "" {
+		errs = append(errs, FieldError{Key: KeyDBPath, Reason: "must not be empty"})
+	}
+	if ms := c.DB.BusyTimeout.Milliseconds(); ms < dbBusyTimeoutMSMin || ms > dbBusyTimeoutMSMax {
+		errs = append(errs, FieldError{Key: KeyDBBusyTimeoutMS, Reason: fmt.Sprintf("must be an integer between %d and %d", dbBusyTimeoutMSMin, dbBusyTimeoutMSMax)})
+	}
+	validateIntBounds(&errs, KeyDBMaxOpenConns, c.DB.MaxOpenConns, dbMaxOpenConnsMin, dbMaxOpenConnsMax)
 
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
@@ -262,6 +296,9 @@ func (c Config) Redacted() map[string]string {
 		KeyHTTPShutdownGrace:     c.HTTP.ShutdownGracePeriod.String(),
 		KeyLogLevel:              c.Log.Level,
 		KeyLogFormat:             c.Log.Format,
+		KeyDBPath:                c.DB.Path,
+		KeyDBBusyTimeoutMS:       strconv.FormatInt(c.DB.BusyTimeout.Milliseconds(), 10),
+		KeyDBMaxOpenConns:        strconv.Itoa(c.DB.MaxOpenConns),
 	}
 }
 

@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 )
 
 func main() {
@@ -30,7 +33,36 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("configuration loaded", "config", cfg.Redacted())
 
+	// Registered here, not left to httpserver.Run, so SIGINT/SIGTERM
+	// during the blocking database open/migrate/seed steps below (a slow
+	// disk, a lock held by another process, a stuck migration) still gets
+	// a clean shutdown instead of requiring a SIGKILL. Run installs its
+	// own signal.NotifyContext on top of this ctx for the HTTP serve
+	// loop; registering twice is harmless since both fire from the same
+	// signal.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := sqlite.Open(ctx, sqlite.Config{
+		Path:         cfg.DB.Path,
+		BusyTimeout:  cfg.DB.BusyTimeout,
+		MaxOpenConns: cfg.DB.MaxOpenConns,
+	})
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	logger.Info("sqlite pragmas applied", "foreign_keys", "on", "journal_mode", "WAL", "busy_timeout", cfg.DB.BusyTimeout)
+
+	if err := db.Migrate(ctx); err != nil {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+	if err := db.Actors.EnsureReservedActors(ctx); err != nil {
+		return fmt.Errorf("seed reserved actors: %w", err)
+	}
+
 	reg := health.NewRegistry()
+	reg.Register(db.Checker())
 
 	opts := httpserver.Options{
 		Addr:                cfg.HTTP.Addr(),
@@ -42,7 +74,7 @@ func run() error {
 		ShutdownGracePeriod: cfg.HTTP.ShutdownGracePeriod,
 	}
 
-	return httpserver.Run(context.Background(), opts, logger, reg)
+	return httpserver.Run(ctx, opts, logger, reg)
 }
 
 // configFilePath returns the dotenv-style config file to load, defaulting
