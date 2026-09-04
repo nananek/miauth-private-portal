@@ -3,14 +3,17 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
 
 type externalSourceRepository struct{ q querier }
 
-const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, created_at FROM external_sources`
+const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, cursor, last_fetched_at, last_error,
+	consecutive_failures, created_at FROM external_sources`
 
 func (r *externalSourceRepository) Create(ctx context.Context, s domain.ExternalSource) error {
 	_, err := r.q.ExecContext(ctx,
@@ -43,15 +46,66 @@ func (r *externalSourceRepository) List(ctx context.Context) ([]domain.ExternalS
 	return sources, rows.Err()
 }
 
+// RecordFetchSuccess uses COALESCE so a nil cursor (an unmodified-since-
+// last-fetch outcome, which has no new ETag/Last-Modified to persist)
+// leaves the previously stored cursor untouched instead of clearing it.
+func (r *externalSourceRepository) RecordFetchSuccess(ctx context.Context, id string, cursor *string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE external_sources SET cursor = COALESCE(?, cursor), last_fetched_at = ?, last_error = NULL,
+			consecutive_failures = 0 WHERE id = ?`,
+		nullableString(cursor), formatTime(at), id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
+func (r *externalSourceRepository) RecordFetchFailure(ctx context.Context, id string, errMsg string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE external_sources SET last_fetched_at = ?, last_error = ?, consecutive_failures = consecutive_failures + 1
+			WHERE id = ?`,
+		formatTime(at), errMsg, id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
+// EnsureFromConfig is not run inside one transaction across all sources:
+// each Create is independent, so a conflict on one entry (already
+// seeded in a prior run) never blocks the others from being created. It
+// does not touch an existing source's display_name or other fields, by
+// design: EnsureFromConfig is a create-if-missing seed, not an upsert.
+func (r *externalSourceRepository) EnsureFromConfig(ctx context.Context, sources []domain.ExternalSource) error {
+	for _, s := range sources {
+		if err := r.Create(ctx, s); err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				continue
+			}
+			return fmt.Errorf("ensure external source from config: %w", err)
+		}
+	}
+	return nil
+}
+
 func scanExternalSource(row rowScanner) (domain.ExternalSource, error) {
 	var s domain.ExternalSource
-	var displayName sql.NullString
+	var displayName, cursor, lastFetchedAt, lastError sql.NullString
 	var createdAt string
-	if err := row.Scan(&s.ID, &s.Kind, &s.URI, &displayName, &createdAt); err != nil {
+	if err := row.Scan(&s.ID, &s.Kind, &s.URI, &displayName, &cursor, &lastFetchedAt, &lastError,
+		&s.ConsecutiveFailures, &createdAt); err != nil {
 		return domain.ExternalSource{}, mapReadError(err)
 	}
 	s.DisplayName = stringPtr(displayName)
+	s.Cursor = stringPtr(cursor)
+	s.LastError = stringPtr(lastError)
+
 	var err error
+	if s.LastFetchedAt, err = parseTimePtr(lastFetchedAt); err != nil {
+		return domain.ExternalSource{}, err
+	}
 	if s.CreatedAt, err = parseTime(createdAt); err != nil {
 		return domain.ExternalSource{}, err
 	}
