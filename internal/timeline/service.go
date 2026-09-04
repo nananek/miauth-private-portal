@@ -220,6 +220,14 @@ func (s *Service) GetTimeline(ctx context.Context, page domain.Page, includeHidd
 	return s.repos.Entries.ListTimeline(ctx, page, includeHidden)
 }
 
+// GetTimelineDesc returns the newest-first timeline page: up to limit
+// entries, the most recent page when before is nil or the entries
+// strictly older than before otherwise. Issue #7's home timeline uses
+// this instead of GetTimeline; see EntryRepository.ListTimelineDesc.
+func (s *Service) GetTimelineDesc(ctx context.Context, before *domain.Cursor, limit int, includeHidden bool) ([]domain.Entry, error) {
+	return s.repos.Entries.ListTimelineDesc(ctx, before, limit, includeHidden)
+}
+
 // GetThread returns the full oldest-first conversation for threadID,
 // including archived and hidden entries.
 func (s *Service) GetThread(ctx context.Context, threadID string) ([]domain.Entry, error) {
@@ -230,6 +238,31 @@ func (s *Service) GetThread(ctx context.Context, threadID string) ([]domain.Entr
 // deterministic (created_at, id) order, not deeper descendants.
 func (s *Service) GetChildren(ctx context.Context, parentEntryID string) ([]domain.Entry, error) {
 	return s.repos.Entries.ListChildren(ctx, parentEntryID)
+}
+
+// GetEntry returns one entry by ID, including archived/hidden entries.
+// Callers that must enforce visibility (Issue #7's notes/show and its
+// siblings) do so themselves rather than this general-purpose lookup
+// silently hiding rows.
+func (s *Service) GetEntry(ctx context.Context, id string) (domain.Entry, error) {
+	return s.repos.Entries.Get(ctx, id)
+}
+
+// CountByAuthor returns actorID's total entry count, including archived
+// and hidden entries (see EntryRepository.CountByAuthor).
+func (s *Service) CountByAuthor(ctx context.Context, actorID string) (int, error) {
+	return s.repos.Entries.CountByAuthor(ctx, actorID)
+}
+
+// ResolveAuthor returns the Actor an entry's AuthorActorID names, so
+// callers projecting an Entry onto a Misskey-compatible wire type (Note.
+// user) can determine whether it is the owner or one of the reserved
+// assistant/system presentation actors without depending on
+// internal/domain/storage directly. It never returns the owner's real
+// profile (username, display name): that lives in miauth.Service's
+// configuration, not here.
+func (s *Service) ResolveAuthor(ctx context.Context, actorID string) (domain.Actor, error) {
+	return s.repos.Actors.Get(ctx, actorID)
 }
 
 func enqueueForEntry(ctx context.Context, repos domain.Repos, job *domain.Job, entryID string) error {

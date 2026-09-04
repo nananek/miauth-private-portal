@@ -426,3 +426,94 @@ func TestGetTimeline_StableCursorUsesCreatedAtAndID(t *testing.T) {
 		}
 	}
 }
+
+func TestGetTimelineDesc_NewestFirstThenOlder(t *testing.T) {
+	ts := newTestService(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		entry, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "post", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, entry.ID) // ids[0] oldest, ids[2] newest
+		ts.clock.Advance(time.Minute)
+	}
+
+	first, err := ts.GetTimelineDesc(t.Context(), nil, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].ID != ids[2] || first[1].ID != ids[1] {
+		t.Fatalf("first page = %v, want newest-first [%s, %s]", first, ids[2], ids[1])
+	}
+
+	cursor := &domain.Cursor{CreatedAt: first[1].CreatedAt, ID: first[1].ID}
+	second, err := ts.GetTimelineDesc(t.Context(), cursor, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].ID != ids[0] {
+		t.Fatalf("second page = %v, want [%s]", second, ids[0])
+	}
+}
+
+func TestGetEntry_ReturnsArchivedAndHiddenWithoutFiltering(t *testing.T) {
+	ts := newTestService(t)
+	entry, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "post", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.SetHidden(t.Context(), entry.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ts.GetEntry(t.Context(), entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != entry.ID || got.HiddenAt == nil {
+		t.Errorf("GetEntry = %+v, want the hidden entry returned as-is", got)
+	}
+
+	if _, err := ts.GetEntry(t.Context(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetEntry(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCountByAuthor_CountsAcrossThreadsIncludingHidden(t *testing.T) {
+	ts := newTestService(t)
+	first, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "two", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.SetHidden(t.Context(), first.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ts.CountByAuthor(t.Context(), ts.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("CountByAuthor = %d, want 2", n)
+	}
+}
+
+func TestResolveAuthor_ReturnsActorType(t *testing.T) {
+	ts := newTestService(t)
+
+	actor, err := ts.ResolveAuthor(t.Context(), ts.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actor.ID != ts.owner.ID || actor.Type != domain.ActorOwner {
+		t.Errorf("ResolveAuthor(owner) = %+v, want type %q", actor, domain.ActorOwner)
+	}
+
+	if _, err := ts.ResolveAuthor(t.Context(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("ResolveAuthor(missing) error = %v, want ErrNotFound", err)
+	}
+}
