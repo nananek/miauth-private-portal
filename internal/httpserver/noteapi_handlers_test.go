@@ -496,9 +496,8 @@ func TestHandleNotesChildren_DirectOnlyExcludesHiddenAndPaginates(t *testing.T) 
 }
 
 // TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage mirrors
-// TestHandleNotesTimeline_UnknownUntilIdReturnsEmptyPage: a stale/unknown
-// untilId (including one that pointed at a now-hidden child, so it no
-// longer appears in the visible list paginateAfterID pages through) must
+// TestHandleNotesTimeline_UnknownUntilIdReturnsEmptyPage: a genuinely
+// stale/unknown untilId (never one of this note's children at all) must
 // yield an empty page, not restart from the first page — otherwise a
 // client that pages by repeating the last-seen ID could loop forever.
 func TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage(t *testing.T) {
@@ -517,6 +516,45 @@ func TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage(t *testing.T) {
 	mustDecode(t, rec, &notes)
 	if len(notes) != 0 {
 		t.Errorf("notes = %v, want empty", noteIDs(notes))
+	}
+}
+
+// TestHandleNotesChildren_UntilIdOfSinceHiddenChildStillResumes covers the
+// case TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage's old
+// (incorrect) doc comment used to conflate with a truly unknown untilId:
+// an anchor that was visible when the client fetched it, but has since
+// been hidden, must still resolve its position from ListChildren's full
+// (archived/hidden-inclusive) result and page through to later visible
+// children — not be treated as unknown and short-circuit to an empty
+// page, which would silently strand every remaining child forever.
+func TestHandleNotesChildren_UntilIdOfSinceHiddenChildStillResumes(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rootRec := ts.post(t, "/api/notes/create", map[string]any{"text": "root"})
+	var root createdNoteResponse
+	mustDecode(t, rootRec, &root)
+	ts.clock.Advance(time.Minute)
+
+	firstRec := ts.post(t, "/api/notes/create", map[string]any{"text": "first child", "replyId": root.CreatedNote.ID})
+	var first createdNoteResponse
+	mustDecode(t, firstRec, &first)
+	ts.clock.Advance(time.Minute)
+
+	secondRec := ts.post(t, "/api/notes/create", map[string]any{"text": "second child", "replyId": root.CreatedNote.ID})
+	var second createdNoteResponse
+	mustDecode(t, secondRec, &second)
+
+	if err := ts.timeline.SetHidden(t.Context(), first.CreatedNote.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := ts.post(t, "/api/notes/children", map[string]any{"noteId": root.CreatedNote.ID, "untilId": first.CreatedNote.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	var notes []note
+	mustDecode(t, rec, &notes)
+	if len(notes) != 1 || notes[0].ID != second.CreatedNote.ID {
+		t.Fatalf("page after since-hidden %s = %v, want [%s]", first.CreatedNote.ID, noteIDs(notes), second.CreatedNote.ID)
 	}
 }
 

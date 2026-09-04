@@ -435,13 +435,6 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	visible := make([]domain.Entry, 0, len(children))
-	for _, c := range children {
-		if entryVisible(c) {
-			visible = append(visible, c)
-		}
-	}
-
 	limit := defaultTimelineLimit
 	if req.Limit != nil && *req.Limit > 0 {
 		limit = *req.Limit
@@ -449,7 +442,7 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 	if limit > maxTimelineLimit {
 		limit = maxTimelineLimit
 	}
-	page := paginateAfterID(visible, req.UntilID, limit)
+	page := paginateAfterID(children, req.UntilID, limit)
 
 	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
 	if err != nil {
@@ -465,18 +458,23 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, notes)
 }
 
-// paginateAfterID returns the entries strictly after the one matching
-// untilID in entries' existing order, up to limit items. If untilID is
-// nil/empty, it returns from the start. If untilID is set but matches no
-// entry (a stale ID, or one that has since become hidden/archived and so
-// was already filtered out of entries), it returns an empty page rather
-// than restarting from the beginning: mirroring handleNotesTimeline's
-// unknown-untilId handling, this keeps a client that pages by repeating
-// the last-seen ID safe from looping back over the same page forever.
-// This continues GetChildren's existing oldest-first order rather than
-// introducing a second, newest-first children query: Issue #7's plan
-// defers a dedicated ListChildrenDesc repository method until pagination
-// performance actually requires it.
+// paginateAfterID returns up to limit archived/hidden-excluded entries
+// strictly after the one matching untilID in entries' existing order.
+// entries is GetChildren's full result, including archived/hidden
+// children: the untilID lookup itself must search this unfiltered list,
+// not just the visible ones, so an anchor that was visible on an earlier
+// page but has since been hidden/archived still resolves to its correct
+// position and pagination keeps surfacing later visible children —
+// mirroring handleNotesTimeline's GetEntry-based untilId lookup, which
+// likewise ignores visibility when resolving the cursor. If untilID is
+// nil/empty, it returns from the start. Only a untilID that matches no
+// entry at all (a stale/unknown ID, never seen in this list) yields an
+// empty page rather than restarting from the beginning: that keeps a
+// client that pages by repeating a bogus last-seen ID safe from looping
+// back over the same page forever. This continues GetChildren's existing
+// oldest-first order rather than introducing a second, newest-first
+// children query: Issue #7's plan defers a dedicated ListChildrenDesc
+// repository method until pagination performance actually requires it.
 func paginateAfterID(entries []domain.Entry, untilID *string, limit int) []domain.Entry {
 	start := 0
 	if untilID != nil && *untilID != "" {
@@ -492,9 +490,16 @@ func paginateAfterID(entries []domain.Entry, untilID *string, limit int) []domai
 			return nil
 		}
 	}
-	end := start + limit
-	if end > len(entries) {
-		end = len(entries)
+
+	page := make([]domain.Entry, 0, limit)
+	for _, e := range entries[start:] {
+		if !entryVisible(e) {
+			continue
+		}
+		page = append(page, e)
+		if len(page) == limit {
+			break
+		}
 	}
-	return entries[start:end]
+	return page
 }

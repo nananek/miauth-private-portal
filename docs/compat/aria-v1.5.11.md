@@ -564,8 +564,14 @@ verified.
   subject note itself.
 - **Children pagination**: continues `ListChildren`'s existing
   oldest-first order (no separate newest-first children query exists);
-  `untilId` resumes after the matching child. An `untilId` that matches no
-  visible child (unknown, or hidden since an earlier page) yields an empty
+  `untilId` resumes after the matching child. The lookup searches
+  `ListChildren`'s full result, including archived/hidden children, so an
+  anchor that was visible on an earlier page but has since been
+  hidden/archived still resolves to its correct position and pagination
+  keeps surfacing later visible children — mirroring `/api/notes/timeline`'s
+  `GetEntry`-based `untilId` lookup, which likewise ignores visibility when
+  resolving the cursor. Only an `untilId` that matches no child at all
+  (a stale/unknown ID, never part of this note's children) yields an empty
   page rather than restarting from the first page, matching the home
   timeline's unknown-`untilId` handling.
 - **`/api/i`** always returns the `MeDetailed` superset regardless of
