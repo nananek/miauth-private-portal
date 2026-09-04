@@ -84,6 +84,10 @@ docker run --rm -v "$(pwd)/data:/data" --entrypoint /bootstrapctl \
   -e DB_PATH=/data/portal.db ghcr.io/nananek/miauth-private-portal:latest
 ```
 
+`make build` produces `bin/server`, the one-time owner-binding tool
+`bin/bootstrapctl`, and the host-local durable-job inspection/retry tool
+`bin/jobsctl`.
+
 ## Roadmap
 
 - Open WebUI integration: [docs/roadmap/openwebui.md](docs/roadmap/openwebui.md)

@@ -21,6 +21,20 @@ func validAuthEnv() map[string]string {
 	}
 }
 
+func defaultJobsConfig() JobsConfig {
+	return JobsConfig{
+		PollInterval:        time.Second,
+		ClaimBatchSize:      10,
+		LeaseDuration:       30 * time.Second,
+		LeaseRenewMargin:    10 * time.Second,
+		MaxAttempts:         8,
+		BackoffBase:         time.Second,
+		BackoffMax:          10 * time.Minute,
+		MaxConcurrentJobs:   4,
+		ShutdownGracePeriod: 15 * time.Second,
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -102,6 +116,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			UpstreamHTTPTimeout: 10 * time.Second,
 			OwnerUsername:       "owner",
 		},
+		Jobs: defaultJobsConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -424,10 +439,81 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			UpstreamHTTPTimeout: 10 * time.Second,
 			OwnerUsername:       "owner",
 		},
+		Jobs: defaultJobsConfig(),
 	}
 
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_JobsOverrides(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:               "development",
+		KeyJobsWorkerID:         "worker-a",
+		KeyJobsPollInterval:     "250ms",
+		KeyJobsClaimBatchSize:   "7",
+		KeyJobsLeaseDuration:    "45s",
+		KeyJobsLeaseRenewMargin: "15s",
+		KeyJobsMaxAttempts:      "5",
+		KeyJobsBackoffBase:      "2s",
+		KeyJobsBackoffMax:       "2m",
+		KeyJobsMaxConcurrent:    "3",
+		KeyJobsShutdownGrace:    "20s",
+	}))})
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	want := JobsConfig{
+		WorkerID:            "worker-a",
+		PollInterval:        250 * time.Millisecond,
+		ClaimBatchSize:      7,
+		LeaseDuration:       45 * time.Second,
+		LeaseRenewMargin:    15 * time.Second,
+		MaxAttempts:         5,
+		BackoffBase:         2 * time.Second,
+		BackoffMax:          2 * time.Minute,
+		MaxConcurrentJobs:   3,
+		ShutdownGracePeriod: 20 * time.Second,
+	}
+	if !reflect.DeepEqual(cfg.Jobs, want) {
+		t.Errorf("Jobs = %+v, want %+v", cfg.Jobs, want)
+	}
+}
+
+func TestLoad_RejectsInvalidJobsSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  map[string]string
+		wantKey string
+	}{
+		{name: "claim batch below range", values: map[string]string{KeyJobsClaimBatchSize: "0"}, wantKey: KeyJobsClaimBatchSize},
+		{name: "claim batch above range", values: map[string]string{KeyJobsClaimBatchSize: "101"}, wantKey: KeyJobsClaimBatchSize},
+		{name: "poll interval non-positive", values: map[string]string{KeyJobsPollInterval: "0s"}, wantKey: KeyJobsPollInterval},
+		{name: "lease duration non-positive", values: map[string]string{KeyJobsLeaseDuration: "0s"}, wantKey: KeyJobsLeaseDuration},
+		{name: "renew margin non-positive", values: map[string]string{KeyJobsLeaseRenewMargin: "0s"}, wantKey: KeyJobsLeaseRenewMargin},
+		{name: "max attempts below range", values: map[string]string{KeyJobsMaxAttempts: "0"}, wantKey: KeyJobsMaxAttempts},
+		{name: "max attempts above range", values: map[string]string{KeyJobsMaxAttempts: "101"}, wantKey: KeyJobsMaxAttempts},
+		{name: "concurrency below range", values: map[string]string{KeyJobsMaxConcurrent: "0"}, wantKey: KeyJobsMaxConcurrent},
+		{name: "concurrency above range", values: map[string]string{KeyJobsMaxConcurrent: "65"}, wantKey: KeyJobsMaxConcurrent},
+		{name: "renew margin equals lease", values: map[string]string{KeyJobsLeaseDuration: "10s", KeyJobsLeaseRenewMargin: "10s"}, wantKey: KeyJobsLeaseRenewMargin},
+		{name: "renew margin exceeds lease", values: map[string]string{KeyJobsLeaseDuration: "10s", KeyJobsLeaseRenewMargin: "11s"}, wantKey: KeyJobsLeaseRenewMargin},
+		{name: "backoff base non-positive", values: map[string]string{KeyJobsBackoffBase: "0s"}, wantKey: KeyJobsBackoffBase},
+		{name: "backoff max non-positive", values: map[string]string{KeyJobsBackoffMax: "0s"}, wantKey: KeyJobsBackoffMax},
+		{name: "backoff base exceeds max", values: map[string]string{KeyJobsBackoffBase: "2m", KeyJobsBackoffMax: "1m"}, wantKey: KeyJobsBackoffBase},
+		{name: "shutdown grace non-positive", values: map[string]string{KeyJobsShutdownGrace: "0s"}, wantKey: KeyJobsShutdownGrace},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values := mergeMaps(validAuthEnv(), map[string]string{KeyAppEnv: "development"}, tt.values)
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(values)})
+			if err == nil {
+				t.Fatal("Load() succeeded, want validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.wantKey)
+			}
+		})
 	}
 }
 

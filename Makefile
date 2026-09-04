@@ -25,6 +25,7 @@ test-race:
 build:
 	go build -o bin/server ./cmd/server
 	go build -o bin/bootstrapctl ./cmd/bootstrapctl
+	go build -o bin/jobsctl ./cmd/jobsctl
 
 run: build
 	./bin/server

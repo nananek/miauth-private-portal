@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -87,41 +88,143 @@ func (r *jobRepository) Claim(ctx context.Context, leaseOwner string, limit int,
 	return jobs, nil
 }
 
-func (r *jobRepository) Succeed(ctx context.Context, id string, at time.Time) error {
+func (r *jobRepository) Renew(ctx context.Context, id, leaseOwner string, leaseExpiresAt, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
-		`UPDATE jobs SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		formatTime(at), id,
+		`UPDATE jobs SET lease_expires_at = ?, updated_at = ?
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		formatTime(leaseExpiresAt), formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Retry(ctx context.Context, id string, nextRunAt time.Time, lastError string, at time.Time) error {
+func (r *jobRepository) Succeed(ctx context.Context, id, leaseOwner string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE jobs SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		formatTime(at), id, leaseOwner,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+func (r *jobRepository) Retry(ctx context.Context, id, leaseOwner string, nextRunAt time.Time, lastError string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'pending', attempt = attempt + 1, next_run_at = ?, last_error = ?,
 			lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		formatTime(nextRunAt), lastError, formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		formatTime(nextRunAt), lastError, formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Kill(ctx context.Context, id, lastError string, at time.Time) error {
+func (r *jobRepository) Kill(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'dead', last_error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		lastError, formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		lastError, formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
+}
+
+func (r *jobRepository) Fail(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE jobs SET state = 'failed', last_error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		lastError, formatTime(at), id, leaseOwner,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+func (r *jobRepository) List(ctx context.Context, filter domain.JobFilter) ([]domain.Job, error) {
+	var where []string
+	var args []any
+	if filter.State != nil {
+		where = append(where, "state = ?")
+		args = append(args, string(*filter.State))
+	}
+	if filter.JobType != nil {
+		where = append(where, "job_type = ?")
+		args = append(args, *filter.JobType)
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query := jobSelectColumns
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := r.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []domain.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	return jobs, nil
+}
+
+func (r *jobRepository) Requeue(ctx context.Context, id string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE jobs SET state = 'pending', next_run_at = ?, lease_owner = NULL,
+			lease_expires_at = NULL, last_error = NULL, updated_at = ?
+		 WHERE id = ? AND state IN ('dead', 'failed')`,
+		formatTime(at), formatTime(at), id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+func (r *jobRepository) CountByState(ctx context.Context) (map[domain.JobState]int, error) {
+	rows, err := r.q.QueryContext(ctx, `SELECT state, COUNT(*) FROM jobs GROUP BY state`)
+	if err != nil {
+		return nil, fmt.Errorf("count jobs by state: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[domain.JobState]int)
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, fmt.Errorf("count jobs by state: %w", err)
+		}
+		counts[domain.JobState(state)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count jobs by state: %w", err)
+	}
+	return counts, nil
 }
 
 func scanJob(row rowScanner) (domain.Job, error) {

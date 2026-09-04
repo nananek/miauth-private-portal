@@ -35,6 +35,7 @@ type Config struct {
 	Log  LogConfig
 	DB   DBConfig
 	Auth AuthConfig
+	Jobs JobsConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -67,6 +68,21 @@ type DBConfig struct {
 	Path         string
 	BusyTimeout  time.Duration
 	MaxOpenConns int
+}
+
+// JobsConfig bounds durable background-job polling, leasing, retries,
+// concurrency, and shutdown behavior.
+type JobsConfig struct {
+	WorkerID            string
+	PollInterval        time.Duration
+	ClaimBatchSize      int
+	LeaseDuration       time.Duration
+	LeaseRenewMargin    time.Duration
+	MaxAttempts         int
+	BackoffBase         time.Duration
+	BackoffMax          time.Duration
+	MaxConcurrentJobs   int
+	ShutdownGracePeriod time.Duration
 }
 
 // AuthConfig configures the bridged MiAuth flow ADR-0001 defines: this
@@ -243,11 +259,14 @@ var allowedEnvironments = []string{string(EnvDevelopment), string(EnvStaging), s
 // apart the way they once did (DB_BUSY_TIMEOUT_MS's upper bound was
 // present in parse but missing from Validate until it was fixed).
 const (
-	httpPortMin, httpPortMax               = 1, 65535
-	httpMaxRequestBodyBytesMin             = 1
-	httpWriteTimeoutUpstreamMargin         = time.Second
-	dbBusyTimeoutMSMin, dbBusyTimeoutMSMax = 1, 600_000
-	dbMaxOpenConnsMin, dbMaxOpenConnsMax   = 1, 100
+	httpPortMin, httpPortMax                     = 1, 65535
+	httpMaxRequestBodyBytesMin                   = 1
+	httpWriteTimeoutUpstreamMargin               = time.Second
+	dbBusyTimeoutMSMin, dbBusyTimeoutMSMax       = 1, 600_000
+	dbMaxOpenConnsMin, dbMaxOpenConnsMax         = 1, 100
+	jobsClaimBatchSizeMin, jobsClaimBatchSizeMax = 1, 100
+	jobsMaxAttemptsMin, jobsMaxAttemptsMax       = 1, 100
+	jobsMaxConcurrentMin, jobsMaxConcurrentMax   = 1, 64
 )
 
 func parse(values map[string]string) (Config, []FieldError) {
@@ -283,6 +302,17 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Auth.OwnerUsername = parseOptionalString(values, KeyOwnerUsername, "owner")
 	validateOwnerUsername(&errs, KeyOwnerUsername, cfg.Auth.OwnerUsername)
 	cfg.Auth.OwnerDisplayName = parseOptionalString(values, KeyOwnerDisplayName, "")
+
+	cfg.Jobs.WorkerID = parseOptionalString(values, KeyJobsWorkerID, "")
+	cfg.Jobs.PollInterval = parseOptionalDuration(values, KeyJobsPollInterval, time.Second, &errs)
+	cfg.Jobs.ClaimBatchSize = parseOptionalInt(values, KeyJobsClaimBatchSize, 10, jobsClaimBatchSizeMin, jobsClaimBatchSizeMax, &errs)
+	cfg.Jobs.LeaseDuration = parseOptionalDuration(values, KeyJobsLeaseDuration, 30*time.Second, &errs)
+	cfg.Jobs.LeaseRenewMargin = parseOptionalDuration(values, KeyJobsLeaseRenewMargin, 10*time.Second, &errs)
+	cfg.Jobs.MaxAttempts = parseOptionalInt(values, KeyJobsMaxAttempts, 8, jobsMaxAttemptsMin, jobsMaxAttemptsMax, &errs)
+	cfg.Jobs.BackoffBase = parseOptionalDuration(values, KeyJobsBackoffBase, time.Second, &errs)
+	cfg.Jobs.BackoffMax = parseOptionalDuration(values, KeyJobsBackoffMax, 10*time.Minute, &errs)
+	cfg.Jobs.MaxConcurrentJobs = parseOptionalInt(values, KeyJobsMaxConcurrent, 4, jobsMaxConcurrentMin, jobsMaxConcurrentMax, &errs)
+	cfg.Jobs.ShutdownGracePeriod = parseOptionalDuration(values, KeyJobsShutdownGrace, 15*time.Second, &errs)
 
 	return cfg, errs
 }
@@ -330,6 +360,22 @@ func (c Config) Validate() error {
 	}
 	validateOwnerUsername(&errs, KeyOwnerUsername, c.Auth.OwnerUsername)
 
+	validatePositiveDuration(&errs, KeyJobsPollInterval, c.Jobs.PollInterval)
+	validateIntBounds(&errs, KeyJobsClaimBatchSize, c.Jobs.ClaimBatchSize, jobsClaimBatchSizeMin, jobsClaimBatchSizeMax)
+	validatePositiveDuration(&errs, KeyJobsLeaseDuration, c.Jobs.LeaseDuration)
+	validatePositiveDuration(&errs, KeyJobsLeaseRenewMargin, c.Jobs.LeaseRenewMargin)
+	if c.Jobs.LeaseRenewMargin > 0 && c.Jobs.LeaseDuration > 0 && c.Jobs.LeaseRenewMargin >= c.Jobs.LeaseDuration {
+		errs = append(errs, FieldError{Key: KeyJobsLeaseRenewMargin, Reason: "must be less than " + KeyJobsLeaseDuration})
+	}
+	validateIntBounds(&errs, KeyJobsMaxAttempts, c.Jobs.MaxAttempts, jobsMaxAttemptsMin, jobsMaxAttemptsMax)
+	validatePositiveDuration(&errs, KeyJobsBackoffBase, c.Jobs.BackoffBase)
+	validatePositiveDuration(&errs, KeyJobsBackoffMax, c.Jobs.BackoffMax)
+	if c.Jobs.BackoffBase > 0 && c.Jobs.BackoffMax > 0 && c.Jobs.BackoffBase > c.Jobs.BackoffMax {
+		errs = append(errs, FieldError{Key: KeyJobsBackoffBase, Reason: "must not exceed " + KeyJobsBackoffMax})
+	}
+	validateIntBounds(&errs, KeyJobsMaxConcurrent, c.Jobs.MaxConcurrentJobs, jobsMaxConcurrentMin, jobsMaxConcurrentMax)
+	validatePositiveDuration(&errs, KeyJobsShutdownGrace, c.Jobs.ShutdownGracePeriod)
+
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
 			errs = append(errs, FieldError{Key: KeyLogFormat, Reason: "must be json in production"})
@@ -376,6 +422,16 @@ func (c Config) Redacted() map[string]string {
 		KeyUpstreamHTTPTimeout:  c.Auth.UpstreamHTTPTimeout.String(),
 		KeyOwnerUsername:        c.Auth.OwnerUsername,
 		KeyOwnerDisplayName:     c.Auth.OwnerDisplayName,
+		KeyJobsWorkerID:         c.Jobs.WorkerID,
+		KeyJobsPollInterval:     c.Jobs.PollInterval.String(),
+		KeyJobsClaimBatchSize:   strconv.Itoa(c.Jobs.ClaimBatchSize),
+		KeyJobsLeaseDuration:    c.Jobs.LeaseDuration.String(),
+		KeyJobsLeaseRenewMargin: c.Jobs.LeaseRenewMargin.String(),
+		KeyJobsMaxAttempts:      strconv.Itoa(c.Jobs.MaxAttempts),
+		KeyJobsBackoffBase:      c.Jobs.BackoffBase.String(),
+		KeyJobsBackoffMax:       c.Jobs.BackoffMax.String(),
+		KeyJobsMaxConcurrent:    strconv.Itoa(c.Jobs.MaxConcurrentJobs),
+		KeyJobsShutdownGrace:    c.Jobs.ShutdownGracePeriod.String(),
 	}
 }
 
