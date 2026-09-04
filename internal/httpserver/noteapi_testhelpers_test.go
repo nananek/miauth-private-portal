@@ -55,6 +55,19 @@ type noteAPITestServer struct {
 
 func newNoteAPITestServer(t *testing.T) *noteAPITestServer {
 	t.Helper()
+	return newNoteAPITestServerWithOptions(t, false)
+}
+
+// newNoteAPITestServerLLMEnabled builds a noteAPITestServer with Issue
+// #9's notes/create enqueue hook turned on, for tests that verify an
+// "llm_generation" job is (or is not) enqueued.
+func newNoteAPITestServerLLMEnabled(t *testing.T) *noteAPITestServer {
+	t.Helper()
+	return newNoteAPITestServerWithOptions(t, true)
+}
+
+func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled bool) *noteAPITestServer {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: path, BusyTimeout: 5 * time.Second, MaxOpenConns: 4})
 	if err != nil {
@@ -81,6 +94,7 @@ func newNoteAPITestServer(t *testing.T) *noteAPITestServer {
 		TimelineService: timelineSvc,
 		LocalOrigin:     testLocalOrigin,
 		IdentityOrigin:  testIdentityOrigin,
+		LLMEnabled:      llmEnabled,
 	})
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock, provider: provider}

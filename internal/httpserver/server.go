@@ -39,6 +39,7 @@ type Server struct {
 	timeline       *timeline.Service
 	localOrigin    string
 	identityOrigin string
+	llmEnabled     bool
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -67,6 +68,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		timeline:       opts.TimelineService,
 		localOrigin:    opts.LocalOrigin,
 		identityOrigin: opts.IdentityOrigin,
+		llmEnabled:     opts.LLMEnabled,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
