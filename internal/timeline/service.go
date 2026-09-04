@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -112,12 +113,68 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 // parent's ThreadID, making cross-thread parent relationships
 // impossible through this use-case API.
 func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind domain.EntryKind, body string, job *domain.Job) (domain.Entry, error) {
+	now := s.clock.Now().UTC()
+	var entry domain.Entry
+
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		var err error
+		entry, err = createReplyEntry(ctx, repos, parentEntryID, kind, body, now)
+		if err != nil {
+			return err
+		}
+		return enqueueForEntry(ctx, repos, job, entry.ID)
+	})
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	return entry, nil
+}
+
+// CreateGeneratedReply atomically creates a new llm_reply/llm_follow_up
+// entry replying to targetEntryID and marks generationID's pending
+// LLMGeneration complete, linked to the new entry, in one transaction —
+// the same atomicity AGENTS.md's "Commit the post and durable job intent
+// atomically" requires of CreateReply's job intent, applied here to the
+// generation record a retried job must not be able to duplicate. Callers
+// (internal/llmreply's job handler) call this only after a provider call
+// has already succeeded; kind must be EntryLLMReply or
+// EntryLLMFollowUp, and generationID must currently be pending or this
+// returns domain.ErrConflict (see LLMGenerationRepository.Complete).
+func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string, kind domain.EntryKind, body, generationID string, promptTokens, completionTokens *int) (domain.Entry, error) {
+	if kind != domain.EntryLLMReply && kind != domain.EntryLLMFollowUp {
+		return domain.Entry{}, ErrInvalidKind
+	}
+
+	now := s.clock.Now().UTC()
+	var entry domain.Entry
+
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		var err error
+		entry, err = createReplyEntry(ctx, repos, targetEntryID, kind, body, now)
+		if err != nil {
+			return err
+		}
+		return repos.Generations.Complete(ctx, generationID, entry.ID, body, promptTokens, completionTokens, now)
+	})
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	return entry, nil
+}
+
+// createReplyEntry builds and persists one reply entry (Entries.Create,
+// Threads.Touch) against repos, which the caller must already be running
+// inside a UnitOfWork.WithinTx transaction. CreateReply and
+// CreateGeneratedReply share this helper so each can commit its own
+// additional transactional write (a durable job intent, or
+// Generations.Complete) atomically alongside the entry without
+// duplicating the entry-creation logic itself.
+func createReplyEntry(ctx context.Context, repos domain.Repos, parentEntryID string, kind domain.EntryKind, body string, now time.Time) (domain.Entry, error) {
 	actorType, ok := authorActorTypeForKind[kind]
 	if !ok {
 		return domain.Entry{}, ErrInvalidKind
 	}
 
-	now := s.clock.Now().UTC()
 	entry := domain.Entry{
 		ID:               domain.NewID(),
 		ParentEntryID:    &parentEntryID,
@@ -128,31 +185,25 @@ func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind do
 		UpdatedAt:        now,
 	}
 
-	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
-		parent, err := repos.Entries.Get(ctx, parentEntryID)
-		if errors.Is(err, domain.ErrNotFound) {
-			return ErrParentNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("get parent entry: %w", err)
-		}
-		entry.ThreadID = parent.ThreadID
-
-		actor, err := repos.Actors.GetByType(ctx, actorType)
-		if err != nil {
-			return fmt.Errorf("resolve reply author: %w", err)
-		}
-		entry.AuthorActorID = actor.ID
-
-		if err := repos.Entries.Create(ctx, entry); err != nil {
-			return err
-		}
-		if err := repos.Threads.Touch(ctx, entry.ThreadID, now); err != nil {
-			return err
-		}
-		return enqueueForEntry(ctx, repos, job, entry.ID)
-	})
+	parent, err := repos.Entries.Get(ctx, parentEntryID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.Entry{}, ErrParentNotFound
+	}
 	if err != nil {
+		return domain.Entry{}, fmt.Errorf("get parent entry: %w", err)
+	}
+	entry.ThreadID = parent.ThreadID
+
+	actor, err := repos.Actors.GetByType(ctx, actorType)
+	if err != nil {
+		return domain.Entry{}, fmt.Errorf("resolve reply author: %w", err)
+	}
+	entry.AuthorActorID = actor.ID
+
+	if err := repos.Entries.Create(ctx, entry); err != nil {
+		return domain.Entry{}, err
+	}
+	if err := repos.Threads.Touch(ctx, entry.ThreadID, now); err != nil {
 		return domain.Entry{}, err
 	}
 	return entry, nil
