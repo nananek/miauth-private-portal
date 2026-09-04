@@ -74,6 +74,25 @@ func waitForServing(t *testing.T, addr string) {
 	t.Fatalf("server at %s never started accepting connections", addr)
 }
 
+// waitForEntered blocks until entered is closed — a Checker has actually
+// been invoked, proving an in-flight /readyz request already passed
+// health.Registry.Ready's startup-complete gate — or fails the test
+// after a bounded timeout. Tests use this instead of a fixed sleep to
+// decide when it is safe to trigger shutdown, so they cannot race ahead
+// of a slow/contended scheduler (see the CI failure this fixes: a fixed
+// sleep let cancel()'s reg.MarkNotReady() land before the in-flight
+// request ever reached the checker, so Ready() short-circuited on the
+// startup-complete check and returned 503 without the checker ever
+// running).
+func waitForEntered(t *testing.T, entered <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight request never reached the checker")
+	}
+}
+
 func testOptions(ln net.Listener) Options {
 	return Options{
 		Listener:            ln,
@@ -155,12 +174,19 @@ func TestRun_CtxCancelMarksRegistryNotReady(t *testing.T) {
 }
 
 type blockingChecker struct {
+	// entered is closed the instant Check is invoked, proving the
+	// in-flight request already passed health.Registry.Ready's
+	// startup-complete gate (r.ready.Load()) and is now genuinely
+	// blocked here — the signal callers wait on instead of guessing
+	// with a fixed sleep before triggering shutdown.
+	entered chan struct{}
 	release chan struct{}
 }
 
 func (b *blockingChecker) Name() string { return "blocking" }
 
 func (b *blockingChecker) Check(_ context.Context) error {
+	close(b.entered)
 	<-b.release
 	return nil
 }
@@ -169,7 +195,8 @@ func TestRun_GracefulShutdownWaitsForInFlightRequest(t *testing.T) {
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	release := make(chan struct{})
-	reg.Register(&blockingChecker{release: release})
+	entered := make(chan struct{})
+	reg.Register(&blockingChecker{entered: entered, release: release})
 
 	ln := mustListen(t)
 	addr := ln.Addr().String()
@@ -190,9 +217,7 @@ func TestRun_GracefulShutdownWaitsForInFlightRequest(t *testing.T) {
 		respCh <- resp
 	}()
 
-	// Give the in-flight request time to reach the blocking checker before
-	// triggering shutdown.
-	time.Sleep(100 * time.Millisecond)
+	waitForEntered(t, entered)
 	cancel()
 
 	// Shutdown must wait for the in-flight request instead of cutting it
@@ -223,6 +248,10 @@ func TestRun_GracefulShutdownWaitsForInFlightRequest(t *testing.T) {
 }
 
 type ctxCapturingChecker struct {
+	// entered is closed the instant Check is invoked; see
+	// blockingChecker.entered for why tests wait on this instead of a
+	// fixed sleep.
+	entered  chan struct{}
 	release  chan struct{}
 	sawErrCh chan error
 }
@@ -230,6 +259,7 @@ type ctxCapturingChecker struct {
 func (c *ctxCapturingChecker) Name() string { return "ctx-capturing" }
 
 func (c *ctxCapturingChecker) Check(ctx context.Context) error {
+	close(c.entered)
 	<-c.release
 	c.sawErrCh <- ctx.Err()
 	return nil
@@ -239,8 +269,9 @@ func TestRun_InFlightRequestContextNotCancelledDuringGracePeriod(t *testing.T) {
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	release := make(chan struct{})
+	entered := make(chan struct{})
 	sawErrCh := make(chan error, 1)
-	reg.Register(&ctxCapturingChecker{release: release, sawErrCh: sawErrCh})
+	reg.Register(&ctxCapturingChecker{entered: entered, release: release, sawErrCh: sawErrCh})
 
 	ln := mustListen(t)
 	addr := ln.Addr().String()
@@ -257,9 +288,7 @@ func TestRun_InFlightRequestContextNotCancelledDuringGracePeriod(t *testing.T) {
 		}
 	}()
 
-	// Give the in-flight request time to reach the blocking checker
-	// before triggering shutdown.
-	time.Sleep(100 * time.Millisecond)
+	waitForEntered(t, entered)
 	cancel()
 
 	// Release the checker while shutdown is in progress but well within
@@ -286,7 +315,8 @@ func TestRun_ForcedCloseAfterGracePeriodExceeded(t *testing.T) {
 	reg := health.NewRegistry()
 	release := make(chan struct{})
 	defer close(release)
-	reg.Register(&blockingChecker{release: release})
+	entered := make(chan struct{})
+	reg.Register(&blockingChecker{entered: entered, release: release})
 
 	ln := mustListen(t)
 	addr := ln.Addr().String()
@@ -306,7 +336,7 @@ func TestRun_ForcedCloseAfterGracePeriodExceeded(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	waitForEntered(t, entered)
 	cancel()
 
 	select {
