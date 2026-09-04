@@ -245,6 +245,7 @@ var allowedEnvironments = []string{string(EnvDevelopment), string(EnvStaging), s
 const (
 	httpPortMin, httpPortMax               = 1, 65535
 	httpMaxRequestBodyBytesMin             = 1
+	httpWriteTimeoutUpstreamMargin         = time.Second
 	dbBusyTimeoutMSMin, dbBusyTimeoutMSMax = 1, 600_000
 	dbMaxOpenConnsMin, dbMaxOpenConnsMax   = 1, 100
 )
@@ -259,7 +260,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.HTTP.Port = parseOptionalInt(values, KeyHTTPPort, 8080, httpPortMin, httpPortMax, &errs)
 	cfg.HTTP.ReadTimeout = parseOptionalDuration(values, KeyHTTPReadTimeout, 5*time.Second, &errs)
 	cfg.HTTP.ReadHeaderTimeout = parseOptionalDuration(values, KeyHTTPReadHeaderTimeout, 5*time.Second, &errs)
-	cfg.HTTP.WriteTimeout = parseOptionalDuration(values, KeyHTTPWriteTimeout, 10*time.Second, &errs)
+	cfg.HTTP.WriteTimeout = parseOptionalDuration(values, KeyHTTPWriteTimeout, 15*time.Second, &errs)
 	cfg.HTTP.IdleTimeout = parseOptionalDuration(values, KeyHTTPIdleTimeout, 60*time.Second, &errs)
 	cfg.HTTP.MaxRequestBodyBytes = parseOptionalInt64(values, KeyHTTPMaxBodyBytes, 1<<20, httpMaxRequestBodyBytesMin, &errs)
 	cfg.HTTP.ShutdownGracePeriod = parseOptionalDuration(values, KeyHTTPShutdownGrace, 15*time.Second, &errs)
@@ -272,9 +273,9 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.DB.BusyTimeout = time.Duration(busyTimeoutMS) * time.Millisecond
 	cfg.DB.MaxOpenConns = parseOptionalInt(values, KeyDBMaxOpenConns, 8, dbMaxOpenConnsMin, dbMaxOpenConnsMax, &errs)
 
-	cfg.Auth.LocalOrigin = strings.TrimSuffix(values[KeyLocalOrigin], "/")
+	cfg.Auth.LocalOrigin = strings.TrimRight(values[KeyLocalOrigin], "/")
 	validateOrigin(&errs, KeyLocalOrigin, cfg.Auth.LocalOrigin, cfg.Env)
-	cfg.Auth.IdentityOrigin = strings.TrimSuffix(values[KeyIdentityOrigin], "/")
+	cfg.Auth.IdentityOrigin = strings.TrimRight(values[KeyIdentityOrigin], "/")
 	validateOrigin(&errs, KeyIdentityOrigin, cfg.Auth.IdentityOrigin, cfg.Env)
 	cfg.Auth.AllowedMisskeyUserID = parseOptionalString(values, KeyAllowedMisskeyUserID, "")
 	cfg.Auth.AriaClientCallbacks = parseOptionalCallbackList(values, KeyAriaClientCallbacks, &errs)
@@ -320,6 +321,13 @@ func (c Config) Validate() error {
 	validateOrigin(&errs, KeyIdentityOrigin, c.Auth.IdentityOrigin, c.Env)
 	validateCallbackEntries(&errs, KeyAriaClientCallbacks, c.Auth.AriaClientCallbacks)
 	validatePositiveDuration(&errs, KeyUpstreamHTTPTimeout, c.Auth.UpstreamHTTPTimeout)
+	if c.HTTP.WriteTimeout > 0 && c.Auth.UpstreamHTTPTimeout > 0 &&
+		c.HTTP.WriteTimeout-c.Auth.UpstreamHTTPTimeout < httpWriteTimeoutUpstreamMargin {
+		errs = append(errs, FieldError{
+			Key:    KeyHTTPWriteTimeout,
+			Reason: "must be at least 1s greater than " + KeyUpstreamHTTPTimeout + " so an upstream timeout can still be returned to the client",
+		})
+	}
 	validateOwnerUsername(&errs, KeyOwnerUsername, c.Auth.OwnerUsername)
 
 	if c.Env == EnvProduction {
@@ -513,21 +521,41 @@ func validateOrigin(errs *[]FieldError, key, v string, env Environment) bool {
 	return true
 }
 
-// parseOptionalCallbackList splits ARIA_CLIENT_CALLBACKS on commas,
-// trims whitespace around each entry, and validates the result. An
-// unset or empty value yields nil: no client callback is accepted.
+// parseOptionalCallbackList splits ARIA_CLIENT_CALLBACKS at commas that
+// introduce another absolute URL, while retaining commas inside a URL's
+// path or query. It trims whitespace around each entry and validates the
+// result. An unset or empty value yields nil: no client callback is
+// accepted.
 func parseOptionalCallbackList(values map[string]string, key string, errs *[]FieldError) []string {
 	v, ok := values[key]
 	if !ok || v == "" {
 		return nil
 	}
-	parts := strings.Split(v, ",")
+	parts := splitCallbackList(v)
 	list := make([]string, len(parts))
 	for i, p := range parts {
 		list[i] = strings.TrimSpace(p)
 	}
 	validateCallbackEntries(errs, key, list)
 	return list
+}
+
+var callbackSchemePrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+
+func splitCallbackList(v string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(v); i++ {
+		if v[i] != ',' {
+			continue
+		}
+		remainder := strings.TrimSpace(v[i+1:])
+		if remainder == "" || remainder[0] == ',' || callbackSchemePrefix.MatchString(remainder) {
+			parts = append(parts, v[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, v[start:])
 }
 
 // validateCallbackEntries checks each ARIA_CLIENT_CALLBACKS entry is a

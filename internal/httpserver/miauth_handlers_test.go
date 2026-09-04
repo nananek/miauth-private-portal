@@ -114,6 +114,29 @@ func TestHandleMiAuthCallback_SuccessWithClientCallbackRedirects(t *testing.T) {
 	}
 }
 
+func TestHandleMiAuthCallback_PreservesExistingClientCallbackQuery(t *testing.T) {
+	const callback = "aria://aria/miauth?intent=login"
+	cfg := defaultMiAuthTestConfig()
+	cfg.ClientCallbacks = []string{callback}
+	ts := newMiAuthTestServer(t, cfg)
+	id, state := startLocalSession(t, ts, "route-1", "read:account", callback)
+
+	rec := authorizeWithUser(ts, id, state, testAllowedUserID)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusFound)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := loc.Query().Get("intent"); got != "login" {
+		t.Errorf("intent = %q, want login", got)
+	}
+	if got := loc.Query().Get("session"); got != "route-1" {
+		t.Errorf("session = %q, want route-1", got)
+	}
+}
+
 func TestHandleMiAuthCallback_WrongUserIsGenericFailure(t *testing.T) {
 	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
 	id, state := startLocalSession(t, ts, "route-1", "read:account", "")

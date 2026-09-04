@@ -51,7 +51,7 @@ func TestRequireScope_AllowsValidTokenAndPreservesBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := RequireScope(ts.miauth, miauth.ScopeReadAccount)(next)
+	handler := RequireScope(ts.logger, ts.miauth, miauth.ScopeReadAccount)(next)
 	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"i":"`+token+`","other":"field"}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -72,7 +72,7 @@ func TestRequireScope_RejectsMissingToken(t *testing.T) {
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	handler := RequireScope(ts.miauth, miauth.ScopeReadAccount)(next)
+	handler := RequireScope(ts.logger, ts.miauth, miauth.ScopeReadAccount)(next)
 	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -89,7 +89,7 @@ func TestRequireScope_RejectsUnknownToken(t *testing.T) {
 	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
-	handler := RequireScope(ts.miauth, miauth.ScopeReadAccount)(next)
+	handler := RequireScope(ts.logger, ts.miauth, miauth.ScopeReadAccount)(next)
 	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"i":"not-a-real-token"}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -107,7 +107,7 @@ func TestRequireScope_RejectsInsufficientScope(t *testing.T) {
 	// The token was issued without "write:account" in its request, so a
 	// handler requiring it must be rejected even though the token is
 	// otherwise valid.
-	handler := RequireScope(ts.miauth, "write:account")(next)
+	handler := RequireScope(ts.logger, ts.miauth, "write:account")(next)
 	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"i":"`+token+`"}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -130,13 +130,37 @@ func TestRequireScope_RejectsRevokedToken(t *testing.T) {
 	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	handler := RequireScope(ts.miauth, miauth.ScopeReadAccount)(next)
+	handler := RequireScope(ts.logger, ts.miauth, miauth.ScopeReadAccount)(next)
 	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"i":"`+token+`"}`))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestRequireScope_StorageFailureIsLoggedAndReturnsServerError(t *testing.T) {
+	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
+	token, _ := mintToken(t, ts)
+	if err := ts.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := RequireScope(ts.logger, ts.miauth, miauth.ScopeReadAccount)(next)
+	req := httptest.NewRequest(http.MethodPost, "/protected", strings.NewReader(`{"i":"`+token+`"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(ts.logBuf.String(), "local API token verification failed") {
+		t.Errorf("storage failure was not logged: %s", ts.logBuf.String())
+	}
+	if strings.Contains(ts.logBuf.String(), token) || strings.Contains(rec.Body.String(), token) {
+		t.Error("raw API token leaked in log or response")
 	}
 }
 

@@ -62,7 +62,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger, reg *health.Reg
 		}
 	}
 
-	server := NewServer(logger, reg, opts.MiAuthService, opts.LocalOrigin, opts.IdentityOrigin)
+	server := NewServer(logger, reg, opts)
 	// withRequestID must wrap withRecover (not the other way around):
 	// withRequestID's r.WithContext call produces a new *http.Request, so
 	// if it sat inside withRecover, withRecover's deferred closure would

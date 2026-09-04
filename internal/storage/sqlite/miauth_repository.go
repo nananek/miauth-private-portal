@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -80,9 +81,10 @@ func scanBootstrapGate(row rowScanner) (domain.BootstrapGate, error) {
 
 type localMiAuthSessionRepository struct{ q querier }
 
-const localMiAuthSelectColumns = `SELECT route_session_id, state, status, requested_permissions,
-	client_callback, local_actor_id, created_at, expires_at, authorized_at, consumed_at
-	FROM miauth_local_sessions`
+const localMiAuthColumns = `route_session_id, state, status, requested_permissions,
+	client_callback, local_actor_id, created_at, expires_at, authorized_at, consumed_at`
+
+const localMiAuthSelectColumns = `SELECT ` + localMiAuthColumns + ` FROM miauth_local_sessions`
 
 func (r *localMiAuthSessionRepository) Create(ctx context.Context, s domain.LocalMiAuthSession) error {
 	_, err := r.q.ExecContext(ctx,
@@ -116,19 +118,24 @@ func (r *localMiAuthSessionRepository) Authorize(ctx context.Context, routeSessi
 	return requireRowAffectedConflict(res)
 }
 
-// Consume atomically transitions an authorized session to consumed. If
-// two check() calls race, exactly one UPDATE affects a row; the other
-// affects zero and reports ErrConflict.
-func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSessionID string, at time.Time) error {
-	res, err := r.q.ExecContext(ctx,
+// Consume atomically transitions an authorized session to consumed and
+// returns that row. If two check() calls race, exactly one UPDATE returns
+// a row; the other returns no row and reports ErrConflict.
+func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSessionID string, at time.Time) (domain.LocalMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx,
 		`UPDATE miauth_local_sessions SET status = 'consumed', consumed_at = ?
-		 WHERE route_session_id = ? AND status = 'authorized' AND expires_at > ?`,
+		 WHERE route_session_id = ? AND status = 'authorized' AND expires_at > ?
+		 RETURNING `+localMiAuthColumns,
 		formatTime(at), routeSessionID, formatTime(at),
 	)
-	if err != nil {
-		return mapWriteError(err)
+	session, err := scanLocalMiAuthSession(row)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.LocalMiAuthSession{}, domain.ErrConflict
 	}
-	return requireRowAffectedConflict(res)
+	if err != nil {
+		return domain.LocalMiAuthSession{}, err
+	}
+	return session, nil
 }
 
 // Deny atomically transitions a created, unexpired session to denied,

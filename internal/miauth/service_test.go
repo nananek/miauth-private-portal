@@ -339,6 +339,21 @@ func TestHandleUpstreamCallback_UnknownIDIsInvalid(t *testing.T) {
 	}
 }
 
+func TestHandleUpstreamCallback_StorageFailureIsNotCallbackInvalid(t *testing.T) {
+	ts := newTestService(t, defaultTestConfig())
+	if err := ts.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ts.HandleUpstreamCallback(t.Context(), "session", "state")
+	if err == nil {
+		t.Fatal("HandleUpstreamCallback() error = nil, want storage failure")
+	}
+	if errors.Is(err, ErrCallbackInvalid) {
+		t.Errorf("storage failure was misclassified as ErrCallbackInvalid: %v", err)
+	}
+}
+
 func TestHandleUpstreamCallback_ExpiredSessionIsInvalid(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
 	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
@@ -355,6 +370,39 @@ func TestHandleUpstreamCallback_ExpiredSessionIsInvalid(t *testing.T) {
 	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if !errors.Is(err, ErrCallbackInvalid) {
 		t.Errorf("HandleUpstreamCallback() for an expired session error = %v, want ErrCallbackInvalid", err)
+	}
+}
+
+func TestHandleUpstreamCallback_ExpiryDuringUpstreamCheckIsCallbackInvalid(t *testing.T) {
+	ts := newTestService(t, defaultTestConfig())
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts.provider.check = func(context.Context, string) (string, bool, error) {
+		ts.clock.Advance(upstreamSessionTTL)
+		return testAllowedUserID, true, nil
+	}
+
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
+	if !errors.Is(err, ErrCallbackInvalid) {
+		t.Errorf("HandleUpstreamCallback() after expiring in upstream check = %v, want ErrCallbackInvalid", err)
+	}
+
+	got, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.MiAuthCreated {
+		t.Errorf("expired callback mutated upstream status to %q, want created", got.Status)
+	}
+	if _, err := ts.db.OwnerBindings.Get(t.Context()); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("expired callback created an owner binding: %v", err)
 	}
 }
 
@@ -500,6 +548,21 @@ func TestVerifyToken(t *testing.T) {
 	}
 	if _, err := ts.VerifyToken(t.Context(), result.Token, ScopeReadAccount); !errors.Is(err, ErrTokenInvalid) {
 		t.Errorf("VerifyToken() with a revoked token error = %v, want ErrTokenInvalid", err)
+	}
+}
+
+func TestVerifyToken_StorageFailureIsNotTokenInvalid(t *testing.T) {
+	ts := newTestService(t, defaultTestConfig())
+	if err := ts.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ts.VerifyToken(t.Context(), "token", ScopeReadAccount)
+	if err == nil {
+		t.Fatal("VerifyToken() error = nil, want storage failure")
+	}
+	if errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("storage failure was misclassified as ErrTokenInvalid: %v", err)
 	}
 }
 

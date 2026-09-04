@@ -322,8 +322,12 @@ func TestLocalMiAuthSessionRepository_AuthorizeThenConsume(t *testing.T) {
 	if err := db.LocalMiAuth.Authorize(t.Context(), s.RouteSessionID, actorID, now); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if err := db.LocalMiAuth.Consume(t.Context(), s.RouteSessionID, now); err != nil {
+	consumed, err := db.LocalMiAuth.Consume(t.Context(), s.RouteSessionID, now)
+	if err != nil {
 		t.Fatalf("consume: %v", err)
+	}
+	if consumed.Status != domain.MiAuthConsumed || consumed.LocalActorID == nil || *consumed.LocalActorID != actorID {
+		t.Errorf("Consume() returned %+v, want consumed session for actor %q", consumed, actorID)
 	}
 
 	got, err := db.LocalMiAuth.Get(t.Context(), s.RouteSessionID)
@@ -364,7 +368,7 @@ func TestLocalMiAuthSessionRepository_Consume_OnlyOneWinnerUnderRace(t *testing.
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := db.LocalMiAuth.Consume(t.Context(), s.RouteSessionID, now)
+			_, err := db.LocalMiAuth.Consume(t.Context(), s.RouteSessionID, now)
 			successes[i] = err == nil
 		}(i)
 	}

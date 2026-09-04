@@ -94,6 +94,11 @@ type Config struct {
 	// projection httpserver builds from a successful Check.
 	OwnerUsername    string
 	OwnerDisplayName string
+	// Clock optionally supplies the time source used for TTL and
+	// transition checks. Nil uses the real wall clock. Exposing it here
+	// lets package-external integration tests exercise expiry behavior
+	// without sleeping or mutating Service internals.
+	Clock Clock
 }
 
 // Service implements Issue #5's MiAuth use cases.
@@ -110,7 +115,11 @@ type Service struct {
 // domain.Repos), but Service depends only on these two domain
 // interfaces, never on the concrete storage type.
 func NewService(uow domain.UnitOfWork, repos domain.Repos, upstream UpstreamProvider, cfg Config) *Service {
-	return &Service{uow: uow, repos: repos, upstream: upstream, clock: realClock{}, cfg: cfg}
+	clock := cfg.Clock
+	if clock == nil {
+		clock = realClock{}
+	}
+	return &Service{uow: uow, repos: repos, upstream: upstream, clock: clock, cfg: cfg}
 }
 
 // expired reports whether at has passed as of now, using the same
@@ -338,7 +347,10 @@ func (s *Service) HandleUpstreamCallback(ctx context.Context, upstreamSessionID,
 
 	upstream, err := s.repos.UpstreamMiAuth.Get(ctx, upstreamSessionID)
 	if err != nil {
-		return CallbackResult{}, ErrCallbackInvalid
+		if errors.Is(err, domain.ErrNotFound) {
+			return CallbackResult{}, ErrCallbackInvalid
+		}
+		return CallbackResult{}, err
 	}
 	if upstream.Status != domain.MiAuthCreated || expired(now, upstream.ExpiresAt) || !constantTimeEqual(upstream.State, state) {
 		return CallbackResult{}, ErrCallbackInvalid
@@ -354,7 +366,7 @@ func (s *Service) HandleUpstreamCallback(ctx context.Context, upstreamSessionID,
 	now = s.clock.Now()
 	if !ok {
 		if denyErr := s.denyAttempt(ctx, upstream, now); denyErr != nil {
-			return CallbackResult{}, denyErr
+			return CallbackResult{}, normalizeCallbackTransitionError(denyErr)
 		}
 		return CallbackResult{}, ErrUpstreamVerification
 	}
@@ -405,12 +417,24 @@ func (s *Service) HandleUpstreamCallback(ctx context.Context, upstreamSessionID,
 		return nil
 	})
 	if err != nil {
-		return CallbackResult{}, err
+		return CallbackResult{}, normalizeCallbackTransitionError(err)
 	}
 	if denied {
 		return CallbackResult{}, ErrOwnerBindingDenied
 	}
 	return result, nil
+}
+
+// normalizeCallbackTransitionError converts a failed compare-and-set into
+// the callback boundary's existing generic invalid/expired sentinel. A
+// callback can pass the initial read and then expire or lose a concurrent
+// transition race while the upstream HTTP check is in flight; neither is
+// an infrastructure failure. Other errors still propagate for logging.
+func normalizeCallbackTransitionError(err error) error {
+	if errors.Is(err, domain.ErrConflict) {
+		return ErrCallbackInvalid
+	}
+	return err
 }
 
 // denyAttempt runs denyWithinTx in its own transaction, for the
@@ -448,7 +472,11 @@ func existingBinding(ctx context.Context, repos domain.Repos) (*verifiedIdentity
 	if err != nil {
 		return nil, err
 	}
-	return &verifiedIdentity{IdentityOrigin: b.IdentityOrigin, UpstreamUserID: b.UpstreamUserID}, nil
+	return &verifiedIdentity{
+		IdentityOrigin: b.IdentityOrigin,
+		UpstreamUserID: b.UpstreamUserID,
+		LocalActorID:   b.LocalActorID,
+	}, nil
 }
 
 // ensureOwnerActor returns the existing Owner actor's ID, or — the
@@ -456,11 +484,10 @@ func existingBinding(ctx context.Context, repos domain.Repos) (*verifiedIdentity
 // OwnerBinding together and returns the new actor's ID.
 func ensureOwnerActor(ctx context.Context, repos domain.Repos, existing *verifiedIdentity, verified verifiedIdentity, now time.Time) (string, error) {
 	if existing != nil {
-		owner, err := repos.Actors.GetByType(ctx, domain.ActorOwner)
-		if err != nil {
-			return "", err
+		if existing.LocalActorID == "" {
+			return "", errors.New("miauth: existing owner binding has no local actor id")
 		}
-		return owner.ID, nil
+		return existing.LocalActorID, nil
 	}
 
 	owner := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: now}
@@ -502,7 +529,8 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 
 	var result CheckResult
 	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
-		if err := repos.LocalMiAuth.Consume(ctx, routeSessionID, now); err != nil {
+		local, err := repos.LocalMiAuth.Consume(ctx, routeSessionID, now)
+		if err != nil {
 			// ErrConflict is Consume's expected outcome whenever the
 			// session is not currently authorized (not found, still
 			// pending, expired, or already consumed/replayed) — routine
@@ -515,10 +543,6 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 			return err
 		}
 
-		local, err := repos.LocalMiAuth.Get(ctx, routeSessionID)
-		if err != nil {
-			return err
-		}
 		if local.LocalActorID == nil {
 			// Unreachable in practice: Authorize always sets
 			// LocalActorID together with the authorized status Consume
@@ -575,7 +599,10 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 func (s *Service) VerifyToken(ctx context.Context, rawToken, requiredScope string) (string, error) {
 	tok, err := s.repos.APITokens.GetByTokenHash(ctx, hashAPIToken(rawToken))
 	if err != nil {
-		return "", ErrTokenInvalid
+		if errors.Is(err, domain.ErrNotFound) {
+			return "", ErrTokenInvalid
+		}
+		return "", err
 	}
 	if tok.RevokedAt != nil {
 		return "", ErrTokenInvalid
@@ -597,20 +624,20 @@ func (s *Service) VerifyToken(ctx context.Context, rawToken, requiredScope strin
 // duplicated in the CLI.
 func (s *Service) IssueBootstrapGate(ctx context.Context) (string, error) {
 	now := s.clock.Now()
-
-	if _, err := s.repos.OwnerBindings.Get(ctx); err == nil {
-		return "", ErrAlreadyBound
-	} else if !errors.Is(err, domain.ErrNotFound) {
-		return "", err
-	}
-
 	gate := domain.BootstrapGate{
 		ID:        domain.NewID(),
 		Status:    domain.BootstrapGateIssued,
 		CreatedAt: now,
 		ExpiresAt: now.Add(bootstrapGateTTL),
 	}
-	if err := s.repos.BootstrapGates.Create(ctx, gate); err != nil {
+	if err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		if _, err := repos.OwnerBindings.Get(ctx); err == nil {
+			return ErrAlreadyBound
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		return repos.BootstrapGates.Create(ctx, gate)
+	}); err != nil {
 		return "", err
 	}
 	return gate.ID, nil

@@ -1,11 +1,13 @@
 package miauth
 
-// verifiedIdentity is a (upstream identity origin, upstream user ID)
-// pair, either from a fresh UpstreamProvider.Check result or from an
-// already-persisted OwnerBinding.
+// verifiedIdentity carries the upstream identity pair used for binding
+// decisions. LocalActorID is populated only when the value came from an
+// existing OwnerBinding, allowing the authorization path to reuse that
+// binding without querying the Owner actor again.
 type verifiedIdentity struct {
 	IdentityOrigin string
 	UpstreamUserID string
+	LocalActorID   string
 }
 
 // bindingDecision is the pure result of evaluating a verified upstream

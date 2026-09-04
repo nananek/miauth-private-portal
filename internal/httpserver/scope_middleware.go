@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
+	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 )
 
@@ -28,12 +31,14 @@ const localActorIDKey contextKey = iota
 // (LocalActorIDFromContext). On failure it writes a generic
 // authentication-failed response without revealing why (unknown token,
 // revoked, or wrong scope are all indistinguishable to the caller).
+// Storage/infrastructure failures are logged without the raw token and
+// returned as a generic server error, rather than being hidden as a 401.
 //
 // Issue #5 defines this middleware but wires it to no route: the MiAuth
 // endpoints this issue adds are all pre-authentication by definition,
 // and no protected notes endpoint exists yet. Issue #7 is expected to
 // apply it to the endpoints it introduces.
-func RequireScope(svc *miauth.Service, scope string) func(http.Handler) http.Handler {
+func RequireScope(logger *slog.Logger, svc *miauth.Service, scope string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, err := io.ReadAll(r.Body)
@@ -53,7 +58,15 @@ func RequireScope(svc *miauth.Service, scope string) func(http.Handler) http.Han
 
 			actorID, err := svc.VerifyToken(r.Context(), payload.I, scope)
 			if err != nil {
-				writeAuthenticationFailed(w)
+				if errors.Is(err, miauth.ErrTokenInvalid) {
+					writeAuthenticationFailed(w)
+					return
+				}
+				logger.Error("local API token verification failed",
+					"request_id", logging.RequestIDFromContext(r.Context()),
+					"error", err.Error(),
+				)
+				writeAuthenticationUnavailable(w)
 				return
 			}
 
@@ -73,4 +86,10 @@ func writeAuthenticationFailed(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`{"error":{"id":"authentication-failed","code":"AUTHENTICATION_FAILED","message":"authentication failed","kind":"client"}}`))
+}
+
+func writeAuthenticationUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write([]byte(`{"error":{"id":"authentication-unavailable","code":"INTERNAL_ERROR","message":"authentication unavailable","kind":"server"}}`))
 }

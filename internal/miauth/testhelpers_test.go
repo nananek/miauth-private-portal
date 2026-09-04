@@ -94,8 +94,8 @@ func newTestService(t *testing.T, cfg Config) *testService {
 	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	provider := fixedProvider("", false, nil)
 
+	cfg.Clock = clock
 	svc := NewService(db, db.Repos, provider, cfg)
-	svc.clock = clock
 
 	return &testService{Service: svc, db: db, clock: clock, provider: provider}
 }

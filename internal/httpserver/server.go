@@ -42,14 +42,20 @@ type Server struct {
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
 // ("GET /readyz") routes backed by reg always registered.
 //
-// miauthSvc, localOrigin, and identityOrigin configure Issue #5's MiAuth
-// routes (GET /miauth/{session}, GET /miauth/callback, GET
+// opts.MiAuthService and its named origin fields configure Issue #5's
+// MiAuth routes (GET /miauth/{session}, GET /miauth/callback, GET
 // /miauth/bootstrap/{gate}, POST /api/miauth/{session}/check). A nil
-// miauthSvc registers none of them, leaving a Server with only the
+// MiAuthService registers none of them, leaving a Server with only the
 // health routes — the shape every httpserver test predating Issue #5
 // still expects.
-func NewServer(logger *slog.Logger, reg *health.Registry, miauthSvc *miauth.Service, localOrigin, identityOrigin string) *Server {
-	s := &Server{mux: http.NewServeMux(), logger: logger, miauth: miauthSvc, localOrigin: localOrigin, identityOrigin: identityOrigin}
+func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
+	s := &Server{
+		mux:            http.NewServeMux(),
+		logger:         logger,
+		miauth:         opts.MiAuthService,
+		localOrigin:    opts.LocalOrigin,
+		identityOrigin: opts.IdentityOrigin,
+	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeHealthResult(w, logger, reg.Live(r.Context()))
@@ -58,7 +64,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, miauthSvc *miauth.Serv
 		writeHealthResult(w, logger, reg.Ready(r.Context()))
 	}))
 
-	if miauthSvc != nil {
+	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
 		s.Handle("GET /miauth/callback", http.HandlerFunc(s.handleMiAuthCallback))
 		s.Handle("GET /miauth/bootstrap/{gate}", http.HandlerFunc(s.handleMiAuthBootstrapStart))

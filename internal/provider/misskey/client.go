@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ type Client struct {
 // IDENTITY_ORIGIN), bounding every request by timeout.
 func NewClient(identityOrigin string, timeout time.Duration) *Client {
 	return &Client{
-		identityOrigin: strings.TrimSuffix(identityOrigin, "/"),
+		identityOrigin: strings.TrimRight(identityOrigin, "/"),
 		httpClient:     &http.Client{Timeout: timeout},
 	}
 }
@@ -75,8 +76,8 @@ type checkResponse struct {
 // in docs/compat/aria-v1.5.11.md; this behavior may need revisiting
 // once that is verified against a real Misskey instance.
 func (c *Client) Check(ctx context.Context, upstreamSessionID string) (string, bool, error) {
-	url := fmt.Sprintf("%s/api/miauth/%s/check", c.identityOrigin, upstreamSessionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
+	checkURL := fmt.Sprintf("%s/api/miauth/%s/check", c.identityOrigin, url.PathEscape(upstreamSessionID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, checkURL, strings.NewReader("{}"))
 	if err != nil {
 		return "", false, fmt.Errorf("misskey: build check request: %w", err)
 	}
@@ -86,7 +87,7 @@ func (c *Client) Check(ctx context.Context, upstreamSessionID string) (string, b
 	if err != nil {
 		return "", false, fmt.Errorf("misskey: check request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", false, fmt.Errorf("misskey: check request returned status %d", resp.StatusCode)
@@ -101,4 +102,14 @@ func (c *Client) Check(ctx context.Context, upstreamSessionID string) (string, b
 		return "", false, nil
 	}
 	return parsed.User.ID, true, nil
+}
+
+// drainAndClose gives net/http a chance to reuse a keep-alive connection
+// when Check returns before decoding the body (for example, a non-2xx
+// response) or when the JSON decoder stops at malformed input. The drain
+// is bounded because the upstream response is untrusted; an oversized
+// response may forfeit connection reuse but cannot make cleanup unbounded.
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxCheckResponseBytes+1))
+	_ = body.Close()
 }

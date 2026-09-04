@@ -120,11 +120,33 @@ func (s *Server) handleMiAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.ClientCallback != nil {
-		redirectURL := *result.ClientCallback + "?" + url.Values{"session": {result.RouteSessionID}}.Encode()
+		redirectURL, err := clientCallbackURL(*result.ClientCallback, result.RouteSessionID)
+		if err != nil {
+			// The configured callback was exact-match validated at startup.
+			// Avoid logging its raw value here in case an operator included
+			// sensitive query data in it despite that recommendation.
+			s.logger.Error("miauth client callback construction failed", "request_id", logging.RequestIDFromContext(r.Context()))
+			writePlainTextPage(w, http.StatusInternalServerError, "Authentication failed. Please try again from Aria.")
+			return
+		}
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
 	writePlainTextPage(w, http.StatusOK, "Success. You can return to Aria.")
+}
+
+func clientCallbackURL(callback, routeSessionID string) (string, error) {
+	u, err := url.Parse(callback)
+	if err != nil {
+		return "", err
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", err
+	}
+	query.Set("session", routeSessionID)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 // handleMiAuthCheck handles POST /api/miauth/{session}/check.

@@ -85,7 +85,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			Port:                8080,
 			ReadTimeout:         5 * time.Second,
 			ReadHeaderTimeout:   5 * time.Second,
-			WriteTimeout:        10 * time.Second,
+			WriteTimeout:        15 * time.Second,
 			IdleTimeout:         60 * time.Second,
 			MaxRequestBodyBytes: 1 << 20,
 			ShutdownGracePeriod: 15 * time.Second,
@@ -380,7 +380,7 @@ func TestConfig_ValidateRejectsHandBuiltConfigWithOutOfBoundsFields(t *testing.T
 			Port:                0,
 			ReadTimeout:         -1 * time.Second,
 			ReadHeaderTimeout:   5 * time.Second,
-			WriteTimeout:        10 * time.Second,
+			WriteTimeout:        15 * time.Second,
 			IdleTimeout:         60 * time.Second,
 			MaxRequestBodyBytes: -5,
 			ShutdownGracePeriod: 15 * time.Second,
@@ -407,7 +407,7 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			Port:                8080,
 			ReadTimeout:         5 * time.Second,
 			ReadHeaderTimeout:   5 * time.Second,
-			WriteTimeout:        10 * time.Second,
+			WriteTimeout:        15 * time.Second,
 			IdleTimeout:         60 * time.Second,
 			MaxRequestBodyBytes: 1 << 20,
 			ShutdownGracePeriod: 15 * time.Second,
@@ -499,15 +499,15 @@ func TestLoad_DevelopmentAcceptsHTTPOrigin(t *testing.T) {
 }
 
 // TestLoad_OriginTrimsTrailingSlash backs the fix for a LOCAL_ORIGIN or
-// IDENTITY_ORIGIN configured with a single trailing slash: it must be
+// IDENTITY_ORIGIN configured with trailing slashes: it must be
 // normalized to a bare origin, not stored as-is, or every URL this
 // service builds by naively concatenating "origin + /path" ends up with
 // a double slash.
 func TestLoad_OriginTrimsTrailingSlash(t *testing.T) {
 	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
 		KeyAppEnv:         "development",
-		KeyLocalOrigin:    "https://portal.example/",
-		KeyIdentityOrigin: "https://misskey.example/",
+		KeyLocalOrigin:    "https://portal.example//",
+		KeyIdentityOrigin: "https://misskey.example///",
 	})})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -560,6 +560,20 @@ func TestLoad_AriaClientCallbacks_RejectsEmptyEntry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), KeyAriaClientCallbacks) {
 		t.Errorf("error %q does not mention %s", err.Error(), KeyAriaClientCallbacks)
+	}
+}
+
+func TestLoad_AriaClientCallbacks_RetainsCommaInsideURL(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyAriaClientCallbacks: "https://portal.example/return?ids=1,2,aria://aria/miauth",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://portal.example/return?ids=1,2", "aria://aria/miauth"}
+	if !reflect.DeepEqual(cfg.Auth.AriaClientCallbacks, want) {
+		t.Errorf("AriaClientCallbacks = %v, want %v", cfg.Auth.AriaClientCallbacks, want)
 	}
 }
 
@@ -657,6 +671,23 @@ func TestLoad_UpstreamHTTPTimeoutDefaultAndValidation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), KeyUpstreamHTTPTimeout) {
 		t.Errorf("error %q does not mention %s", err.Error(), KeyUpstreamHTTPTimeout)
+	}
+}
+
+func TestLoad_WriteTimeoutMustExceedUpstreamTimeout(t *testing.T) {
+	for _, writeTimeout := range []string{"10s", "10.5s"} {
+		_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+			KeyAppEnv:              "development",
+			KeyHTTPWriteTimeout:    writeTimeout,
+			KeyUpstreamHTTPTimeout: "10s",
+		}))})
+		if err == nil {
+			t.Errorf("HTTP_WRITE_TIMEOUT=%s: expected error, got nil", writeTimeout)
+			continue
+		}
+		if !strings.Contains(err.Error(), KeyHTTPWriteTimeout) || !strings.Contains(err.Error(), KeyUpstreamHTTPTimeout) {
+			t.Errorf("error %q does not explain the timeout relationship", err.Error())
+		}
 	}
 }
 

@@ -1,12 +1,39 @@
 package misskey
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingBody struct {
+	reader     *strings.Reader
+	closed     bool
+	reachedEOF bool
+}
+
+func (b *trackingBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if err == io.EOF {
+		b.reachedEOF = true
+	}
+	return n, err
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
+}
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
 	t.Helper()
@@ -36,6 +63,25 @@ func TestClient_Check_Success(t *testing.T) {
 	}
 	if userID != "upstream-user-1" {
 		t.Errorf("userID = %q, want upstream-user-1", userID)
+	}
+}
+
+func TestClient_Check_EscapesSessionIDAsOnePathSegment(t *testing.T) {
+	client := NewClient("https://misskey.example", 5*time.Second)
+	client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got, want := req.URL.EscapedPath(), "/api/miauth/session%2Fwith%3Fdelimiters/check"; got != want {
+			t.Errorf("escaped path = %q, want %q", got, want)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"token":"REDACTED","user":{"id":"owner"}}`)),
+			Request:    req,
+		}, nil
+	})
+
+	if _, ok, err := client.Check(context.Background(), "session/with?delimiters"); err != nil || !ok {
+		t.Fatalf("Check() = ok %v, err %v; want success", ok, err)
 	}
 }
 
@@ -95,6 +141,37 @@ func TestClient_Check_NonSuccessStatusIsAnError(t *testing.T) {
 	}
 	if ok {
 		t.Error("Check() ok = true, want false alongside the error")
+	}
+}
+
+func TestClient_Check_DrainsAndClosesBodyOnEarlyReturn(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{name: "non-success status", statusCode: http.StatusBadGateway, body: "upstream failure"},
+		{name: "decode error", statusCode: http.StatusOK, body: "not-json trailing response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &trackingBody{reader: strings.NewReader(tc.body)}
+			client := NewClient("https://misskey.example", 5*time.Second)
+			client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Header:     make(http.Header),
+					Body:       body,
+					Request:    req,
+				}, nil
+			})
+
+			if _, _, err := client.Check(context.Background(), "session"); err == nil {
+				t.Fatal("Check() error = nil, want an error")
+			}
+			if !body.reachedEOF || !body.closed {
+				t.Errorf("response body cleanup = reachedEOF %v, closed %v; want both true", body.reachedEOF, body.closed)
+			}
+		})
 	}
 }
 

@@ -72,7 +72,11 @@ func newMiAuthTestServer(t *testing.T, cfg miauth.Config) *miauthTestServer {
 	logBuf := &bytes.Buffer{}
 	logger := logging.New(logBuf, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
-	srv := NewServer(logger, reg, svc, testLocalOrigin, testIdentityOrigin)
+	srv := NewServer(logger, reg, Options{
+		MiAuthService:  svc,
+		LocalOrigin:    testLocalOrigin,
+		IdentityOrigin: testIdentityOrigin,
+	})
 
 	return &miauthTestServer{Server: srv, db: db, provider: provider, logBuf: logBuf}
 }

@@ -53,7 +53,7 @@ catch that class of mistake during local development.
 | `HTTP_PORT` | no | `8080` | 1-65535. |
 | `HTTP_READ_TIMEOUT` | no | `5s` | `time.ParseDuration` format, must be positive. |
 | `HTTP_READ_HEADER_TIMEOUT` | no | `5s` | Same format/rules. |
-| `HTTP_WRITE_TIMEOUT` | no | `10s` | Same format/rules. |
+| `HTTP_WRITE_TIMEOUT` | no | `15s` | Same format/rules. Must be at least `1s` greater than `UPSTREAM_HTTP_TIMEOUT`, leaving time to return an upstream timeout response. |
 | `HTTP_IDLE_TIMEOUT` | no | `60s` | Same format/rules. |
 | `HTTP_MAX_BODY_BYTES` | no | `1048576` (1 MiB) | Enforced via `http.MaxBytesReader` on every request. |
 | `HTTP_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Bounds how long graceful shutdown waits before forcing connections closed. |
@@ -65,8 +65,8 @@ catch that class of mistake during local development.
 | `LOCAL_ORIGIN` | yes | — | This service's own public origin (ADR-0001 `LOCAL_ORIGIN`). Scheme+host only: no userinfo, path beyond `""`/`"/"`, query, or fragment. Must be `https` in production. |
 | `IDENTITY_ORIGIN` | yes | — | The fixed upstream Misskey origin used for owner verification (ADR-0001 `IDENTITY_ORIGIN`). Same format/production rules as `LOCAL_ORIGIN`. Never supplied by a client request. |
 | `ALLOWED_MISSKEY_USER_ID` | no | `""` (bootstrap-only) | The opaque upstream Misskey user ID allowed to bind as this deployment's single owner. Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. |
-| `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). A non-HTTPS scheme is explicitly allowed here, unlike the two origins above. |
-| `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive. |
+| `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). Commas inside a callback path or query are retained; a separator is a comma followed by the next absolute URL scheme. A non-HTTPS scheme is explicitly allowed here, unlike the two origins above. |
+| `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive and at least `1s` shorter than `HTTP_WRITE_TIMEOUT`. |
 | `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
 | `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
 

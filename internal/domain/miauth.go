@@ -145,10 +145,13 @@ type LocalMiAuthSessionRepository interface {
 	Get(ctx context.Context, routeSessionID string) (LocalMiAuthSession, error)
 	Authorize(ctx context.Context, routeSessionID, localActorID string, at time.Time) error
 	// Consume atomically transitions an authorized session to consumed.
+	// On success it returns the consumed row so callers can use the
+	// authorization facts covered by the same compare-and-set without a
+	// second, separate lookup.
 	// It returns ErrConflict if the session is not currently authorized
 	// (already consumed, expired, or never authorized) — the "only one
 	// winner" guarantee a racing check() call needs.
-	Consume(ctx context.Context, routeSessionID string, at time.Time) error
+	Consume(ctx context.Context, routeSessionID string, at time.Time) (LocalMiAuthSession, error)
 	// Deny atomically transitions a created, unexpired session to denied.
 	// ADR-0001 treats an unknown, malformed, replayed, mismatched, or
 	// otherwise rejected upstream callback as a terminal failure for
