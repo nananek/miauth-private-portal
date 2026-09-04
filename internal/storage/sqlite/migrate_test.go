@@ -34,12 +34,12 @@ func TestMigrate_FreshDatabase(t *testing.T) {
 		}
 		versions = append(versions, v)
 	}
-	if len(versions) != 8 {
-		t.Fatalf("applied migration count = %d, want 8 (versions: %v)", len(versions), versions)
+	if len(versions) != 9 {
+		t.Fatalf("applied migration count = %d, want 9 (versions: %v)", len(versions), versions)
 	}
 	for i, v := range versions {
 		if v != i+1 {
-			t.Fatalf("applied migrations = %v, want 1..8 in order", versions)
+			t.Fatalf("applied migrations = %v, want 1..9 in order", versions)
 		}
 	}
 
@@ -74,8 +74,8 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 8 {
-		t.Fatalf("embedded migration count = %d, want 8", len(migrations))
+	if len(migrations) != 9 {
+		t.Fatalf("embedded migration count = %d, want 9", len(migrations))
 	}
 
 	// Simulate a database already migrated up to version 7, one release
@@ -110,8 +110,8 @@ func TestMigrate_UpgradeAppliesRemainingMigrations(t *testing.T) {
 	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 8 {
-		t.Errorf("schema_migrations count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("schema_migrations count = %d, want 9", count)
 	}
 }
 

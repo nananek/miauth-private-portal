@@ -14,6 +14,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/jobs"
+	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
@@ -82,18 +83,19 @@ func run() error {
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
 
 	opts := httpserver.Options{
-		Addr:                cfg.HTTP.Addr(),
-		ReadTimeout:         cfg.HTTP.ReadTimeout,
-		ReadHeaderTimeout:   cfg.HTTP.ReadHeaderTimeout,
-		WriteTimeout:        cfg.HTTP.WriteTimeout,
-		IdleTimeout:         cfg.HTTP.IdleTimeout,
-		MaxRequestBodyBytes: cfg.HTTP.MaxRequestBodyBytes,
-		ShutdownGracePeriod: cfg.HTTP.ShutdownGracePeriod,
-		MiAuthService:       miauthSvc,
-		LocalOrigin:         cfg.Auth.LocalOrigin,
-		IdentityOrigin:      cfg.Auth.IdentityOrigin,
-		TimelineService:     timelineSvc,
-		LLMEnabled:          cfg.LLM.Enabled,
+		Addr:                     cfg.HTTP.Addr(),
+		ReadTimeout:              cfg.HTTP.ReadTimeout,
+		ReadHeaderTimeout:        cfg.HTTP.ReadHeaderTimeout,
+		WriteTimeout:             cfg.HTTP.WriteTimeout,
+		IdleTimeout:              cfg.HTTP.IdleTimeout,
+		MaxRequestBodyBytes:      cfg.HTTP.MaxRequestBodyBytes,
+		ShutdownGracePeriod:      cfg.HTTP.ShutdownGracePeriod,
+		MiAuthService:            miauthSvc,
+		LocalOrigin:              cfg.Auth.LocalOrigin,
+		IdentityOrigin:           cfg.Auth.IdentityOrigin,
+		TimelineService:          timelineSvc,
+		LLMEnabled:               cfg.LLM.Enabled,
+		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
 	}
 
 	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
@@ -117,6 +119,27 @@ func run() error {
 			MaxAttempts: cfg.Jobs.MaxAttempts,
 		}, logger)
 		jobsManager.Register(llmreply.JobType, llmReplySvc.Handle)
+	}
+
+	// Registered independently of cfg.LLM.Enabled: an operator can run
+	// classification without reply generation, or vice versa. No
+	// Provider is constructed while LLM_CLASSIFICATION_ENABLED is false.
+	if cfg.LLM.ClassificationEnabled {
+		classifyModel := cfg.LLM.ClassificationModelOrDefault()
+		classifyProvider := openai.NewClassificationClient(
+			openai.NewClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, classifyModel, cfg.LLM.Timeout),
+		)
+		llmClassifySvc := llmclassify.NewService(db, db.Repos, classifyProvider, llmclassify.Config{
+			ProviderName:    "openai",
+			Model:           classifyModel,
+			MaxOutputTokens: cfg.LLM.ClassificationMaxOutputTokens,
+			ThreadContext: llmclassify.ContextBudget{
+				MaxMessages: cfg.LLM.ClassificationThreadContextMaxMessages,
+				MaxChars:    cfg.LLM.ClassificationThreadContextMaxChars,
+			},
+			MaxAttempts: cfg.Jobs.MaxAttempts,
+		}, logger)
+		jobsManager.Register(llmclassify.JobType, llmClassifySvc.Handle)
 	}
 
 	// The HTTP server and durable worker share one lifecycle. If either

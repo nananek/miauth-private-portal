@@ -37,11 +37,15 @@ func defaultJobsConfig() JobsConfig {
 
 func defaultLLMConfig() LLMConfig {
 	return LLMConfig{
-		Enabled:                  false,
-		Timeout:                  30 * time.Second,
-		MaxOutputTokens:          1024,
-		ThreadContextMaxMessages: 20,
-		ThreadContextMaxChars:    8000,
+		Enabled:                                false,
+		Timeout:                                30 * time.Second,
+		MaxOutputTokens:                        1024,
+		ThreadContextMaxMessages:               20,
+		ThreadContextMaxChars:                  8000,
+		ClassificationEnabled:                  false,
+		ClassificationMaxOutputTokens:          1024,
+		ClassificationThreadContextMaxMessages: 20,
+		ClassificationThreadContextMaxChars:    8000,
 	}
 }
 
@@ -900,6 +904,114 @@ func TestLoad_LLMBoundsRejectOutOfRangeValues(t *testing.T) {
 		{"thread context messages too low", KeyLLMThreadContextMaxMessages, "0"},
 		{"thread context chars too low", KeyLLMThreadContextMaxChars, "0"},
 		{"timeout not a duration", KeyLLMTimeout, "not-a-duration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+				KeyAppEnv: "development",
+				tt.key:    tt.val,
+			}))})
+			if err == nil {
+				t.Fatalf("%s=%s: expected error, got nil", tt.key, tt.val)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.key)
+			}
+		})
+	}
+}
+
+func TestLoad_LLMClassificationDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLM.ClassificationEnabled {
+		t.Error("LLM.ClassificationEnabled = true, want false by default")
+	}
+}
+
+// TestLoad_LLMClassificationEnabledRequiresBaseURL documents that
+// LLM_BASE_URL (shared connection config) is required when
+// LLM_CLASSIFICATION_ENABLED=true, even while LLM_ENABLED stays false: an
+// operator can run classification without reply generation.
+func TestLoad_LLMClassificationEnabledRequiresBaseURL(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:                   "development",
+		KeyLLMClassificationEnabled: "true",
+		KeyLLMClassificationModel:   "gpt-classify",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLLMBaseURL) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLLMBaseURL)
+	}
+}
+
+// TestLoad_LLMClassificationEnabledRequiresModelDirectlyOrViaLLMModel
+// documents ClassificationModelOrDefault's fallback: classification fails
+// closed only when neither LLM_CLASSIFICATION_MODEL nor LLM_MODEL resolves
+// to a non-empty model name.
+func TestLoad_LLMClassificationEnabledRequiresModelDirectlyOrViaLLMModel(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:                   "development",
+		KeyLLMClassificationEnabled: "true",
+		KeyLLMBaseURL:               "https://api.openai.example/v1",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyLLMClassificationModel) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyLLMClassificationModel)
+	}
+}
+
+func TestLoad_LLMClassificationEnabledFallsBackToLLMModel(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:                   "development",
+		KeyLLMClassificationEnabled: "true",
+		KeyLLMBaseURL:               "https://api.openai.example/v1",
+		KeyLLMModel:                 "gpt-shared",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.LLM.ClassificationModelOrDefault(); got != "gpt-shared" {
+		t.Errorf("ClassificationModelOrDefault() = %q, want %q", got, "gpt-shared")
+	}
+}
+
+func TestLoad_LLMClassificationEnabledWithOwnModelSucceeds(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:                   "development",
+		KeyLLMClassificationEnabled: "true",
+		KeyLLMBaseURL:               "https://api.openai.example/v1",
+		KeyLLMClassificationModel:   "gpt-classify",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLM.ClassificationModel != "gpt-classify" {
+		t.Errorf("LLM.ClassificationModel = %q, want %q", cfg.LLM.ClassificationModel, "gpt-classify")
+	}
+	if got := cfg.LLM.ClassificationModelOrDefault(); got != "gpt-classify" {
+		t.Errorf("ClassificationModelOrDefault() = %q, want %q", got, "gpt-classify")
+	}
+}
+
+func TestLoad_LLMClassificationBoundsRejectOutOfRangeValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"max output tokens too low", KeyLLMClassificationMaxOutputTokens, "0"},
+		{"max output tokens too high", KeyLLMClassificationMaxOutputTokens, "999999"},
+		{"thread context messages too low", KeyLLMClassificationThreadContextMaxMessages, "0"},
+		{"thread context chars too low", KeyLLMClassificationThreadContextMaxChars, "0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

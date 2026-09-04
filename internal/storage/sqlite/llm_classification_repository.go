@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -12,23 +13,107 @@ type llmClassificationRepository struct{ q querier }
 
 const llmClassificationSelectColumns = `SELECT id, entry_id, version, is_active, provider, model,
 	prompt_version, status, error_category, summary, structured_output, prompt_tokens, completion_tokens,
-	generated_at, created_at FROM llm_classifications`
+	generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved, job_id
+	FROM llm_classifications`
 
 func (r *llmClassificationRepository) Create(ctx context.Context, c domain.LLMClassification) (int64, error) {
 	res, err := r.q.ExecContext(ctx,
 		`INSERT INTO llm_classifications (entry_id, version, is_active, provider, model, prompt_version,
 			status, error_category, summary, structured_output, prompt_tokens, completion_tokens,
-			generated_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved, job_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.EntryID, c.Version, boolToInt(c.IsActive), c.Provider, c.Model, c.PromptVersion, string(c.Status),
 		nullableString(c.ErrorCategory), nullableString(c.Summary), nullableString(c.StructuredOutput),
 		nullableInt(c.PromptTokens), nullableInt(c.CompletionTokens), formatTimePtr(c.GeneratedAt),
-		formatTime(c.CreatedAt),
+		formatTime(c.CreatedAt), nullableString(c.Priority), boolToInt(c.NotebookCandidate),
+		boolToInt(c.ReviewCandidate), boolToInt(c.Unresolved), nullableString(c.JobID),
 	)
 	if err != nil {
 		return 0, mapWriteError(err)
 	}
 	return res.LastInsertId()
+}
+
+// Complete transitions entryID's version from pending to complete,
+// mirroring LLMGenerationRepository.Complete's WHERE ... AND status =
+// 'pending' guard so a replayed job handler delivery cannot double-apply
+// a result.
+func (r *llmClassificationRepository) Complete(ctx context.Context, entryID string, version int, summary, structuredOutput string,
+	priority *string, notebookCandidate, reviewCandidate, unresolved bool,
+	promptTokens, completionTokens *int, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE llm_classifications SET status = 'complete', summary = ?, structured_output = ?,
+			priority = ?, notebook_candidate = ?, review_candidate = ?, unresolved = ?,
+			prompt_tokens = ?, completion_tokens = ?, generated_at = ?
+		 WHERE entry_id = ? AND version = ? AND status = 'pending'`,
+		summary, structuredOutput, nullableString(priority), boolToInt(notebookCandidate),
+		boolToInt(reviewCandidate), boolToInt(unresolved), nullableInt(promptTokens),
+		nullableInt(completionTokens), formatTime(at), entryID, version,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+// Fail transitions entryID's version from pending to failed.
+func (r *llmClassificationRepository) Fail(ctx context.Context, entryID string, version int, errorCategory string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE llm_classifications SET status = 'failed', error_category = ?, generated_at = ?
+		 WHERE entry_id = ? AND version = ? AND status = 'pending'`,
+		errorCategory, formatTime(at), entryID, version,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+func (r *llmClassificationRepository) ListReviewCandidates(ctx context.Context, limit int) ([]domain.LLMClassification, error) {
+	return r.listFlagged(ctx, "review_candidate", limit)
+}
+
+func (r *llmClassificationRepository) ListNotebookCandidates(ctx context.Context, limit int) ([]domain.LLMClassification, error) {
+	return r.listFlagged(ctx, "notebook_candidate", limit)
+}
+
+func (r *llmClassificationRepository) ListUnresolved(ctx context.Context, limit int) ([]domain.LLMClassification, error) {
+	return r.listFlagged(ctx, "unresolved", limit)
+}
+
+// listFlagged backs the three ListXxxCandidates methods above: flagColumn
+// is always one of this file's own hardcoded column names, never
+// caller-supplied input, so building the query with fmt.Sprintf here
+// cannot introduce a SQL-injection path.
+func (r *llmClassificationRepository) listFlagged(ctx context.Context, flagColumn string, limit int) ([]domain.LLMClassification, error) {
+	rows, err := r.q.QueryContext(ctx,
+		fmt.Sprintf(llmClassificationSelectColumns+` WHERE is_active = 1 AND %s = 1 ORDER BY generated_at DESC LIMIT ?`, flagColumn),
+		limit)
+	if err != nil {
+		return nil, fmt.Errorf("list classifications by %s: %w", flagColumn, err)
+	}
+	defer rows.Close()
+
+	var classifications []domain.LLMClassification
+	for rows.Next() {
+		c, err := scanLLMClassification(rows)
+		if err != nil {
+			return nil, err
+		}
+		classifications = append(classifications, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate classifications by %s: %w", flagColumn, err)
+	}
+
+	for i, c := range classifications {
+		full, err := r.attachTagsAndRelated(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		classifications[i] = full
+	}
+	return classifications, nil
 }
 
 // Activate marks entryID's classification at version active and
@@ -150,10 +235,13 @@ func scanLLMClassification(row rowScanner) (domain.LLMClassification, error) {
 	var promptTokens, completionTokens sql.NullInt64
 	var generatedAt sql.NullString
 	var createdAt string
+	var priority sql.NullString
+	var notebookCandidate, reviewCandidate, unresolved int
+	var jobID sql.NullString
 
 	if err := row.Scan(&c.ID, &c.EntryID, &c.Version, &isActive, &c.Provider, &c.Model, &c.PromptVersion,
 		&status, &errorCategory, &summary, &structuredOutput, &promptTokens, &completionTokens,
-		&generatedAt, &createdAt); err != nil {
+		&generatedAt, &createdAt, &priority, &notebookCandidate, &reviewCandidate, &unresolved, &jobID); err != nil {
 		return domain.LLMClassification{}, mapReadError(err)
 	}
 
@@ -164,6 +252,11 @@ func scanLLMClassification(row rowScanner) (domain.LLMClassification, error) {
 	c.StructuredOutput = stringPtr(structuredOutput)
 	c.PromptTokens = intPtr(promptTokens)
 	c.CompletionTokens = intPtr(completionTokens)
+	c.Priority = stringPtr(priority)
+	c.NotebookCandidate = notebookCandidate != 0
+	c.ReviewCandidate = reviewCandidate != 0
+	c.Unresolved = unresolved != 0
+	c.JobID = stringPtr(jobID)
 
 	var err error
 	if c.GeneratedAt, err = parseTimePtr(generatedAt); err != nil {

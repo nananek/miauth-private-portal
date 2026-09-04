@@ -48,6 +48,12 @@ const (
 	KeyLLMMaxOutputTokens          = "LLM_MAX_OUTPUT_TOKENS"
 	KeyLLMThreadContextMaxMessages = "LLM_THREAD_CONTEXT_MAX_MESSAGES"
 	KeyLLMThreadContextMaxChars    = "LLM_THREAD_CONTEXT_MAX_CHARS"
+
+	KeyLLMClassificationEnabled                  = "LLM_CLASSIFICATION_ENABLED"
+	KeyLLMClassificationModel                    = "LLM_CLASSIFICATION_MODEL"
+	KeyLLMClassificationMaxOutputTokens          = "LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS"
+	KeyLLMClassificationThreadContextMaxMessages = "LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES"
+	KeyLLMClassificationThreadContextMaxChars    = "LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -92,6 +98,11 @@ var knownKeyOrder = []string{
 	KeyLLMMaxOutputTokens,
 	KeyLLMThreadContextMaxMessages,
 	KeyLLMThreadContextMaxChars,
+	KeyLLMClassificationEnabled,
+	KeyLLMClassificationModel,
+	KeyLLMClassificationMaxOutputTokens,
+	KeyLLMClassificationThreadContextMaxMessages,
+	KeyLLMClassificationThreadContextMaxChars,
 }
 
 func isKnownKey(key string) bool {

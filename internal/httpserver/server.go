@@ -35,11 +35,12 @@ type Server struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
 
-	miauth         *miauth.Service
-	timeline       *timeline.Service
-	localOrigin    string
-	identityOrigin string
-	llmEnabled     bool
+	miauth                   *miauth.Service
+	timeline                 *timeline.Service
+	localOrigin              string
+	identityOrigin           string
+	llmEnabled               bool
+	llmClassificationEnabled bool
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -62,13 +63,14 @@ type Server struct {
 // meaningful note API without a timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
 	s := &Server{
-		mux:            http.NewServeMux(),
-		logger:         logger,
-		miauth:         opts.MiAuthService,
-		timeline:       opts.TimelineService,
-		localOrigin:    opts.LocalOrigin,
-		identityOrigin: opts.IdentityOrigin,
-		llmEnabled:     opts.LLMEnabled,
+		mux:                      http.NewServeMux(),
+		logger:                   logger,
+		miauth:                   opts.MiAuthService,
+		timeline:                 opts.TimelineService,
+		localOrigin:              opts.LocalOrigin,
+		identityOrigin:           opts.IdentityOrigin,
+		llmEnabled:               opts.LLMEnabled,
+		llmClassificationEnabled: opts.LLMClassificationEnabled,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

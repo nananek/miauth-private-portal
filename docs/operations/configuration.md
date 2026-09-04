@@ -3,8 +3,9 @@
 This document covers the configuration and HTTP-routing foundation added by
 Issue #3, the SQLite persistence layer added by Issue #4, the bridged
 MiAuth authentication flow added by Issue #5, the Aria/Misskey-compatible
-note API added by Issue #7, the durable job worker added by Issue #8, and
-the LLM reply/follow-up generation added by Issue #9. The normative design for MiAuth is
+note API added by Issue #7, the durable job worker added by Issue #8, the
+LLM reply/follow-up generation added by Issue #9, and the LLM post
+classification added by Issue #10. The normative design for MiAuth is
 [`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
 (ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -87,6 +88,15 @@ catch that class of mistake during local development.
 | `LLM_MAX_OUTPUT_TOKENS` | no | `1024` | 1-32768. Upper bound on one generation's completion length. |
 | `LLM_THREAD_CONTEXT_MAX_MESSAGES` | no | `20` | 1-500. Maximum prior thread entries included as generation context. |
 | `LLM_THREAD_CONTEXT_MAX_CHARS` | no | `8000` | 1-200000. Maximum combined character length of included prior thread context. |
+| `LLM_CLASSIFICATION_ENABLED` | no | `false` | Gates Issue #10's post classification entirely, independent of `LLM_ENABLED`: an operator can run one without the other. While `false`, `notes/create` never enqueues an `llm_classification` job. |
+| `LLM_CLASSIFICATION_MODEL` | no | `""` (falls back to `LLM_MODEL`) | Model name passed to the provider for classification; empty reuses `LLM_MODEL`. Required (directly or via `LLM_MODEL`) when `LLM_CLASSIFICATION_ENABLED=true`. |
+| `LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS` | no | `1024` | 1-32768. Upper bound on one classification completion's length. |
+| `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES` | no | `20` | 1-500. Maximum same-thread candidate entries offered as related-post candidates. Independent budget from `LLM_THREAD_CONTEXT_MAX_MESSAGES`. |
+| `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS` | no | `8000` | 1-200000. Maximum combined character length of included candidate entries. Independent budget from `LLM_THREAD_CONTEXT_MAX_CHARS`. |
+
+`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
+settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
+`LLM_CLASSIFICATION_ENABLED` is `true`, not duplicated per feature.
 
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
@@ -432,6 +442,105 @@ A generated `llm_follow_up` entry is an ordinary timeline entry: when the
 user answers it with `replyId` set to that entry's ID, `notes/create`'s
 existing `CreateReply` path handles it exactly like any other reply,
 landing in the same thread. No separate answer-routing endpoint exists.
+
+## Post classification
+
+Issue #10 classifies and organizes each `user_post` (subject, field,
+keywords, tags, summary, open questions, priority, notebook/review
+candidacy, and same-thread related-post guesses) as a separate, versioned
+result, asynchronously through the durable job worker, so an LLM outage,
+timeout, or malformed response never affects `notes/create` itself or the
+post's own body. Results live in `llm_classifications`
+(`internal/domain.LLMClassificationRepository`) and are never merged into
+an entry's user-authored `Body`; only `internal/llmreply`'s generated
+`llm_reply`/`llm_follow_up` entries are excluded from classification —
+every `user_post` is classified unconditionally, with no body-dependent
+policy like `internal/llmreply.DecideReply`.
+
+### Enqueue
+
+`handleNotesCreate` (`internal/httpserver`) enqueues an
+`llm_classification` job for every created `user_post` whenever
+`LLM_CLASSIFICATION_ENABLED=true`, alongside (and independently of) any
+`llm_generation` job the reply policy decides to enqueue —
+`timeline.Service.CreateRoot`/`CreateReply` accept any number of jobs and
+commit them all in the same transaction as the entry they target. Editing
+a post (a future `notes/update` endpoint; not implemented by Issue #10)
+would enqueue another `llm_classification` job for the same entry the
+same way; the version scheme below already supports this without any
+different code path.
+
+### Classification job
+
+`internal/llmclassify.Service.Handle`, registered under job type
+`llm_classification` only while `LLM_CLASSIFICATION_ENABLED=true`:
+
+1. Resolves the classification version this exact job owns
+   (`ensureClassification`): it searches the target entry's existing
+   classification versions for one already carrying this job's ID. Found
+   and still `pending` → resume it (an earlier attempt crashed before
+   finishing). Found and already `complete`/`failed` → this delivery is a
+   duplicate, skip it entirely. Not found → insert the next version
+   number as a new `pending` row. Unlike `internal/llmreply`'s
+   deterministic generation ID, `llm_classifications.id` is
+   auto-incrementing, so this job-ID lookup — not a database conflict —
+   is what makes a duplicate delivery detectable no matter how long after
+   the original attempt it arrives (for example, if the job's own
+   "succeeded" state transition failed to persist after the classification
+   itself had already committed).
+2. Builds the prompt: `internal/llmclassify.BuildCandidates` takes the
+   target entry's thread (both earlier and later entries, unlike reply
+   generation's context), drops hidden/archived entries, and bounds what
+   remains by `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES` and
+   `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS`. `BuildMessages` uses a
+   fixed system prompt that never contains post content — every candidate
+   and the target's own body are carried only in `user`-role messages, so
+   text embedded in a post can never be promoted to a system instruction.
+3. Calls `internal/provider/openai.Client.CompleteForClassification` (the
+   same underlying wire handling `internal/provider/openai.Client.Complete`
+   uses for reply generation), bounded by `LLM_TIMEOUT` and
+   `LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS`, against the model resolved by
+   `LLM_CLASSIFICATION_MODEL` (or `LLM_MODEL` if unset).
+4. `internal/llmclassify.ParseAndNormalize` validates the structured JSON
+   output: an unrecognized `priority` enum value is normalized to `null`;
+   oversize `keywords`/`tags`/`openQuestions`/`learningTargets`/
+   `relatedEntryIds` are truncated; oversize `subject`/`field`/`summary`
+   strings are truncated; `confidence` is clamped to `[0, 1]`. Only a
+   response that cannot be parsed as a JSON object at all fails the
+   classification — every other defect above is repaired, not rejected.
+   `validateRelatedIDs` separately drops self-references, duplicates, and
+   any ID outside the actual candidate set (a hallucinated or cross-thread
+   ID) from `relatedEntryIds`; an empty result after that filtering does
+   not fail the classification.
+5. On success, one transaction calls `Complete` (recording `summary`,
+   the remaining fields as opaque `structured_output` JSON, and the
+   materialized `priority`/`notebook_candidate`/`review_candidate`/
+   `unresolved` columns), `AddTag`/`AddRelatedEntry` for each validated
+   tag/related ID, and `Activate` (deactivating every other version for
+   the entry — the schema's partial unique index guarantees at most one
+   active version per entry).
+6. On failure, the error is classified into one of
+   `internal/llmclassify.Category`'s values (`auth`, `client_error`,
+   `malformed_response`, and `content_refusal` are permanent; `timeout`,
+   `rate_limit`, `server_error`, and `transport` are retryable — identical
+   meaning to `internal/llmreply.Category`). A permanent failure marks the
+   classification version `failed` immediately. A retryable failure marks
+   it `failed` only once this is the job's last configured attempt
+   (`JOBS_MAX_ATTEMPTS`); otherwise the version stays `pending` and an
+   ordinary job retry follows.
+
+Every provider-classified error is logged only by its `Category`
+constant, matching `internal/llmreply`'s and this service's existing
+"never log LLM prompts or response bodies" rule.
+
+### Review/notebook/unresolved queries
+
+`internal/domain.LLMClassificationRepository.ListReviewCandidates`,
+`ListNotebookCandidates`, and `ListUnresolved` return the active
+classifications flagged accordingly, most recently generated first. These
+are Go API (use-case layer) only — no new Aria/Misskey-compatible HTTP
+endpoint exists for them, since Aria has no equivalent concept; a future
+UI or interface would need its own issue.
 
 ## Health and readiness
 

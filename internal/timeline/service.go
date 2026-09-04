@@ -65,11 +65,12 @@ func NewService(uow domain.UnitOfWork, repos domain.Repos, cfg Config) *Service 
 // and ingestion/system entries may be roots; LLM replies and follow-up
 // questions must attach to an existing entry through CreateReply.
 //
-// When job is non-nil, a copy is enqueued in the same transaction with
-// SourceEntryID set to the new entry. All other job fields remain under
-// the caller's control because concrete job types belong to later
-// worker issues.
-func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body string, job *domain.Job) (domain.Entry, error) {
+// Each non-nil job in jobs is enqueued in the same transaction with
+// SourceEntryID set to the new entry; a nil element is skipped, so
+// callers can pass a conditionally-nil job without filtering it out
+// themselves. All other job fields remain under the caller's control
+// because concrete job types belong to later worker issues.
+func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body string, jobs ...*domain.Job) (domain.Entry, error) {
 	actorType, ok := authorActorTypeForKind[kind]
 	if !ok || kind == domain.EntryLLMReply || kind == domain.EntryLLMFollowUp {
 		return domain.Entry{}, ErrInvalidKind
@@ -100,7 +101,7 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 		if err := repos.Entries.Create(ctx, entry); err != nil {
 			return err
 		}
-		return enqueueForEntry(ctx, repos, job, entry.ID)
+		return enqueueForEntry(ctx, repos, jobs, entry.ID)
 	})
 	if err != nil {
 		return domain.Entry{}, err
@@ -112,7 +113,7 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 // deliberately no threadID argument: the reply always inherits its
 // parent's ThreadID, making cross-thread parent relationships
 // impossible through this use-case API.
-func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind domain.EntryKind, body string, job *domain.Job) (domain.Entry, error) {
+func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind domain.EntryKind, body string, jobs ...*domain.Job) (domain.Entry, error) {
 	now := s.clock.Now().UTC()
 	var entry domain.Entry
 
@@ -122,7 +123,7 @@ func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind do
 		if err != nil {
 			return err
 		}
-		return enqueueForEntry(ctx, repos, job, entry.ID)
+		return enqueueForEntry(ctx, repos, jobs, entry.ID)
 	})
 	if err != nil {
 		return domain.Entry{}, err
@@ -210,10 +211,10 @@ func createReplyEntry(ctx context.Context, repos domain.Repos, parentEntryID str
 }
 
 // EditPost replaces the body of the owner actor's own user_post and,
-// when supplied, atomically enqueues the caller-defined reprocessing job.
-// Generated and ingested entries can never reach UpdateBody through this
-// use-case path.
-func (s *Service) EditPost(ctx context.Context, entryID, editorActorID, newBody string, job *domain.Job) (domain.Entry, error) {
+// when supplied, atomically enqueues the caller-defined reprocessing
+// job(s). Generated and ingested entries can never reach UpdateBody
+// through this use-case path.
+func (s *Service) EditPost(ctx context.Context, entryID, editorActorID, newBody string, jobs ...*domain.Job) (domain.Entry, error) {
 	now := s.clock.Now().UTC()
 	var entry domain.Entry
 
@@ -238,7 +239,7 @@ func (s *Service) EditPost(ctx context.Context, entryID, editorActorID, newBody 
 		if err := repos.Entries.UpdateBody(ctx, entry.ID, newBody, now); err != nil {
 			return err
 		}
-		if err := enqueueForEntry(ctx, repos, job, entry.ID); err != nil {
+		if err := enqueueForEntry(ctx, repos, jobs, entry.ID); err != nil {
 			return err
 		}
 
@@ -316,11 +317,22 @@ func (s *Service) ResolveAuthor(ctx context.Context, actorID string) (domain.Act
 	return s.repos.Actors.Get(ctx, actorID)
 }
 
-func enqueueForEntry(ctx context.Context, repos domain.Repos, job *domain.Job, entryID string) error {
-	if job == nil {
-		return nil
+// enqueueForEntry enqueues each non-nil job in jobs against entryID, in
+// the same transaction the caller is already running inside. Since jobs
+// is variadic, a caller passing a single possibly-nil job (as every
+// pre-Issue-#10 call site does) produces a one-element slice containing
+// nil, not a nil slice — so nil elements are skipped individually here,
+// not filtered by checking the slice itself.
+func enqueueForEntry(ctx context.Context, repos domain.Repos, jobs []*domain.Job, entryID string) error {
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		intent := *job
+		intent.SourceEntryID = &entryID
+		if err := repos.Jobs.Enqueue(ctx, intent); err != nil {
+			return err
+		}
 	}
-	intent := *job
-	intent.SourceEntryID = &entryID
-	return repos.Jobs.Enqueue(ctx, intent)
+	return nil
 }
