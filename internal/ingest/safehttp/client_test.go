@@ -105,6 +105,42 @@ func TestClient_Do_RejectsRedirectToDisallowedAddress(t *testing.T) {
 	}
 }
 
+// TestClient_Do_FollowsAllowedRedirect is the happy-path counterpart to
+// the rejection tests above: a same-scheme redirect within the
+// configured limit, to an allowed address, must actually succeed.
+func TestClient_Do_FollowsAllowedRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("target reached"))
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	client := NewClient(Config{
+		MaxRedirects:      3,
+		AllowInsecureHTTP: true,
+		AllowIPForTesting: func(ip net.IP) bool { return ip.IsLoopback() },
+	})
+	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if resp.Request.URL.String() != target.URL {
+		t.Errorf("final URL = %q, want redirect target %q", resp.Request.URL.String(), target.URL)
+	}
+}
+
 func TestClient_Do_RespectsContextTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
