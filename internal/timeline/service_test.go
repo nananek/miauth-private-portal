@@ -369,6 +369,101 @@ func TestCreateGeneratedReply_RollsBackEntryWhenGenerationNotPending(t *testing.
 	}
 }
 
+func mustCreateExternalSourceForTest(t *testing.T, ts *testService, kind, uri string) domain.ExternalSource {
+	t.Helper()
+	s := domain.ExternalSource{ID: domain.NewID(), Kind: kind, URI: uri, CreatedAt: ts.clock.Now()}
+	if err := ts.db.ExternalSources.Create(t.Context(), s); err != nil {
+		t.Fatalf("create external source: %v", err)
+	}
+	return s
+}
+
+func TestCreateExternalEntry_CreatesRootEntryAndPromotesItem(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", DedupeKey: "dedupe-1"}
+	entry, created, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "hello from rss")
+	if err != nil {
+		t.Fatalf("CreateExternalEntry: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true for a brand new item")
+	}
+	if !entry.IsRoot() || entry.ID != entry.ThreadID {
+		t.Errorf("root topology is invalid: %+v", entry)
+	}
+	if entry.Body != "hello from rss" {
+		t.Errorf("Body = %q, want %q", entry.Body, "hello from rss")
+	}
+	systemActor, err := ts.db.Actors.GetByType(t.Context(), domain.ActorSystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.AuthorActorID != systemActor.ID {
+		t.Errorf("AuthorActorID = %q, want system actor %q", entry.AuthorActorID, systemActor.ID)
+	}
+
+	stored, err := ts.db.ExternalItems.GetByDedupeKey(t.Context(), "dedupe-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.EntryID == nil || *stored.EntryID != entry.ID {
+		t.Errorf("stored item EntryID = %v, want %q", stored.EntryID, entry.ID)
+	}
+}
+
+// TestCreateExternalEntry_DuplicateDedupeKeyReturnsExistingEntryWithoutDuplicating
+// is the dedupe safety net Issue #11 requires: re-delivering the same
+// external item (a retried "external_source_poll" job, or the same item
+// reappearing in a later fetch) must never create a second timeline
+// entry for it.
+func TestCreateExternalEntry_DuplicateDedupeKeyReturnsExistingEntryWithoutDuplicating(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", DedupeKey: "dedupe-1"}
+
+	first, firstCreated, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "first delivery")
+	if err != nil {
+		t.Fatalf("first CreateExternalEntry: %v", err)
+	}
+	if !firstCreated {
+		t.Fatal("first delivery: created = false, want true")
+	}
+
+	second, secondCreated, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "first delivery")
+	if err != nil {
+		t.Fatalf("second CreateExternalEntry: %v", err)
+	}
+	if secondCreated {
+		t.Error("second delivery: created = true, want false")
+	}
+	if second.ID != first.ID {
+		t.Errorf("second delivery returned entry %q, want the original %q", second.ID, first.ID)
+	}
+
+	timeline, err := ts.GetTimeline(t.Context(), domain.Page{Limit: 10}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 1 {
+		t.Errorf("timeline has %d entries after duplicate delivery, want 1", len(timeline))
+	}
+}
+
+func TestCreateExternalEntry_RejectsReplyAndUnknownKinds(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+
+	for _, kind := range []domain.EntryKind{domain.EntryLLMReply, domain.EntryLLMFollowUp, "unknown"} {
+		item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-" + string(kind), DedupeKey: "dedupe-" + string(kind)}
+		_, _, err := ts.CreateExternalEntry(t.Context(), kind, item, "body")
+		if !errors.Is(err, ErrInvalidKind) {
+			t.Errorf("kind %q: err = %v, want ErrInvalidKind", kind, err)
+		}
+	}
+}
+
 func TestEditPost_UpdatesOwnersPostAndEnqueuesJob(t *testing.T) {
 	ts := newTestService(t)
 	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "before", nil)
