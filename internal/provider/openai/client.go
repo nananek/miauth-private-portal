@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 )
 
@@ -79,6 +80,25 @@ type completionResponseBody struct {
 	} `json:"usage"`
 }
 
+// category is this client's own provider-neutral failure classification.
+// Complete and CompleteForClassification each convert it into their own
+// package's Category type (a plain string-to-string conversion, since
+// both mirror the same eight values) right at the boundary where they
+// wrap it into that package's ProviderError, so doComplete itself never
+// depends on either use-case package's Category type.
+type category string
+
+const (
+	categoryTransport         category = "transport"
+	categoryTimeout           category = "timeout"
+	categoryAuth              category = "auth"
+	categoryRateLimit         category = "rate_limit"
+	categoryServerError       category = "server_error"
+	categoryClientError       category = "client_error"
+	categoryMalformedResponse category = "malformed_response"
+	categoryContentRefusal    category = "content_refusal"
+)
+
 // Complete implements llmreply.Provider. Every failure is wrapped with
 // llmreply.NewProviderError; see its Category constants for the
 // retryable/permanent distinction internal/llmreply's job handler
@@ -92,18 +112,70 @@ func (c *Client) Complete(ctx context.Context, req llmreply.CompletionRequest) (
 	for i, m := range req.Messages {
 		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	if err != nil {
+		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.Category(cat), err)
+	}
+	return llmreply.CompletionResult{Content: content, PromptTokens: promptTokens, CompletionTokens: completionTokens}, nil
+}
+
+// ClassificationClient adapts a Client to llmclassify.Provider by calling
+// CompleteForClassification. A separate type is needed here (rather than
+// a direct llmclassify.Provider assertion on *Client itself) because Go
+// does not allow one type to declare two methods named "Complete" with
+// different signatures: Client.Complete already implements
+// llmreply.Provider's shape. cmd/server constructs this alongside Client
+// when LLM_CLASSIFICATION_ENABLED is set.
+type ClassificationClient struct{ client *Client }
+
+// NewClassificationClient wraps c for use as an llmclassify.Provider.
+func NewClassificationClient(c *Client) ClassificationClient {
+	return ClassificationClient{client: c}
+}
+
+var _ llmclassify.Provider = ClassificationClient{}
+
+// Complete implements llmclassify.Provider by delegating to the wrapped
+// Client's CompleteForClassification.
+func (c ClassificationClient) Complete(ctx context.Context, req llmclassify.CompletionRequest) (llmclassify.CompletionResult, error) {
+	return c.client.CompleteForClassification(ctx, req)
+}
+
+// CompleteForClassification implements llmclassify.Provider's actual
+// wire call, sharing this client's wire handling (request assembly, HTTP
+// call, response envelope parsing, status/timeout classification) with
+// Complete through doComplete. See Complete's doc comment for the same
+// never-log-prompts-or-bodies rule, which applies identically here.
+func (c *Client) CompleteForClassification(ctx context.Context, req llmclassify.CompletionRequest) (llmclassify.CompletionResult, error) {
+	messages := make([]wireMessage, len(req.Messages))
+	for i, m := range req.Messages {
+		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
+	}
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	if err != nil {
+		return llmclassify.CompletionResult{}, llmclassify.NewProviderError(llmclassify.Category(cat), err)
+	}
+	return llmclassify.CompletionResult{Content: content, PromptTokens: promptTokens, CompletionTokens: completionTokens}, nil
+}
+
+// doComplete is the shared implementation behind Complete and
+// CompleteForClassification: it builds and sends one chat-completions
+// request and parses the response envelope, returning a plain category
+// (empty on success) instead of either use-case package's ProviderError
+// type, which its two callers wrap right at their own boundary.
+func (c *Client) doComplete(ctx context.Context, messages []wireMessage, maxOutputTokens int) (content string, promptTokens, completionTokens *int, cat category, err error) {
 	body, err := json.Marshal(completionRequestBody{
 		Model:     c.model,
 		Messages:  messages,
-		MaxTokens: req.MaxOutputTokens,
+		MaxTokens: maxOutputTokens,
 	})
 	if err != nil {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryClientError, errors.New("encode request"))
+		return "", nil, nil, categoryClientError, errors.New("encode request")
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryTransport, errors.New("build request"))
+		return "", nil, nil, categoryTransport, errors.New("build request")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -112,34 +184,30 @@ func (c *Client) Complete(ctx context.Context, req llmreply.CompletionRequest) (
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(categorizeTransportError(ctx, err), errors.New("request failed"))
+		return "", nil, nil, categorizeTransportError(ctx, err), errors.New("request failed")
 	}
 	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(categorizeStatus(resp.StatusCode), fmt.Errorf("status %d", resp.StatusCode))
+		return "", nil, nil, categorizeStatus(resp.StatusCode), fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	var parsed completionResponseBody
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&parsed); err != nil {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryMalformedResponse, errors.New("decode response"))
+		return "", nil, nil, categoryMalformedResponse, errors.New("decode response")
 	}
 	if len(parsed.Choices) == 0 {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryMalformedResponse, errors.New("no choices in response"))
+		return "", nil, nil, categoryMalformedResponse, errors.New("no choices in response")
 	}
 	choice := parsed.Choices[0]
 	if choice.FinishReason == "content_filter" || choice.Message.Refusal != "" {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryContentRefusal, errors.New("provider refused to generate content"))
+		return "", nil, nil, categoryContentRefusal, errors.New("provider refused to generate content")
 	}
 	if choice.Message.Content == "" {
-		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.CategoryMalformedResponse, errors.New("empty content in response"))
+		return "", nil, nil, categoryMalformedResponse, errors.New("empty content in response")
 	}
 
-	return llmreply.CompletionResult{
-		Content:          choice.Message.Content,
-		PromptTokens:     parsed.Usage.PromptTokens,
-		CompletionTokens: parsed.Usage.CompletionTokens,
-	}, nil
+	return choice.Message.Content, parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens, "", nil
 }
 
 // categorizeTransportError distinguishes a timeout (the caller-supplied
@@ -150,30 +218,30 @@ func (c *Client) Complete(ctx context.Context, req llmreply.CompletionRequest) (
 // already special-cases jobCtx cancellation independently of whatever
 // category the handler returns, so classifying a cancellation as a
 // timeout here is safe either way.
-func categorizeTransportError(ctx context.Context, err error) llmreply.Category {
+func categorizeTransportError(ctx context.Context, err error) category {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return llmreply.CategoryTimeout
+		return categoryTimeout
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return llmreply.CategoryTimeout
+		return categoryTimeout
 	}
 	if ctx.Err() != nil {
-		return llmreply.CategoryTimeout
+		return categoryTimeout
 	}
-	return llmreply.CategoryTransport
+	return categoryTransport
 }
 
-func categorizeStatus(status int) llmreply.Category {
+func categorizeStatus(status int) category {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return llmreply.CategoryAuth
+		return categoryAuth
 	case status == http.StatusTooManyRequests:
-		return llmreply.CategoryRateLimit
+		return categoryRateLimit
 	case status >= 500:
-		return llmreply.CategoryServerError
+		return categoryServerError
 	default:
-		return llmreply.CategoryClientError
+		return categoryClientError
 	}
 }
 

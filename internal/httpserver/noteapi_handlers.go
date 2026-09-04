@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
@@ -168,6 +169,7 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := s.llmReplyJob(*req.Text)
+	classificationJob := s.llmClassificationJob()
 
 	var entry domain.Entry
 	var err error
@@ -192,13 +194,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, job)
+		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, job, classificationJob)
 		if errors.Is(err, timeline.ErrParentNotFound) {
 			writeNoSuchNote(w)
 			return
 		}
 	} else {
-		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, job)
+		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, job, classificationJob)
 	}
 	if err != nil {
 		s.logger.Error("create note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
@@ -248,6 +250,44 @@ func (s *Server) llmReplyJob(body string) *domain.Job {
 	return &domain.Job{
 		ID:             domain.NewID(),
 		JobType:        llmreply.JobType,
+		Payload:        payload,
+		PayloadVersion: 1,
+		State:          domain.JobPending,
+		NextRunAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+}
+
+// llmClassificationJob returns Issue #10's "llm_classification" job to
+// enqueue for a newly created user_post, or nil when
+// s.llmClassificationEnabled is false (LLM_CLASSIFICATION_ENABLED's safe
+// default: no job is ever enqueued and no request ever reaches a
+// provider). Unlike llmReplyJob, there is no body-dependent policy to
+// evaluate: classification v1 is enqueued unconditionally for every
+// user_post (internal/llmclassify's scope is user_post only; generated
+// llm_reply/llm_follow_up entries, created via
+// timeline.Service.CreateGeneratedReply rather than this handler, are
+// never classified). The returned Job has no SourceEntryID yet, set
+// atomically by CreateRoot/CreateReply's enqueueForEntry, same as
+// llmReplyJob.
+func (s *Server) llmClassificationJob() *domain.Job {
+	if !s.llmClassificationEnabled {
+		return nil
+	}
+	payload, err := llmclassify.NewJobPayload()
+	if err != nil {
+		// llmclassify.NewJobPayload can only fail here on an encoding bug,
+		// never on post content. Skip classification rather than fail the
+		// note creation itself (AGENTS.md: "Failure of an LLM...must
+		// never make a user post disappear").
+		s.logger.Warn("llm classification job payload encode failed", "error_category", "encode_error")
+		return nil
+	}
+	now := time.Now().UTC()
+	return &domain.Job{
+		ID:             domain.NewID(),
+		JobType:        llmclassify.JobType,
 		Payload:        payload,
 		PayloadVersion: 1,
 		State:          domain.JobPending,

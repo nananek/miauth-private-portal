@@ -149,6 +149,54 @@ func TestCreateRoot_EnqueuesJobForEntryAtomically(t *testing.T) {
 	}
 }
 
+// TestCreateRoot_EnqueuesMultipleJobsForEntryAtomically backs Issue #10's
+// need to enqueue both a reply-generation job and a classification job
+// for the same post in one transaction.
+func TestCreateRoot_EnqueuesMultipleJobsForEntryAtomically(t *testing.T) {
+	ts := newTestService(t)
+	first := newTestJob(ts.clock.Now(), nil)
+	second := newTestJob(ts.clock.Now(), nil)
+
+	entry, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", &first, &second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []domain.Job{first, second} {
+		stored, err := ts.db.Jobs.Get(t.Context(), job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.SourceEntryID == nil || *stored.SourceEntryID != entry.ID {
+			t.Errorf("job %s SourceEntryID = %v, want %q", job.ID, stored.SourceEntryID, entry.ID)
+		}
+	}
+}
+
+// TestCreateRoot_SkipsNilJobsMixedWithNonNilOnes backs enqueueForEntry's
+// per-element nil check: since jobs became variadic, a caller passing one
+// nil job produces a one-element slice containing nil (not a nil slice),
+// and that must still be handled the same as before — skipped, not
+// enqueued — even when it appears alongside a real job.
+func TestCreateRoot_SkipsNilJobsMixedWithNonNilOnes(t *testing.T) {
+	ts := newTestService(t)
+	real := newTestJob(ts.clock.Now(), nil)
+
+	entry, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil, &real, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := ts.db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != real.ID {
+		t.Fatalf("jobs = %v, want exactly [%s]", jobs, real.ID)
+	}
+	if jobs[0].SourceEntryID == nil || *jobs[0].SourceEntryID != entry.ID {
+		t.Errorf("job.SourceEntryID = %v, want %q", jobs[0].SourceEntryID, entry.ID)
+	}
+}
+
 func TestCreateRoot_RollsBackEntryAndThreadWhenJobConflicts(t *testing.T) {
 	ts := newTestService(t)
 	key := "duplicate-root"

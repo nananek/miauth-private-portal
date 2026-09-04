@@ -54,7 +54,7 @@ type noteAPITestServer struct {
 
 func newNoteAPITestServer(t *testing.T) *noteAPITestServer {
 	t.Helper()
-	return newNoteAPITestServerWithOptions(t, false)
+	return newNoteAPITestServerWithOptions(t, false, false)
 }
 
 // newNoteAPITestServerLLMEnabled builds a noteAPITestServer with Issue
@@ -62,10 +62,19 @@ func newNoteAPITestServer(t *testing.T) *noteAPITestServer {
 // "llm_generation" job is (or is not) enqueued.
 func newNoteAPITestServerLLMEnabled(t *testing.T) *noteAPITestServer {
 	t.Helper()
-	return newNoteAPITestServerWithOptions(t, true)
+	return newNoteAPITestServerWithOptions(t, true, false)
 }
 
-func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled bool) *noteAPITestServer {
+// newNoteAPITestServerLLMClassificationEnabled builds a noteAPITestServer
+// with Issue #10's notes/create enqueue hook turned on (and Issue #9's
+// left off), for tests that verify an "llm_classification" job is (or is
+// not) enqueued independently of reply generation.
+func newNoteAPITestServerLLMClassificationEnabled(t *testing.T) *noteAPITestServer {
+	t.Helper()
+	return newNoteAPITestServerWithOptions(t, false, true)
+}
+
+func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassificationEnabled bool) *noteAPITestServer {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: path, BusyTimeout: 5 * time.Second, MaxOpenConns: 4})
@@ -88,10 +97,11 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled bool) *noteAPITest
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	srv := NewServer(logger, reg, Options{
-		MiAuthService:   miauthSvc,
-		TimelineService: timelineSvc,
-		LocalOrigin:     testLocalOrigin,
-		LLMEnabled:      llmEnabled,
+		MiAuthService:            miauthSvc,
+		TimelineService:          timelineSvc,
+		LocalOrigin:              testLocalOrigin,
+		LLMEnabled:               llmEnabled,
+		LLMClassificationEnabled: llmClassificationEnabled,
 	})
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}

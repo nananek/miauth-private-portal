@@ -37,9 +37,8 @@ type Options struct {
 	MaxRequestBodyBytes int64
 	ShutdownGracePeriod time.Duration
 
-	// MiAuthService and LocalOrigin configure the local MiAuth routes;
-	// MiAuth routes; see NewServer. A nil MiAuthService registers none of
-	// them.
+	// MiAuthService and LocalOrigin configure the local MiAuth routes; see
+	// NewServer. A nil MiAuthService registers none of them.
 	MiAuthService *miauth.Service
 	LocalOrigin   string
 
@@ -53,6 +52,12 @@ type Options struct {
 	// reply/follow-up policy and never enqueues an "llm_generation" job,
 	// regardless of post content.
 	LLMEnabled bool
+	// LLMClassificationEnabled gates Issue #10's notes/create enqueue
+	// hook: when false (LLM_CLASSIFICATION_ENABLED's safe default),
+	// handleNotesCreate never enqueues an "llm_classification" job.
+	// Independent of LLMEnabled: an operator can run one feature without
+	// the other.
+	LLMClassificationEnabled bool
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

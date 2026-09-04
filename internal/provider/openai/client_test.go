@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 )
 
@@ -231,6 +232,73 @@ func TestClient_Complete_TransportErrorForUnreachableHost(t *testing.T) {
 	got := llmreply.ClassifyProviderError(err)
 	if got != llmreply.CategoryTransport && got != llmreply.CategoryTimeout {
 		t.Errorf("ClassifyProviderError() = %q, want transport or timeout", got)
+	}
+}
+
+// TestClient_CompleteForClassification_Success backs the doComplete
+// sharing decision (internal/llmclassify's plan §3): the classification
+// path must parse the same response envelope and report the same
+// usage/content Complete does, just wrapped in llmclassify's own result
+// type.
+func TestClient_CompleteForClassification_Success(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"subject\":\"x\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}`))
+	})
+	adapter := NewClassificationClient(client)
+
+	result, err := adapter.Complete(t.Context(), llmclassify.CompletionRequest{
+		Messages:        []llmclassify.Message{{Role: "system", Content: "sys"}, {Role: "user", Content: "hi"}},
+		MaxOutputTokens: 100,
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result.Content != `{"subject":"x"}` {
+		t.Errorf("Content = %q, want %q", result.Content, `{"subject":"x"}`)
+	}
+	if result.PromptTokens == nil || *result.PromptTokens != 20 {
+		t.Errorf("PromptTokens = %v, want 20", result.PromptTokens)
+	}
+	if result.CompletionTokens == nil || *result.CompletionTokens != 8 {
+		t.Errorf("CompletionTokens = %v, want 8", result.CompletionTokens)
+	}
+}
+
+// TestClient_CompleteForClassification_ClassifiesErrors spot-checks that
+// doComplete's shared status/malformed-response classification reaches
+// llmclassify's own Category values, not just llmreply's.
+func TestClient_CompleteForClassification_ClassifiesErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      http.HandlerFunc
+		wantCategory llmclassify.Category
+	}{
+		{
+			name:         "unauthorized",
+			handler:      func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) },
+			wantCategory: llmclassify.CategoryAuth,
+		},
+		{
+			name: "malformed json",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{not-json`))
+			},
+			wantCategory: llmclassify.CategoryMalformedResponse,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := NewClassificationClient(newTestClient(t, tt.handler))
+			_, err := adapter.Complete(t.Context(), llmclassify.CompletionRequest{Messages: []llmclassify.Message{{Role: "user", Content: "hi"}}})
+			if err == nil {
+				t.Fatal("Complete() error = nil, want an error")
+			}
+			if got := llmclassify.ClassifyProviderError(err); got != tt.wantCategory {
+				t.Errorf("ClassifyProviderError() = %q, want %q", got, tt.wantCategory)
+			}
+		})
 	}
 }
 

@@ -132,6 +132,38 @@ type LLMConfig struct {
 	// so a long thread cannot make a single generation request unbounded.
 	ThreadContextMaxMessages int
 	ThreadContextMaxChars    int
+
+	// ClassificationEnabled gates Issue #10's post classification job,
+	// independent of Enabled: an operator can run reply generation and
+	// classification on independent schedules, including one without the
+	// other. False is the safe default.
+	ClassificationEnabled bool
+	// ClassificationModel is the model internal/llmclassify records and
+	// requests. Empty falls back to Model, since classification commonly
+	// reuses the same model as reply generation unless overridden.
+	ClassificationModel string
+	// ClassificationMaxOutputTokens bounds one classification completion's
+	// length.
+	ClassificationMaxOutputTokens int
+	// ClassificationThreadContextMaxMessages and
+	// ClassificationThreadContextMaxChars bound how many same-thread
+	// candidate entries internal/llmclassify's prompt builder offers the
+	// model as related-post candidates. Kept separate from
+	// ThreadContextMaxMessages/ThreadContextMaxChars (reply generation's
+	// budget) so tuning one never silently changes the other.
+	ClassificationThreadContextMaxMessages int
+	ClassificationThreadContextMaxChars    int
+}
+
+// ClassificationModelOrDefault returns ClassificationModel, falling back
+// to the shared reply-generation Model when unset: classification
+// commonly reuses the same model unless an operator explicitly wants a
+// cheaper one for it.
+func (c LLMConfig) ClassificationModelOrDefault() string {
+	if c.ClassificationModel != "" {
+		return c.ClassificationModel
+	}
+	return c.Model
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -333,6 +365,12 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.LLM.ThreadContextMaxMessages = parseOptionalInt(values, KeyLLMThreadContextMaxMessages, 20, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax, &errs)
 	cfg.LLM.ThreadContextMaxChars = parseOptionalInt(values, KeyLLMThreadContextMaxChars, 8000, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax, &errs)
 
+	cfg.LLM.ClassificationEnabled = parseOptionalBool(values, KeyLLMClassificationEnabled, false, &errs)
+	cfg.LLM.ClassificationModel = parseOptionalString(values, KeyLLMClassificationModel, "")
+	cfg.LLM.ClassificationMaxOutputTokens = parseOptionalInt(values, KeyLLMClassificationMaxOutputTokens, 1024, llmMaxOutputTokensMin, llmMaxOutputTokensMax, &errs)
+	cfg.LLM.ClassificationThreadContextMaxMessages = parseOptionalInt(values, KeyLLMClassificationThreadContextMaxMessages, 20, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax, &errs)
+	cfg.LLM.ClassificationThreadContextMaxChars = parseOptionalInt(values, KeyLLMClassificationThreadContextMaxChars, 8000, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax, &errs)
+
 	return cfg, errs
 }
 
@@ -389,16 +427,27 @@ func (c Config) Validate() error {
 	// LLM fields are only required/bound-checked when the feature is
 	// actually enabled: LLM_ENABLED defaults to false, and a disabled
 	// deployment must not fail startup over an unset or zero-value LLM
-	// setting it will never use.
-	if c.LLM.Enabled {
+	// setting it will never use. BaseURL/Timeout are shared connection
+	// settings, so either Enabled or ClassificationEnabled requires them.
+	if c.LLM.Enabled || c.LLM.ClassificationEnabled {
 		validateLLMBaseURL(&errs, KeyLLMBaseURL, c.LLM.BaseURL, c.Env)
+		validatePositiveDuration(&errs, KeyLLMTimeout, c.LLM.Timeout)
+	}
+	if c.LLM.Enabled {
 		if c.LLM.Model == "" {
 			errs = append(errs, FieldError{Key: KeyLLMModel, Reason: "required when " + KeyLLMEnabled + "=true"})
 		}
-		validatePositiveDuration(&errs, KeyLLMTimeout, c.LLM.Timeout)
 		validateIntBounds(&errs, KeyLLMMaxOutputTokens, c.LLM.MaxOutputTokens, llmMaxOutputTokensMin, llmMaxOutputTokensMax)
 		validateIntBounds(&errs, KeyLLMThreadContextMaxMessages, c.LLM.ThreadContextMaxMessages, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax)
 		validateIntBounds(&errs, KeyLLMThreadContextMaxChars, c.LLM.ThreadContextMaxChars, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax)
+	}
+	if c.LLM.ClassificationEnabled {
+		if c.LLM.ClassificationModelOrDefault() == "" {
+			errs = append(errs, FieldError{Key: KeyLLMClassificationModel, Reason: "required (directly, or via " + KeyLLMModel + ") when " + KeyLLMClassificationEnabled + "=true"})
+		}
+		validateIntBounds(&errs, KeyLLMClassificationMaxOutputTokens, c.LLM.ClassificationMaxOutputTokens, llmMaxOutputTokensMin, llmMaxOutputTokensMax)
+		validateIntBounds(&errs, KeyLLMClassificationThreadContextMaxMessages, c.LLM.ClassificationThreadContextMaxMessages, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax)
+		validateIntBounds(&errs, KeyLLMClassificationThreadContextMaxChars, c.LLM.ClassificationThreadContextMaxChars, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax)
 	}
 
 	if c.Env == EnvProduction {
@@ -454,12 +503,17 @@ func (c Config) Redacted() map[string]string {
 		KeyLLMBaseURL:            c.LLM.BaseURL,
 		// LLM_API_KEY is a secret credential for a third-party endpoint:
 		// only whether it is set is shown here.
-		KeyLLMAPIKey:                   redactedSetOrUnset(c.LLM.APIKey),
-		KeyLLMModel:                    c.LLM.Model,
-		KeyLLMTimeout:                  c.LLM.Timeout.String(),
-		KeyLLMMaxOutputTokens:          strconv.Itoa(c.LLM.MaxOutputTokens),
-		KeyLLMThreadContextMaxMessages: strconv.Itoa(c.LLM.ThreadContextMaxMessages),
-		KeyLLMThreadContextMaxChars:    strconv.Itoa(c.LLM.ThreadContextMaxChars),
+		KeyLLMAPIKey:                                 redactedSetOrUnset(c.LLM.APIKey),
+		KeyLLMModel:                                  c.LLM.Model,
+		KeyLLMTimeout:                                c.LLM.Timeout.String(),
+		KeyLLMMaxOutputTokens:                        strconv.Itoa(c.LLM.MaxOutputTokens),
+		KeyLLMThreadContextMaxMessages:               strconv.Itoa(c.LLM.ThreadContextMaxMessages),
+		KeyLLMThreadContextMaxChars:                  strconv.Itoa(c.LLM.ThreadContextMaxChars),
+		KeyLLMClassificationEnabled:                  strconv.FormatBool(c.LLM.ClassificationEnabled),
+		KeyLLMClassificationModel:                    c.LLM.ClassificationModel,
+		KeyLLMClassificationMaxOutputTokens:          strconv.Itoa(c.LLM.ClassificationMaxOutputTokens),
+		KeyLLMClassificationThreadContextMaxMessages: strconv.Itoa(c.LLM.ClassificationThreadContextMaxMessages),
+		KeyLLMClassificationThreadContextMaxChars:    strconv.Itoa(c.LLM.ClassificationThreadContextMaxChars),
 	}
 }
 
