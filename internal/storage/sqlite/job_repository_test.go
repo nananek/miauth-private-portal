@@ -210,7 +210,7 @@ func TestJobRepository_Renew(t *testing.T) {
 	if err := db.Jobs.Renew(t.Context(), j.ID, "worker-2", wantExpiry, now); !errors.Is(err, domain.ErrConflict) {
 		t.Errorf("Renew() with wrong owner error = %v, want ErrConflict", err)
 	}
-	if err := db.Jobs.Succeed(t.Context(), j.ID, now); err != nil {
+	if err := db.Jobs.Succeed(t.Context(), j.ID, "worker-1", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Jobs.Renew(t.Context(), j.ID, "worker-1", wantExpiry, now); !errors.Is(err, domain.ErrConflict) {
@@ -218,11 +218,77 @@ func TestJobRepository_Renew(t *testing.T) {
 	}
 }
 
+func TestJobRepository_TransitionsRejectStaleLeaseOwner(t *testing.T) {
+	transitions := []struct {
+		name  string
+		apply func(context.Context, domain.JobRepository, string, time.Time) error
+	}{
+		{
+			name: "succeed",
+			apply: func(ctx context.Context, repo domain.JobRepository, id string, at time.Time) error {
+				return repo.Succeed(ctx, id, "worker-1", at)
+			},
+		},
+		{
+			name: "retry",
+			apply: func(ctx context.Context, repo domain.JobRepository, id string, at time.Time) error {
+				return repo.Retry(ctx, id, "worker-1", at, "temporary", at)
+			},
+		},
+		{
+			name: "kill",
+			apply: func(ctx context.Context, repo domain.JobRepository, id string, at time.Time) error {
+				return repo.Kill(ctx, id, "worker-1", "exhausted", at)
+			},
+		},
+		{
+			name: "fail",
+			apply: func(ctx context.Context, repo domain.JobRepository, id string, at time.Time) error {
+				return repo.Fail(ctx, id, "worker-1", "permanent", at)
+			},
+		},
+	}
+
+	for _, transition := range transitions {
+		t.Run(transition.name, func(t *testing.T) {
+			db := newTestDB(t)
+			now := time.Now()
+			job := mustEnqueueJob(t, db, nil, now)
+			if _, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			later := now.Add(time.Second)
+			reclaimed, err := db.Jobs.Claim(t.Context(), "worker-2", 1, later, later.Add(time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(reclaimed) != 1 {
+				t.Fatalf("reclaim returned %d jobs, want 1", len(reclaimed))
+			}
+
+			if err := transition.apply(t.Context(), db.Jobs, job.ID, later); !errors.Is(err, domain.ErrConflict) {
+				t.Fatalf("stale %s error = %v, want ErrConflict", transition.name, err)
+			}
+			got, err := db.Jobs.Get(t.Context(), job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != domain.JobRunning || got.LeaseOwner == nil || *got.LeaseOwner != "worker-2" {
+				t.Fatalf("stale %s changed reclaimed job: %+v", transition.name, got)
+			}
+		})
+	}
+}
+
 func TestJobRepository_Succeed(t *testing.T) {
 	db := newTestDB(t)
-	j := mustEnqueueJob(t, db, nil, time.Now())
+	now := time.Now()
+	j := mustEnqueueJob(t, db, nil, now)
+	if _, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := db.Jobs.Succeed(t.Context(), j.ID, time.Now()); err != nil {
+	if err := db.Jobs.Succeed(t.Context(), j.ID, "worker-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.Jobs.Get(t.Context(), j.ID)
@@ -243,7 +309,7 @@ func TestJobRepository_Retry_IncrementsAttemptAndClearsLease(t *testing.T) {
 	}
 
 	nextRun := now.Add(5 * time.Minute)
-	if err := db.Jobs.Retry(t.Context(), j.ID, nextRun, "transient failure", now); err != nil {
+	if err := db.Jobs.Retry(t.Context(), j.ID, "worker-1", nextRun, "transient failure", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,9 +333,13 @@ func TestJobRepository_Retry_IncrementsAttemptAndClearsLease(t *testing.T) {
 
 func TestJobRepository_Kill(t *testing.T) {
 	db := newTestDB(t)
-	j := mustEnqueueJob(t, db, nil, time.Now())
+	now := time.Now()
+	j := mustEnqueueJob(t, db, nil, now)
+	if _, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := db.Jobs.Kill(t.Context(), j.ID, "retries exhausted", time.Now()); err != nil {
+	if err := db.Jobs.Kill(t.Context(), j.ID, "worker-1", "retries exhausted", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.Jobs.Get(t.Context(), j.ID)
@@ -289,7 +359,7 @@ func TestJobRepository_Fail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.Jobs.Fail(t.Context(), j.ID, "invalid payload", now); err != nil {
+	if err := db.Jobs.Fail(t.Context(), j.ID, "worker-1", "invalid payload", now); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.Jobs.Get(t.Context(), j.ID)
@@ -313,17 +383,13 @@ func TestJobRepository_ListFiltersOrdersAndLimits(t *testing.T) {
 	jobs := []domain.Job{
 		{ID: "job-a", JobType: "alpha", Payload: "{}", PayloadVersion: 1, State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now},
 		{ID: "job-b", JobType: "beta", Payload: "{}", PayloadVersion: 1, State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now.Add(time.Second)},
-		{ID: "job-c", JobType: "alpha", Payload: "{}", PayloadVersion: 1, State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now.Add(2 * time.Second)},
+		{ID: "job-c", JobType: "alpha", Payload: "{}", PayloadVersion: 1, State: domain.JobSucceeded, NextRunAt: now, CreatedAt: now, UpdatedAt: now.Add(3 * time.Second)},
 	}
 	for _, j := range jobs {
 		if err := db.Jobs.Enqueue(t.Context(), j); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.Jobs.Succeed(t.Context(), "job-c", now.Add(3*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-
 	all, err := db.Jobs.List(t.Context(), domain.JobFilter{})
 	if err != nil {
 		t.Fatal(err)
@@ -365,14 +431,20 @@ func TestJobRepository_RequeueTerminalJobs(t *testing.T) {
 			db := newTestDB(t)
 			now := time.Now()
 			j := mustEnqueueJob(t, db, nil, now)
-			if err := db.Jobs.Retry(t.Context(), j.ID, now.Add(time.Hour), "first failure", now); err != nil {
+			if _, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Jobs.Retry(t.Context(), j.ID, "worker-1", now.Add(time.Hour), "first failure", now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now.Add(time.Hour), now.Add(2*time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if terminal == domain.JobDead {
-				if err := db.Jobs.Kill(t.Context(), j.ID, "terminal", now); err != nil {
+				if err := db.Jobs.Kill(t.Context(), j.ID, "worker-1", "terminal", now); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := db.Jobs.Fail(t.Context(), j.ID, "terminal", now); err != nil {
+			} else if err := db.Jobs.Fail(t.Context(), j.ID, "worker-1", "terminal", now); err != nil {
 				t.Fatal(err)
 			}
 
@@ -406,11 +478,14 @@ func TestJobRepository_CountByState(t *testing.T) {
 	for range 3 {
 		mustEnqueueJob(t, db, nil, now)
 	}
-	all, err := db.Jobs.List(t.Context(), domain.JobFilter{})
+	claimed, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Jobs.Succeed(t.Context(), all[0].ID, now); err != nil {
+	if len(claimed) != 1 {
+		t.Fatalf("Claim() returned %d jobs, want 1", len(claimed))
+	}
+	if err := db.Jobs.Succeed(t.Context(), claimed[0].ID, "worker-1", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -472,7 +547,7 @@ func TestJobRepository_ConcurrentClaimAndRenewToleratesWriterContention(t *testi
 				}
 				seen[job.ID] = true
 				seenMu.Unlock()
-				if err := db.Jobs.Succeed(ctx, job.ID, at); err != nil {
+				if err := db.Jobs.Succeed(ctx, job.ID, owner, at); err != nil {
 					errCh <- fmt.Errorf("succeed as %s: %w", owner, err)
 					return
 				}

@@ -37,16 +37,26 @@ func seedJobsctlJob(t *testing.T, dbPath, id, jobType string, state domain.JobSt
 	}); err != nil {
 		t.Fatal(err)
 	}
+	const leaseOwner = "jobsctl-test"
+	if state != domain.JobPending {
+		claimed, err := db.Jobs.Claim(t.Context(), leaseOwner, 1, now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claimed) != 1 || claimed[0].ID != id {
+			t.Fatalf("Claim() = %+v, want %s", claimed, id)
+		}
+	}
 	if state == domain.JobDead {
-		if err := db.Jobs.Kill(t.Context(), id, deref(lastError), now); err != nil {
+		if err := db.Jobs.Kill(t.Context(), id, leaseOwner, deref(lastError), now); err != nil {
 			t.Fatal(err)
 		}
 	} else if state == domain.JobFailed {
-		if err := db.Jobs.Fail(t.Context(), id, deref(lastError), now); err != nil {
+		if err := db.Jobs.Fail(t.Context(), id, leaseOwner, deref(lastError), now); err != nil {
 			t.Fatal(err)
 		}
 	} else if state == domain.JobSucceeded {
-		if err := db.Jobs.Succeed(t.Context(), id, now); err != nil {
+		if err := db.Jobs.Succeed(t.Context(), id, leaseOwner, now); err != nil {
 			t.Fatal(err)
 		}
 	}

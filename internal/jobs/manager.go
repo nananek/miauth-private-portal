@@ -123,11 +123,16 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 		}
 		return
 	}
+	claimedAt := m.now().UTC()
 
 	for _, job := range claimed {
 		sem <- struct{}{}
 		wg.Add(1)
-		m.logger.Info("job claimed", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt)
+		queueLatency := claimedAt.Sub(job.NextRunAt)
+		if queueLatency < 0 {
+			queueLatency = 0
+		}
+		m.logger.Info("job claimed", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt, "queue_latency_ms", queueLatency.Milliseconds())
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -139,6 +144,12 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 func (m *Manager) runOne(parent context.Context, job domain.Job) {
 	jobCtx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// A goroutine can be delayed after Claim long enough for its lease to
+	// expire and be reclaimed. Fence that stale dispatch before invoking a
+	// handler, whose side effects cannot be undone by a later CAS failure.
+	if !m.confirmLease(jobCtx, job, false) {
+		return
+	}
 
 	result := make(chan error, 1)
 	go func() {
@@ -159,10 +170,6 @@ func (m *Manager) runOne(parent context.Context, job domain.Job) {
 		case err := <-result:
 			if jobCtx.Err() != nil {
 				m.retryCancelled(job, boundedErrorOr(err, "worker shutdown cancelled handler"))
-				return
-			}
-			if !m.confirmLease(jobCtx, job, false) {
-				cancel()
 				return
 			}
 			m.finish(jobCtx, job, err)
@@ -192,8 +199,8 @@ func (m *Manager) confirmLease(ctx context.Context, job domain.Job, periodic boo
 
 	// Once renewal fails the worker can no longer prove exclusive ownership.
 	// Leave the row running so Claim's expiry recovery, rather than this stale
-	// worker, chooses its next state. The same check immediately before a final
-	// transition closes the race between handler completion and lease expiry.
+	// worker, chooses its next state. Final transitions independently compare
+	// lease ownership, so a reclaim racing handler completion is also fenced.
 	category := errorCategory(err)
 	if errors.Is(err, domain.ErrConflict) {
 		category = "lease_conflict"
@@ -205,7 +212,7 @@ func (m *Manager) confirmLease(ctx context.Context, job domain.Job, periodic boo
 func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) {
 	now := m.now().UTC()
 	if handlerErr == nil {
-		if err := m.repo.Succeed(ctx, job.ID, now); err != nil {
+		if err := m.repo.Succeed(ctx, job.ID, m.cfg.WorkerID, now); err != nil {
 			m.logTransitionFailure(job, "succeed", err)
 			return
 		}
@@ -221,7 +228,7 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 
 	var permanent *PermanentError
 	if errors.As(handlerErr, &permanent) {
-		if err := m.repo.Fail(ctx, job.ID, lastError, now); err != nil {
+		if err := m.repo.Fail(ctx, job.ID, m.cfg.WorkerID, lastError, now); err != nil {
 			m.logTransitionFailure(job, "fail", err)
 			return
 		}
@@ -230,7 +237,7 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 	}
 
 	if job.Attempt+1 >= m.cfg.MaxAttempts {
-		if err := m.repo.Kill(ctx, job.ID, lastError, now); err != nil {
+		if err := m.repo.Kill(ctx, job.ID, m.cfg.WorkerID, lastError, now); err != nil {
 			m.logTransitionFailure(job, "kill", err)
 			return
 		}
@@ -242,7 +249,7 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 }
 
 func (m *Manager) retry(ctx context.Context, job domain.Job, nextRunAt time.Time, lastError, category string) {
-	if err := m.repo.Retry(ctx, job.ID, nextRunAt, lastError, m.now().UTC()); err != nil {
+	if err := m.repo.Retry(ctx, job.ID, m.cfg.WorkerID, nextRunAt, lastError, m.now().UTC()); err != nil {
 		m.logTransitionFailure(job, "retry", err)
 		return
 	}
@@ -253,9 +260,6 @@ func (m *Manager) retryCancelled(job domain.Job, lastError string) {
 	ctx, cancel := context.WithTimeout(context.Background(), transitionTimeout)
 	defer cancel()
 	now := m.now().UTC()
-	if !m.confirmLease(ctx, job, false) {
-		return
-	}
 	m.retry(ctx, job, now, lastError, "shutdown")
 }
 

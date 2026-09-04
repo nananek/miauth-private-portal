@@ -125,6 +125,9 @@ func TestManagerProcessesJobAndNeverLogsPayload(t *testing.T) {
 	if strings.Contains(logBuf.String(), secretPayload) || strings.Contains(logBuf.String(), "private learning content") {
 		t.Fatalf("worker logs leaked payload: %s", logBuf.String())
 	}
+	if !strings.Contains(logBuf.String(), `"queue_latency_ms"`) {
+		t.Fatalf("worker logs omitted queue latency: %s", logBuf.String())
+	}
 }
 
 func TestManagerRecoversExpiredLeaseAfterCrash(t *testing.T) {
@@ -184,6 +187,8 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 	cfg.MaxConcurrentJobs = 2
 	var current atomic.Int32
 	var maximum atomic.Int32
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
 	m := NewManager(db.Jobs, cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	m.Register("test", func(context.Context, domain.Job) error {
 		running := current.Add(1)
@@ -193,11 +198,20 @@ func TestManagerHonorsConcurrencyLimit(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(30 * time.Millisecond)
+		started <- struct{}{}
+		<-release
 		current.Add(-1)
 		return nil
 	})
 	cancel, errCh := startManager(t, m)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("two handlers did not start concurrently")
+		}
+	}
+	close(release)
 	for _, job := range jobs {
 		waitForJob(t, db, job.ID, func(j domain.Job) bool { return j.State == domain.JobSucceeded })
 	}
@@ -288,7 +302,11 @@ func TestStaleWorkerCannotFinalizeReclaimedJob(t *testing.T) {
 	}
 
 	m := NewManager(db.Jobs, fastConfig("worker-1"), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
-	m.Register("test", func(context.Context, domain.Job) error { return nil })
+	var calls atomic.Int32
+	m.Register("test", func(context.Context, domain.Job) error {
+		calls.Add(1)
+		return nil
+	})
 	m.runOne(context.Background(), claimed[0])
 
 	got, err := db.Jobs.Get(t.Context(), job.ID)
@@ -297,6 +315,9 @@ func TestStaleWorkerCannotFinalizeReclaimedJob(t *testing.T) {
 	}
 	if got.State != domain.JobRunning || got.LeaseOwner == nil || *got.LeaseOwner != "worker-2" {
 		t.Fatalf("stale worker changed reclaimed job: %+v", got)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("stale worker invoked handler %d times, want 0", calls.Load())
 	}
 }
 

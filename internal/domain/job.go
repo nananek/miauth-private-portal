@@ -52,17 +52,21 @@ type JobRepository interface {
 	// Renew extends a still-running job's lease. It returns ErrConflict if
 	// the job is no longer running under leaseOwner.
 	Renew(ctx context.Context, id, leaseOwner string, leaseExpiresAt, at time.Time) error
-	Succeed(ctx context.Context, id string, at time.Time) error
-	// Retry transitions a running job back to pending with an
+	// Succeed transitions a running job owned by leaseOwner to succeeded.
+	// It returns ErrConflict if ownership or state changed first.
+	Succeed(ctx context.Context, id, leaseOwner string, at time.Time) error
+	// Retry transitions a running job owned by leaseOwner back to pending with an
 	// incremented attempt count, a bounded-backoff nextRunAt, and a
-	// recorded last error.
-	Retry(ctx context.Context, id string, nextRunAt time.Time, lastError string, at time.Time) error
-	// Kill transitions a job to its terminal dead state after retries are
-	// exhausted.
-	Kill(ctx context.Context, id, lastError string, at time.Time) error
-	// Fail transitions a running job directly to its terminal failed state
-	// when retrying a classified permanent error would not help.
-	Fail(ctx context.Context, id, lastError string, at time.Time) error
+	// recorded last error. It returns ErrConflict if ownership or state changed.
+	Retry(ctx context.Context, id, leaseOwner string, nextRunAt time.Time, lastError string, at time.Time) error
+	// Kill transitions a running job owned by leaseOwner to its terminal dead
+	// state after retries are exhausted. It returns ErrConflict if ownership or
+	// state changed.
+	Kill(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error
+	// Fail transitions a running job owned by leaseOwner directly to its terminal
+	// failed state when retrying a classified permanent error would not help. It
+	// returns ErrConflict if ownership or state changed.
+	Fail(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error
 	// List returns jobs matching filter, most recently updated first.
 	List(ctx context.Context, filter JobFilter) ([]Job, error)
 	// Requeue moves a dead or failed job back to pending for an immediate

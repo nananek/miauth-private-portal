@@ -324,8 +324,8 @@ Automatic retries use exponential backoff with fixed ±20% jitter bounded by
 `JOBS_BACKOFF_BASE` and `JOBS_BACKOFF_MAX`. An unregistered job type is treated
 as retryable so rolling deployments do not permanently discard work created by
 a newer producer. Payloads and raw errors are never logged; transition logs use
-job IDs, types, attempt numbers, and coarse error categories. The detailed
-error remains in SQLite for host-local inspection.
+job IDs, types, attempt numbers, claim-time `queue_latency_ms`, and coarse error
+categories. The detailed error remains in SQLite for host-local inspection.
 
 Operators can inspect and recover jobs without adding an administrative HTTP
 surface:

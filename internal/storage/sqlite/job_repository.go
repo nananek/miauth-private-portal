@@ -100,53 +100,53 @@ func (r *jobRepository) Renew(ctx context.Context, id, leaseOwner string, leaseE
 	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Succeed(ctx context.Context, id string, at time.Time) error {
+func (r *jobRepository) Succeed(ctx context.Context, id, leaseOwner string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Retry(ctx context.Context, id string, nextRunAt time.Time, lastError string, at time.Time) error {
+func (r *jobRepository) Retry(ctx context.Context, id, leaseOwner string, nextRunAt time.Time, lastError string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'pending', attempt = attempt + 1, next_run_at = ?, last_error = ?,
 			lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		formatTime(nextRunAt), lastError, formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		formatTime(nextRunAt), lastError, formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Kill(ctx context.Context, id, lastError string, at time.Time) error {
+func (r *jobRepository) Kill(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'dead', last_error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		lastError, formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		lastError, formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
-func (r *jobRepository) Fail(ctx context.Context, id, lastError string, at time.Time) error {
+func (r *jobRepository) Fail(ctx context.Context, id, leaseOwner, lastError string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE jobs SET state = 'failed', last_error = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-		 WHERE id = ?`,
-		lastError, formatTime(at), id,
+		 WHERE id = ? AND lease_owner = ? AND state = 'running'`,
+		lastError, formatTime(at), id, leaseOwner,
 	)
 	if err != nil {
 		return mapWriteError(err)
 	}
-	return requireRowAffected(res)
+	return requireRowAffectedConflict(res)
 }
 
 func (r *jobRepository) List(ctx context.Context, filter domain.JobFilter) ([]domain.Job, error) {
