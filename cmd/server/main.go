@@ -13,6 +13,8 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/provider/misskey"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 )
 
@@ -64,6 +66,15 @@ func run() error {
 	reg := health.NewRegistry()
 	reg.Register(db.Checker())
 
+	upstream := misskey.NewClient(cfg.Auth.IdentityOrigin, cfg.Auth.UpstreamHTTPTimeout)
+	miauthSvc := miauth.NewService(db, db.Repos, upstream, miauth.Config{
+		IdentityOrigin:       cfg.Auth.IdentityOrigin,
+		AllowedMisskeyUserID: cfg.Auth.AllowedMisskeyUserID,
+		ClientCallbacks:      cfg.Auth.AriaClientCallbacks,
+		OwnerUsername:        cfg.Auth.OwnerUsername,
+		OwnerDisplayName:     cfg.Auth.OwnerDisplayName,
+	})
+
 	opts := httpserver.Options{
 		Addr:                cfg.HTTP.Addr(),
 		ReadTimeout:         cfg.HTTP.ReadTimeout,
@@ -72,6 +83,9 @@ func run() error {
 		IdleTimeout:         cfg.HTTP.IdleTimeout,
 		MaxRequestBodyBytes: cfg.HTTP.MaxRequestBodyBytes,
 		ShutdownGracePeriod: cfg.HTTP.ShutdownGracePeriod,
+		MiAuthService:       miauthSvc,
+		LocalOrigin:         cfg.Auth.LocalOrigin,
+		IdentityOrigin:      cfg.Auth.IdentityOrigin,
 	}
 
 	return httpserver.Run(ctx, opts, logger, reg)
