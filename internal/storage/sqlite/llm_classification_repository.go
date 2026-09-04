@@ -13,20 +13,20 @@ type llmClassificationRepository struct{ q querier }
 
 const llmClassificationSelectColumns = `SELECT id, entry_id, version, is_active, provider, model,
 	prompt_version, status, error_category, summary, structured_output, prompt_tokens, completion_tokens,
-	generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved
+	generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved, job_id
 	FROM llm_classifications`
 
 func (r *llmClassificationRepository) Create(ctx context.Context, c domain.LLMClassification) (int64, error) {
 	res, err := r.q.ExecContext(ctx,
 		`INSERT INTO llm_classifications (entry_id, version, is_active, provider, model, prompt_version,
 			status, error_category, summary, structured_output, prompt_tokens, completion_tokens,
-			generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			generated_at, created_at, priority, notebook_candidate, review_candidate, unresolved, job_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.EntryID, c.Version, boolToInt(c.IsActive), c.Provider, c.Model, c.PromptVersion, string(c.Status),
 		nullableString(c.ErrorCategory), nullableString(c.Summary), nullableString(c.StructuredOutput),
 		nullableInt(c.PromptTokens), nullableInt(c.CompletionTokens), formatTimePtr(c.GeneratedAt),
 		formatTime(c.CreatedAt), nullableString(c.Priority), boolToInt(c.NotebookCandidate),
-		boolToInt(c.ReviewCandidate), boolToInt(c.Unresolved),
+		boolToInt(c.ReviewCandidate), boolToInt(c.Unresolved), nullableString(c.JobID),
 	)
 	if err != nil {
 		return 0, mapWriteError(err)
@@ -237,10 +237,11 @@ func scanLLMClassification(row rowScanner) (domain.LLMClassification, error) {
 	var createdAt string
 	var priority sql.NullString
 	var notebookCandidate, reviewCandidate, unresolved int
+	var jobID sql.NullString
 
 	if err := row.Scan(&c.ID, &c.EntryID, &c.Version, &isActive, &c.Provider, &c.Model, &c.PromptVersion,
 		&status, &errorCategory, &summary, &structuredOutput, &promptTokens, &completionTokens,
-		&generatedAt, &createdAt, &priority, &notebookCandidate, &reviewCandidate, &unresolved); err != nil {
+		&generatedAt, &createdAt, &priority, &notebookCandidate, &reviewCandidate, &unresolved, &jobID); err != nil {
 		return domain.LLMClassification{}, mapReadError(err)
 	}
 
@@ -255,6 +256,7 @@ func scanLLMClassification(row rowScanner) (domain.LLMClassification, error) {
 	c.NotebookCandidate = notebookCandidate != 0
 	c.ReviewCandidate = reviewCandidate != 0
 	c.Unresolved = unresolved != 0
+	c.JobID = stringPtr(jobID)
 
 	var err error
 	if c.GeneratedAt, err = parseTimePtr(generatedAt); err != nil {

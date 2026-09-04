@@ -47,6 +47,16 @@ type LLMClassification struct {
 	NotebookCandidate bool
 	ReviewCandidate   bool
 	Unresolved        bool
+	// JobID names the durable job (internal/jobs) that created this
+	// version, when created by one (a version seeded some other way, if
+	// that ever happens, leaves this nil). It mirrors LLMGeneration.JobID
+	// but, unlike LLMGeneration.ID ("llmgen:" + job.ID), cannot itself be
+	// the primary key here since llm_classifications.id is AUTOINCREMENT;
+	// the "llm_classification" job handler instead searches
+	// ListVersions/GetActive results for a matching JobID to detect a
+	// duplicate delivery of the same job, however long after the fact it
+	// arrives.
+	JobID *string
 }
 
 // LLMClassificationRepository persists versioned LLM classification

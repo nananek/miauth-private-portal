@@ -125,6 +125,40 @@ func TestLLMClassificationRepository_Create_RejectsDuplicateVersion(t *testing.T
 	}
 }
 
+// TestLLMClassificationRepository_JobIDRoundTrips backs the
+// "llm_classification" job handler's duplicate-delivery detection: it
+// looks up an existing version by JobID (not by version number alone), so
+// JobID must survive Create/scan intact.
+func TestLLMClassificationRepository_JobIDRoundTrips(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	now := time.Now()
+	entry := mustCreateThreadAndRoot(t, db, actorID, now)
+
+	job := domain.Job{
+		ID: domain.NewID(), JobType: "llm_classification", Payload: "{}", PayloadVersion: 1,
+		State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Jobs.Enqueue(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Classifications.Create(t.Context(), domain.LLMClassification{
+		EntryID: entry.ID, Version: 1, Provider: "p", Model: "m", PromptVersion: "v1",
+		Status: domain.ClassificationPending, CreatedAt: now, JobID: &job.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	versions, err := db.Classifications.ListVersions(t.Context(), entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].JobID == nil || *versions[0].JobID != job.ID {
+		t.Fatalf("versions = %+v, want one with JobID %q", versions, job.ID)
+	}
+}
+
 func TestLLMClassificationRepository_AddRelatedEntry(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)
