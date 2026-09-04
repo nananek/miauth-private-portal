@@ -37,6 +37,7 @@ type Config struct {
 	Auth AuthConfig
 	Jobs JobsConfig
 	LLM  LLMConfig
+	RSS  RSSConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -164,6 +165,38 @@ func (c LLMConfig) ClassificationModelOrDefault() string {
 		return c.ClassificationModel
 	}
 	return c.Model
+}
+
+// RSSConfig configures Issue #11's RSS/Atom ingestion. Enabled defaults
+// to false: no source is ever seeded, no adapter/scheduler is
+// constructed, and no request ever reaches a configured feed URL until
+// an operator explicitly turns this on — the same safe-default shape as
+// LLMConfig.Enabled.
+type RSSConfig struct {
+	// Enabled gates the ingestion scheduler, adapter, and job handler
+	// entirely. False is the safe default.
+	Enabled bool
+	// FeedURLs are the configured RSS/Atom feed URLs, seeded as
+	// domain.ExternalSource rows (kind "rss") at startup.
+	FeedURLs []string
+	// PollInterval is how often each configured feed is re-fetched.
+	PollInterval time.Duration
+	// FetchTimeout bounds a single feed fetch's HTTP round trip; must be
+	// less than PollInterval.
+	FetchTimeout time.Duration
+	// MaxResponseBytes bounds how much of a feed response is read into
+	// memory.
+	MaxResponseBytes int64
+	// MaxRedirects bounds how many redirect hops a feed fetch follows.
+	MaxRedirects int
+	// SummaryMaxChars bounds each ingested item's normalized
+	// title/body length after HTML tags are stripped.
+	SummaryMaxChars int
+	// AllowInsecureHTTP permits a feed URL to use "http" instead of
+	// requiring "https", mirroring LOCAL_ORIGIN's production https
+	// enforcement pattern: false (the default) rejects any http feed
+	// URL at config validation time.
+	AllowInsecureHTTP bool
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -313,6 +346,10 @@ const (
 	llmMaxOutputTokensMin, llmMaxOutputTokensMax                   = 1, 32768
 	llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax = 1, 500
 	llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax       = 1, 200_000
+
+	rssMaxResponseBytesMin                       = 1
+	rssMaxRedirectsMin, rssMaxRedirectsMax       = 0, 20
+	rssSummaryMaxCharsMin, rssSummaryMaxCharsMax = 1, 100_000
 )
 
 func parse(values map[string]string) (Config, []FieldError) {
@@ -370,6 +407,15 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.LLM.ClassificationMaxOutputTokens = parseOptionalInt(values, KeyLLMClassificationMaxOutputTokens, 1024, llmMaxOutputTokensMin, llmMaxOutputTokensMax, &errs)
 	cfg.LLM.ClassificationThreadContextMaxMessages = parseOptionalInt(values, KeyLLMClassificationThreadContextMaxMessages, 20, llmThreadContextMaxMessagesMin, llmThreadContextMaxMessagesMax, &errs)
 	cfg.LLM.ClassificationThreadContextMaxChars = parseOptionalInt(values, KeyLLMClassificationThreadContextMaxChars, 8000, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax, &errs)
+
+	cfg.RSS.Enabled = parseOptionalBool(values, KeyRSSEnabled, false, &errs)
+	cfg.RSS.FeedURLs = splitOptionalURLList(values, KeyRSSFeedURLs)
+	cfg.RSS.PollInterval = parseOptionalDuration(values, KeyRSSPollInterval, 15*time.Minute, &errs)
+	cfg.RSS.FetchTimeout = parseOptionalDuration(values, KeyRSSFetchTimeout, 15*time.Second, &errs)
+	cfg.RSS.MaxResponseBytes = parseOptionalInt64(values, KeyRSSMaxResponseBytes, 2_097_152, rssMaxResponseBytesMin, &errs)
+	cfg.RSS.MaxRedirects = parseOptionalInt(values, KeyRSSMaxRedirects, 3, rssMaxRedirectsMin, rssMaxRedirectsMax, &errs)
+	cfg.RSS.SummaryMaxChars = parseOptionalInt(values, KeyRSSSummaryMaxChars, 4000, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax, &errs)
+	cfg.RSS.AllowInsecureHTTP = parseOptionalBool(values, KeyRSSAllowInsecureHTTP, false, &errs)
 
 	return cfg, errs
 }
@@ -450,6 +496,25 @@ func (c Config) Validate() error {
 		validateIntBounds(&errs, KeyLLMClassificationThreadContextMaxChars, c.LLM.ClassificationThreadContextMaxChars, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax)
 	}
 
+	// RSS fields are only required/bound-checked when the feature is
+	// actually enabled: RSS_ENABLED defaults to false, and a disabled
+	// deployment must not fail startup over an unset RSS setting it will
+	// never use.
+	if c.RSS.Enabled {
+		if len(c.RSS.FeedURLs) == 0 {
+			errs = append(errs, FieldError{Key: KeyRSSFeedURLs, Reason: "required when " + KeyRSSEnabled + "=true"})
+		}
+		validateRSSFeedURLs(&errs, KeyRSSFeedURLs, c.RSS.FeedURLs, c.RSS.AllowInsecureHTTP)
+		validatePositiveDuration(&errs, KeyRSSPollInterval, c.RSS.PollInterval)
+		validatePositiveDuration(&errs, KeyRSSFetchTimeout, c.RSS.FetchTimeout)
+		if c.RSS.FetchTimeout > 0 && c.RSS.PollInterval > 0 && c.RSS.FetchTimeout >= c.RSS.PollInterval {
+			errs = append(errs, FieldError{Key: KeyRSSFetchTimeout, Reason: "must be less than " + KeyRSSPollInterval})
+		}
+		validateInt64Min(&errs, KeyRSSMaxResponseBytes, c.RSS.MaxResponseBytes, rssMaxResponseBytesMin)
+		validateIntBounds(&errs, KeyRSSMaxRedirects, c.RSS.MaxRedirects, rssMaxRedirectsMin, rssMaxRedirectsMax)
+		validateIntBounds(&errs, KeyRSSSummaryMaxChars, c.RSS.SummaryMaxChars, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax)
+	}
+
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
 			errs = append(errs, FieldError{Key: KeyLogFormat, Reason: "must be json in production"})
@@ -514,6 +579,14 @@ func (c Config) Redacted() map[string]string {
 		KeyLLMClassificationMaxOutputTokens:          strconv.Itoa(c.LLM.ClassificationMaxOutputTokens),
 		KeyLLMClassificationThreadContextMaxMessages: strconv.Itoa(c.LLM.ClassificationThreadContextMaxMessages),
 		KeyLLMClassificationThreadContextMaxChars:    strconv.Itoa(c.LLM.ClassificationThreadContextMaxChars),
+		KeyRSSEnabled:                                strconv.FormatBool(c.RSS.Enabled),
+		KeyRSSFeedURLs:                               strings.Join(c.RSS.FeedURLs, ","),
+		KeyRSSPollInterval:                           c.RSS.PollInterval.String(),
+		KeyRSSFetchTimeout:                           c.RSS.FetchTimeout.String(),
+		KeyRSSMaxResponseBytes:                       strconv.FormatInt(c.RSS.MaxResponseBytes, 10),
+		KeyRSSMaxRedirects:                           strconv.Itoa(c.RSS.MaxRedirects),
+		KeyRSSSummaryMaxChars:                        strconv.Itoa(c.RSS.SummaryMaxChars),
+		KeyRSSAllowInsecureHTTP:                      strconv.FormatBool(c.RSS.AllowInsecureHTTP),
 	}
 }
 
@@ -746,6 +819,49 @@ func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool
 		u, err := url.Parse(p)
 		if err != nil || u.Scheme == "" {
 			*errs = append(*errs, FieldError{Key: key, Reason: "each entry must be a URL with a non-empty scheme"})
+			ok = false
+		}
+	}
+	return ok
+}
+
+// splitOptionalURLList splits RSS_FEED_URLS the same way
+// parseOptionalCallbackList splits ARIA_CLIENT_CALLBACKS (commas inside
+// a URL's own path or query are retained; a separator is a comma
+// followed by the next absolute URL scheme), but performs no format
+// validation itself: unlike ARIA_CLIENT_CALLBACKS (always validated,
+// independent of any feature flag), RSS_FEED_URLS is only required and
+// checked when RSS_ENABLED=true, so validateRSSFeedURLs is called
+// separately from Validate, gated by that flag — the same "parse now,
+// validate only if enabled" split LLM_BASE_URL uses. An unset or empty
+// value yields nil: no feed is polled.
+func splitOptionalURLList(values map[string]string, key string) []string {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return nil
+	}
+	parts := splitCallbackList(v)
+	list := make([]string, len(parts))
+	for i, p := range parts {
+		list[i] = strings.TrimSpace(p)
+	}
+	return list
+}
+
+// validateRSSFeedURLs checks each RSS_FEED_URLS entry is an absolute
+// http(s) URL, and that an "http" entry is only present when
+// allowInsecureHTTP (RSS_ALLOW_INSECURE_HTTP) is true.
+func validateRSSFeedURLs(errs *[]FieldError, key string, list []string, allowInsecureHTTP bool) bool {
+	ok := true
+	for _, p := range list {
+		u, err := url.Parse(p)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			*errs = append(*errs, FieldError{Key: key, Reason: "each entry must be an absolute http(s) URL"})
+			ok = false
+			continue
+		}
+		if u.Scheme == "http" && !allowInsecureHTTP {
+			*errs = append(*errs, FieldError{Key: key, Reason: "http entries require " + KeyRSSAllowInsecureHTTP + "=true"})
 			ok = false
 		}
 	}

@@ -46,6 +46,18 @@ func defaultLLMConfig() LLMConfig {
 	}
 }
 
+func defaultRSSConfig() RSSConfig {
+	return RSSConfig{
+		Enabled:           false,
+		PollInterval:      15 * time.Minute,
+		FetchTimeout:      15 * time.Second,
+		MaxResponseBytes:  2_097_152,
+		MaxRedirects:      3,
+		SummaryMaxChars:   4000,
+		AllowInsecureHTTP: false,
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -127,6 +139,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 		},
 		Jobs: defaultJobsConfig(),
 		LLM:  defaultLLMConfig(),
+		RSS:  defaultRSSConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -967,5 +980,147 @@ func TestConfig_Redacted_NeverExposesLLMAPIKey(t *testing.T) {
 	unsetRedacted := Config{}.Redacted()
 	if unsetRedacted[KeyLLMAPIKey] != "<unset>" {
 		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyLLMAPIKey, unsetRedacted[KeyLLMAPIKey])
+	}
+}
+
+func TestLoad_RSSDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.RSS, defaultRSSConfig()) {
+		t.Errorf("RSS = %+v, want %+v", cfg.RSS, defaultRSSConfig())
+	}
+}
+
+func TestLoad_RSSEnabledRequiresFeedURLs(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:     "development",
+		KeyRSSEnabled: "true",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyRSSFeedURLs) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyRSSFeedURLs)
+	}
+}
+
+func TestLoad_RSSEnabledWithFeedURLsSucceeds(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "https://example.com/feed.xml,https://example.org/atom.xml",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://example.com/feed.xml", "https://example.org/atom.xml"}
+	if !reflect.DeepEqual(cfg.RSS.FeedURLs, want) {
+		t.Errorf("RSS.FeedURLs = %v, want %v", cfg.RSS.FeedURLs, want)
+	}
+}
+
+func TestLoad_RSSFeedURLsRetainsCommasInsideQuery(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "https://example.com/feed.xml?ids=1,2,3,https://example.org/atom.xml",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://example.com/feed.xml?ids=1,2,3", "https://example.org/atom.xml"}
+	if !reflect.DeepEqual(cfg.RSS.FeedURLs, want) {
+		t.Errorf("RSS.FeedURLs = %v, want %v", cfg.RSS.FeedURLs, want)
+	}
+}
+
+func TestLoad_RSSEnabledRejectsHTTPFeedURLWithoutAllowInsecureHTTP(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "http://example.com/feed.xml",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyRSSFeedURLs) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyRSSFeedURLs)
+	}
+}
+
+func TestLoad_RSSEnabledAllowsHTTPFeedURLWithAllowInsecureHTTP(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:               "development",
+		KeyRSSEnabled:           "true",
+		KeyRSSFeedURLs:          "http://example.com/feed.xml",
+		KeyRSSAllowInsecureHTTP: "true",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.RSS.AllowInsecureHTTP {
+		t.Error("RSS.AllowInsecureHTTP = false, want true")
+	}
+}
+
+func TestLoad_RSSEnabledRejectsInvalidFeedURL(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "not-a-url",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyRSSFeedURLs) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyRSSFeedURLs)
+	}
+}
+
+func TestLoad_RSSEnabledRequiresFetchTimeoutLessThanPollInterval(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:          "development",
+		KeyRSSEnabled:      "true",
+		KeyRSSFeedURLs:     "https://example.com/feed.xml",
+		KeyRSSPollInterval: "10s",
+		KeyRSSFetchTimeout: "15s",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyRSSFetchTimeout) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyRSSFetchTimeout)
+	}
+}
+
+func TestLoad_RSSBoundsRejectOutOfRangeValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"max redirects negative", KeyRSSMaxRedirects, "-1"},
+		{"max redirects too high", KeyRSSMaxRedirects, "999"},
+		{"summary max chars too low", KeyRSSSummaryMaxChars, "0"},
+		{"max response bytes too low", KeyRSSMaxResponseBytes, "0"},
+		{"poll interval not a duration", KeyRSSPollInterval, "not-a-duration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+				KeyAppEnv: "development",
+				tt.key:    tt.val,
+			}))})
+			if err == nil {
+				t.Fatalf("%s=%s: expected error, got nil", tt.key, tt.val)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.key)
+			}
+		})
 	}
 }

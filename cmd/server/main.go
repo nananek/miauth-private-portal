@@ -9,10 +9,15 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/config"
+	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
+	"github.com/nananek/miauth-private-portal/internal/ingest"
+	"github.com/nananek/miauth-private-portal/internal/ingest/rss"
+	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/jobs"
 	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
@@ -137,13 +142,49 @@ func run() error {
 		jobsManager.Register(llmclassify.JobType, llmClassifySvc.Handle)
 	}
 
-	// The HTTP server and durable worker share one lifecycle. If either
-	// component exits unexpectedly, cancel the sibling and wait for its
-	// graceful shutdown before closing the shared database.
+	// Registered, seeded, and scheduled only when the feature is on: no
+	// safehttp.Client request ever reaches a configured feed URL while
+	// RSS_ENABLED is false, and no domain.ExternalSource row is ever
+	// created from RSS_FEED_URLS either. If RSS is later disabled after
+	// having been on, an already-scheduled "external_source_poll" job is
+	// left pending rather than dropped, the same unregistered-job-type
+	// recovery path LLM's Enabled gate relies on.
+	var rssScheduler *ingest.Scheduler
+	if cfg.RSS.Enabled {
+		rssAdapter := rss.NewAdapter(safehttp.NewClient(safehttp.Config{
+			MaxRedirects:      cfg.RSS.MaxRedirects,
+			AllowInsecureHTTP: cfg.RSS.AllowInsecureHTTP,
+		}), rss.Config{
+			FetchTimeout:     cfg.RSS.FetchTimeout,
+			MaxResponseBytes: cfg.RSS.MaxResponseBytes,
+			SummaryMaxChars:  cfg.RSS.SummaryMaxChars,
+		})
+		ingestSvc := ingest.NewService(db.Repos, timelineSvc, logger)
+		ingestSvc.RegisterAdapter(rssAdapter)
+		jobsManager.Register(ingest.JobType, ingestSvc.Handle)
+
+		seedNow := time.Now().UTC()
+		rssSources := make([]domain.ExternalSource, len(cfg.RSS.FeedURLs))
+		for i, feedURL := range cfg.RSS.FeedURLs {
+			rssSources[i] = domain.ExternalSource{ID: domain.NewID(), Kind: rss.Kind, URI: feedURL, CreatedAt: seedNow}
+		}
+		if err := db.ExternalSources.EnsureFromConfig(ctx, rssSources); err != nil {
+			return fmt.Errorf("seed rss sources: %w", err)
+		}
+
+		rssScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
+			PollInterval: cfg.RSS.PollInterval,
+		}, logger)
+	}
+
+	// The HTTP server, durable worker, and (when enabled) ingestion
+	// scheduler share one lifecycle. If any component exits unexpectedly,
+	// cancel the others and wait for graceful shutdown before closing the
+	// shared database.
 	serviceCtx, cancelServices := context.WithCancel(ctx)
 	defer cancelServices()
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -155,6 +196,14 @@ func run() error {
 		errCh <- jobsManager.Run(serviceCtx)
 		cancelServices()
 	}()
+	if rssScheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- rssScheduler.Run(serviceCtx)
+			cancelServices()
+		}()
+	}
 	wg.Wait()
 	close(errCh)
 	for serviceErr := range errCh {

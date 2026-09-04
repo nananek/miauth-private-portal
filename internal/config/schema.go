@@ -51,6 +51,15 @@ const (
 	KeyLLMClassificationMaxOutputTokens          = "LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS"
 	KeyLLMClassificationThreadContextMaxMessages = "LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES"
 	KeyLLMClassificationThreadContextMaxChars    = "LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS"
+
+	KeyRSSEnabled           = "RSS_ENABLED"
+	KeyRSSFeedURLs          = "RSS_FEED_URLS"
+	KeyRSSPollInterval      = "RSS_POLL_INTERVAL"
+	KeyRSSFetchTimeout      = "RSS_FETCH_TIMEOUT"
+	KeyRSSMaxResponseBytes  = "RSS_MAX_RESPONSE_BYTES"
+	KeyRSSMaxRedirects      = "RSS_MAX_REDIRECTS"
+	KeyRSSSummaryMaxChars   = "RSS_SUMMARY_MAX_CHARS"
+	KeyRSSAllowInsecureHTTP = "RSS_ALLOW_INSECURE_HTTP"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -97,6 +106,14 @@ var knownKeyOrder = []string{
 	KeyLLMClassificationMaxOutputTokens,
 	KeyLLMClassificationThreadContextMaxMessages,
 	KeyLLMClassificationThreadContextMaxChars,
+	KeyRSSEnabled,
+	KeyRSSFeedURLs,
+	KeyRSSPollInterval,
+	KeyRSSFetchTimeout,
+	KeyRSSMaxResponseBytes,
+	KeyRSSMaxRedirects,
+	KeyRSSSummaryMaxChars,
+	KeyRSSAllowInsecureHTTP,
 }
 
 func isKnownKey(key string) bool {

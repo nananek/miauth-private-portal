@@ -191,6 +191,69 @@ func TestApplyAll_RejectsAppliedVersionMissingFromEmbeddedFiles(t *testing.T) {
 	}
 }
 
+// TestMigrate_UpgradeAppliesExternalSourceCursorColumns backs migration
+// 0011: a pre-existing external_sources row created before 0011 applied
+// must survive with the new columns defaulted (cursor/last_fetched_at/
+// last_error NULL, consecutive_failures 0), and a fresh database must
+// expose the same columns from the start.
+func TestMigrate_UpgradeAppliesExternalSourceCursorColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 10 {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+
+	const sourceID = "pre-existing-source"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO external_sources (id, kind, uri, created_at) VALUES (?, 'rss', 'https://example.com/feed.xml', '2024-01-01T00:00:00Z')`,
+		sourceID,
+	); err != nil {
+		t.Fatalf("seed external source: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var cursor, lastFetchedAt, lastError sql.NullString
+	var consecutiveFailures int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT cursor, last_fetched_at, last_error, consecutive_failures FROM external_sources WHERE id = ?`, sourceID,
+	).Scan(&cursor, &lastFetchedAt, &lastError, &consecutiveFailures); err != nil {
+		t.Fatalf("query upgraded row: %v", err)
+	}
+	if cursor.Valid || lastFetchedAt.Valid || lastError.Valid {
+		t.Errorf("upgraded row has non-NULL cursor columns: cursor=%v last_fetched_at=%v last_error=%v", cursor, lastFetchedAt, lastError)
+	}
+	if consecutiveFailures != 0 {
+		t.Errorf("consecutive_failures = %d, want 0", consecutiveFailures)
+	}
+}
+
 func TestMigrate_RejectsEditedAppliedMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := t.Context()

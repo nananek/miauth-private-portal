@@ -163,6 +163,95 @@ func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string
 	return entry, nil
 }
 
+// CreateExternalEntry atomically dedupes an ingested item and, only when
+// it is new, creates its root EntryNews/EntryMail entry and promotes the
+// item to it. item's ID/FetchedAt/CreatedAt are assigned here (the
+// caller, internal/ingest's job handler, supplies only SourceID,
+// ExternalID, ProvenanceURL, PublishedAt, and DedupeKey); body is the
+// entry's Body, kept separate from item because ExternalItem itself
+// carries no content, only provenance/dedupe metadata.
+//
+// Returns the existing, already-promoted entry and created=false when
+// item.DedupeKey already exists — the same duplicate-delivery safety net
+// CreateGeneratedReply gives Issue #9's job handler, applied here to
+// ingestion so a retried "external_source_poll" job attempt (or the same
+// item reappearing in a later fetch) never creates a second entry for
+// the same external item.
+func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind, item domain.ExternalItem, body string) (domain.Entry, bool, error) {
+	actorType, ok := authorActorTypeForKind[kind]
+	if !ok || kind == domain.EntryLLMReply || kind == domain.EntryLLMFollowUp {
+		return domain.Entry{}, false, ErrInvalidKind
+	}
+
+	now := s.clock.Now().UTC()
+	id := domain.NewID()
+	entry := domain.Entry{
+		ID:               id,
+		ThreadID:         id,
+		Kind:             kind,
+		Body:             body,
+		ProcessingStatus: domain.ProcessingNone,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	item.ID = domain.NewID()
+	item.FetchedAt = now
+	item.CreatedAt = now
+
+	created := false
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		createErr := repos.ExternalItems.Create(ctx, item)
+		if createErr == nil {
+			created = true
+			actor, err := repos.Actors.GetByType(ctx, actorType)
+			if err != nil {
+				return fmt.Errorf("resolve external entry author: %w", err)
+			}
+			entry.AuthorActorID = actor.ID
+
+			if err := repos.Threads.Create(ctx, domain.Thread{ID: id, CreatedAt: now, UpdatedAt: now}); err != nil {
+				return err
+			}
+			if err := repos.Entries.Create(ctx, entry); err != nil {
+				return err
+			}
+			return repos.ExternalItems.Promote(ctx, item.ID, entry.ID)
+		}
+		if !errors.Is(createErr, domain.ErrConflict) {
+			return createErr
+		}
+
+		// Lost a race, or this is a genuine re-delivery of an
+		// already-ingested item: find the item this dedupe key actually
+		// belongs to and return its already-promoted entry instead.
+		existing, getErr := repos.ExternalItems.GetByDedupeKey(ctx, item.DedupeKey)
+		if getErr != nil {
+			return fmt.Errorf("get existing external item after conflict: %w", getErr)
+		}
+		if existing.EntryID == nil {
+			// The item row exists but a prior attempt crashed between
+			// Create and Promote (or lost a concurrent promote race).
+			// There is no entry yet to report as this delivery's
+			// result, and creating a second one would violate the
+			// dedupe key's own uniqueness once that promote finally
+			// lands, so surface this as a retryable error instead of
+			// silently reporting created=false with a zero entry.
+			return fmt.Errorf("external item %s exists but is not yet promoted to an entry", existing.ID)
+		}
+		existingEntry, err := repos.Entries.Get(ctx, *existing.EntryID)
+		if err != nil {
+			return fmt.Errorf("get promoted entry: %w", err)
+		}
+		entry = existingEntry
+		created = false
+		return nil
+	})
+	if err != nil {
+		return domain.Entry{}, false, err
+	}
+	return entry, created, nil
+}
+
 // createReplyEntry builds and persists one reply entry (Entries.Create,
 // Threads.Touch) against repos, which the caller must already be running
 // inside a UnitOfWork.WithinTx transaction. CreateReply and
