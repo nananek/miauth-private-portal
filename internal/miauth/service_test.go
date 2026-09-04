@@ -21,15 +21,15 @@ func defaultTestConfig() Config {
 func TestStartLocalSession_CreatesLinkedUpstreamSession(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
 
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account,write:notes", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account,write:notes", nil)
 	if err != nil {
 		t.Fatalf("StartLocalSession: %v", err)
 	}
-	if upstreamID == "" {
+	if started.UpstreamSessionID == "" {
 		t.Fatal("StartLocalSession returned an empty upstream session ID")
 	}
 
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +111,11 @@ func TestStartLocalSession_AllowsAllowlistedClientCallback(t *testing.T) {
 // session ID a Check call can then complete.
 func beginAndAuthorize(t *testing.T, ts *testService, routeSessionID string) {
 	t.Helper()
-	upstreamID, err := ts.StartLocalSession(t.Context(), routeSessionID, "read:account,write:notes", nil)
+	started, err := ts.StartLocalSession(t.Context(), routeSessionID, "read:account,write:notes", nil)
 	if err != nil {
 		t.Fatalf("StartLocalSession: %v", err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func beginAndAuthorize(t *testing.T, ts *testService, routeSessionID string) {
 		return testAllowedUserID, true, nil
 	}
 
-	if _, err := ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State); err != nil {
+	if _, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State); err != nil {
 		t.Fatalf("HandleUpstreamCallback: %v", err)
 	}
 }
@@ -185,11 +185,11 @@ func TestHandleUpstreamCallback_SecondOwnerReusesExistingOwnerActor(t *testing.T
 
 func TestHandleUpstreamCallback_WrongUserDeniesBothSessions(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,12 +198,12 @@ func TestHandleUpstreamCallback_WrongUserDeniesBothSessions(t *testing.T) {
 		return "someone-else", true, nil
 	}
 
-	_, err = ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State)
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if !errors.Is(err, ErrOwnerBindingDenied) {
 		t.Fatalf("HandleUpstreamCallback() with wrong user error = %v, want ErrOwnerBindingDenied", err)
 	}
 
-	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,11 +225,11 @@ func TestHandleUpstreamCallback_WrongUserDeniesBothSessions(t *testing.T) {
 
 func TestHandleUpstreamCallback_UpstreamNotOKDeniesSession(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,12 +238,12 @@ func TestHandleUpstreamCallback_UpstreamNotOKDeniesSession(t *testing.T) {
 		return "", false, nil
 	}
 
-	_, err = ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State)
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if !errors.Is(err, ErrUpstreamVerification) {
 		t.Fatalf("HandleUpstreamCallback() with ok=false error = %v, want ErrUpstreamVerification", err)
 	}
 
-	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,11 +254,11 @@ func TestHandleUpstreamCallback_UpstreamNotOKDeniesSession(t *testing.T) {
 
 func TestHandleUpstreamCallback_UpstreamTransportErrorDoesNotDenyAndAllowsRetry(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,12 +267,12 @@ func TestHandleUpstreamCallback_UpstreamTransportErrorDoesNotDenyAndAllowsRetry(
 		return "", false, errors.New("upstream timed out")
 	}
 
-	_, err = ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State)
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if !errors.Is(err, ErrUpstreamVerification) {
 		t.Fatalf("HandleUpstreamCallback() with a transport error, error = %v, want ErrUpstreamVerification", err)
 	}
 
-	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,18 +284,18 @@ func TestHandleUpstreamCallback_UpstreamTransportErrorDoesNotDenyAndAllowsRetry(
 	ts.provider.check = func(context.Context, string) (string, bool, error) {
 		return testAllowedUserID, true, nil
 	}
-	if _, err := ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State); err != nil {
+	if _, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State); err != nil {
 		t.Fatalf("retry after upstream recovered: %v", err)
 	}
 }
 
 func TestHandleUpstreamCallback_WrongStateDoesNotMutateSessionAndAllowsRetry(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestHandleUpstreamCallback_WrongStateDoesNotMutateSessionAndAllowsRetry(t *
 	// A wrong state guess must not consume upstream.Check at all, and
 	// must not deny the session — see HandleUpstreamCallback's doc
 	// comment for why.
-	_, err = ts.HandleUpstreamCallback(t.Context(), upstreamID, "wrong-state")
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, "wrong-state")
 	if !errors.Is(err, ErrCallbackInvalid) {
 		t.Fatalf("HandleUpstreamCallback() with wrong state error = %v, want ErrCallbackInvalid", err)
 	}
@@ -315,7 +315,7 @@ func TestHandleUpstreamCallback_WrongStateDoesNotMutateSessionAndAllowsRetry(t *
 		t.Errorf("upstream.Check was called %d times for a callback that never passed state validation", ts.provider.calls)
 	}
 
-	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	gotUpstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestHandleUpstreamCallback_WrongStateDoesNotMutateSessionAndAllowsRetry(t *
 
 	// The legitimate holder can still complete the flow with the
 	// correct state afterward.
-	if _, err := ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State); err != nil {
+	if _, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State); err != nil {
 		t.Fatalf("HandleUpstreamCallback with the correct state after a wrong guess: %v", err)
 	}
 }
@@ -340,18 +340,18 @@ func TestHandleUpstreamCallback_UnknownIDIsInvalid(t *testing.T) {
 
 func TestHandleUpstreamCallback_ExpiredSessionIsInvalid(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ts.clock.Advance(upstreamSessionTTL + 1)
 
-	_, err = ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State)
+	_, err = ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if !errors.Is(err, ErrCallbackInvalid) {
 		t.Errorf("HandleUpstreamCallback() for an expired session error = %v, want ErrCallbackInvalid", err)
 	}
@@ -416,16 +416,16 @@ func TestCheck_UnknownSessionFails(t *testing.T) {
 
 func TestCheck_DeniedSessionFails(t *testing.T) {
 	ts := newTestService(t, defaultTestConfig())
-	upstreamID, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
+	started, err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts.provider.check = func(context.Context, string) (string, bool, error) { return "someone-else", true, nil }
-	if _, err := ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State); !errors.Is(err, ErrOwnerBindingDenied) {
+	if _, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State); !errors.Is(err, ErrOwnerBindingDenied) {
 		t.Fatal(err)
 	}
 
@@ -510,11 +510,11 @@ func TestBootstrapFlow_SucceedsWithoutAnAllowlist(t *testing.T) {
 		t.Fatalf("IssueBootstrapGate: %v", err)
 	}
 
-	upstreamID, err := ts.StartBootstrapSession(t.Context(), gateID)
+	started, err := ts.StartBootstrapSession(t.Context(), gateID)
 	if err != nil {
 		t.Fatalf("StartBootstrapSession: %v", err)
 	}
-	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), upstreamID)
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestBootstrapFlow_SucceedsWithoutAnAllowlist(t *testing.T) {
 		return "any-upstream-user", true, nil
 	}
 
-	result, err := ts.HandleUpstreamCallback(t.Context(), upstreamID, upstream.State)
+	result, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State)
 	if err != nil {
 		t.Fatalf("HandleUpstreamCallback: %v", err)
 	}

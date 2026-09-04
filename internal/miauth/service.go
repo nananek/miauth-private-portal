@@ -136,10 +136,21 @@ func sameCallback(existing, requested *string) bool {
 	return *existing == *requested
 }
 
+// StartedSession is what the caller needs to build the redirect to
+// IDENTITY_ORIGIN: the upstream session's ID and its crypto/rand state.
+// Both are embedded by the caller (internal/httpserver) as query
+// parameters on the internal callback URL it hands to Misskey, since
+// Misskey has no notion of this service's own state value — see
+// HandleUpstreamCallback's doc comment.
+type StartedSession struct {
+	UpstreamSessionID string
+	UpstreamState     string
+}
+
 // StartLocalSession handles GET /miauth/{session}: it creates (or
 // idempotently resumes) the Aria-facing local session and its linked
-// upstream verification session, and returns the upstream session ID
-// the caller redirects the browser to.
+// upstream verification session, and returns the upstream session the
+// caller redirects the browser to.
 //
 // A repeated request with the same routeSessionID, requestedPermission,
 // and clientCallback resumes the existing pending attempt rather than
@@ -147,17 +158,18 @@ func sameCallback(existing, requested *string) bool {
 // constraint. A repeated request that differs in either field, or whose
 // prior attempt is no longer pending, returns ErrSessionUnavailable
 // without mutating the existing row.
-func (s *Service) StartLocalSession(ctx context.Context, routeSessionID, requestedPermission string, clientCallback *string) (upstreamSessionID string, err error) {
+func (s *Service) StartLocalSession(ctx context.Context, routeSessionID, requestedPermission string, clientCallback *string) (StartedSession, error) {
 	if clientCallback != nil && !s.callbackAllowed(*clientCallback) {
-		return "", ErrClientCallbackNotAllowed
+		return StartedSession{}, ErrClientCallbackNotAllowed
 	}
 
 	now := s.clock.Now()
 
-	err = s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+	var started StartedSession
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
 		existing, getErr := repos.LocalMiAuth.Get(ctx, routeSessionID)
 		if errors.Is(getErr, domain.ErrNotFound) {
-			return s.createLocalAndUpstreamSession(ctx, repos, routeSessionID, requestedPermission, clientCallback, now, &upstreamSessionID)
+			return s.createLocalAndUpstreamSession(ctx, repos, routeSessionID, requestedPermission, clientCallback, now, &started)
 		}
 		if getErr != nil {
 			return getErr
@@ -172,15 +184,18 @@ func (s *Service) StartLocalSession(ctx context.Context, routeSessionID, request
 		if uErr != nil {
 			return uErr
 		}
-		upstreamSessionID = upstream.ID
+		started = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstream.State}
 		return nil
 	})
-	return upstreamSessionID, err
+	if err != nil {
+		return StartedSession{}, err
+	}
+	return started, nil
 }
 
 func (s *Service) createLocalAndUpstreamSession(
 	ctx context.Context, repos domain.Repos, routeSessionID, requestedPermission string,
-	clientCallback *string, now time.Time, out *string,
+	clientCallback *string, now time.Time, out *StartedSession,
 ) error {
 	local := domain.LocalMiAuthSession{
 		RouteSessionID:       routeSessionID,
@@ -195,12 +210,12 @@ func (s *Service) createLocalAndUpstreamSession(
 		return err
 	}
 
-	upstreamID := domain.NewID()
+	upstreamState := domain.NewID()
 	upstream := domain.UpstreamMiAuthSession{
-		ID:             upstreamID,
+		ID:             domain.NewID(),
 		LocalSessionID: &routeSessionID,
 		IdentityOrigin: s.cfg.IdentityOrigin,
-		State:          domain.NewID(),
+		State:          upstreamState,
 		Status:         domain.MiAuthCreated,
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(upstreamSessionTTL),
@@ -208,7 +223,7 @@ func (s *Service) createLocalAndUpstreamSession(
 	if err := repos.UpstreamMiAuth.Create(ctx, upstream); err != nil {
 		return err
 	}
-	*out = upstreamID
+	*out = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstreamState}
 	return nil
 }
 
@@ -219,10 +234,11 @@ func (s *Service) createLocalAndUpstreamSession(
 // OwnerBinding already exists, or if the gate is unknown, not in the
 // issued state, or expired — all collapsed into the same error so a
 // probing request cannot distinguish which case applies.
-func (s *Service) StartBootstrapSession(ctx context.Context, gateID string) (upstreamSessionID string, err error) {
+func (s *Service) StartBootstrapSession(ctx context.Context, gateID string) (StartedSession, error) {
 	now := s.clock.Now()
 
-	err = s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+	var started StartedSession
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
 		if _, bErr := repos.OwnerBindings.Get(ctx); bErr == nil {
 			return ErrBootstrapUnavailable
 		} else if !errors.Is(bErr, domain.ErrNotFound) {
@@ -245,18 +261,19 @@ func (s *Service) StartBootstrapSession(ctx context.Context, gateID string) (ups
 			if existing.Status != domain.MiAuthCreated || expired(now, existing.ExpiresAt) {
 				return ErrBootstrapUnavailable
 			}
-			upstreamSessionID = existing.ID
+			started = StartedSession{UpstreamSessionID: existing.ID, UpstreamState: existing.State}
 			return nil
 		}
 		if !errors.Is(uErr, domain.ErrNotFound) {
 			return uErr
 		}
 
+		upstreamState := domain.NewID()
 		upstream := domain.UpstreamMiAuthSession{
 			ID:              domain.NewID(),
 			BootstrapGateID: &gateID,
 			IdentityOrigin:  s.cfg.IdentityOrigin,
-			State:           domain.NewID(),
+			State:           upstreamState,
 			Status:          domain.MiAuthCreated,
 			CreatedAt:       now,
 			ExpiresAt:       now.Add(upstreamSessionTTL),
@@ -264,10 +281,13 @@ func (s *Service) StartBootstrapSession(ctx context.Context, gateID string) (ups
 		if cErr := repos.UpstreamMiAuth.Create(ctx, upstream); cErr != nil {
 			return cErr
 		}
-		upstreamSessionID = upstream.ID
+		started = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstreamState}
 		return nil
 	})
-	return upstreamSessionID, err
+	if err != nil {
+		return StartedSession{}, err
+	}
+	return started, nil
 }
 
 // CallbackResult tells the GET /miauth/callback handler how to
