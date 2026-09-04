@@ -13,11 +13,14 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/health"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
 )
 
 // Options configures the HTTP server. It intentionally contains only
-// primitive and standard-library types so this package never depends on
-// internal/config; cmd/server translates a config.Config into Options.
+// primitive and standard-library types (plus *miauth.Service, itself
+// independent of internal/config and any storage driver type) so this
+// package never depends on internal/config; cmd/server translates a
+// config.Config into Options.
 type Options struct {
 	// Addr is the host:port to listen on. Ignored if Listener is set.
 	Addr string
@@ -32,6 +35,13 @@ type Options struct {
 	IdleTimeout         time.Duration
 	MaxRequestBodyBytes int64
 	ShutdownGracePeriod time.Duration
+
+	// MiAuthService, LocalOrigin, and IdentityOrigin configure Issue #5's
+	// MiAuth routes; see NewServer. A nil MiAuthService registers none of
+	// them.
+	MiAuthService  *miauth.Service
+	LocalOrigin    string
+	IdentityOrigin string
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once
@@ -52,7 +62,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger, reg *health.Reg
 		}
 	}
 
-	server := NewServer(logger, reg)
+	server := NewServer(logger, reg, opts)
 	// withRequestID must wrap withRecover (not the other way around):
 	// withRequestID's r.WithContext call produces a new *http.Request, so
 	// if it sat inside withRecover, withRecover's deferred closure would

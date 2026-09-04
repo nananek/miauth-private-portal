@@ -36,6 +36,12 @@ type ActorRepository interface {
 	// actor: that is created transactionally alongside an OwnerBinding
 	// (see OwnerBindingRepository.Bind).
 	EnsureReservedActors(ctx context.Context) error
+	// Create inserts a new actor. It is the only way to create the Owner
+	// actor; the actors table's UNIQUE(actor_type) constraint rejects a
+	// second Owner row with ErrConflict, so a caller never needs a
+	// separate existence check before calling it inside the same
+	// owner-binding transaction as OwnerBindingRepository.Bind.
+	Create(ctx context.Context, a Actor) error
 	Get(ctx context.Context, id string) (Actor, error)
 	GetByType(ctx context.Context, actorType ActorType) (Actor, error)
 }

@@ -16,7 +16,7 @@ import (
 func newTestServer() (*Server, *health.Registry) {
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
-	return NewServer(logger, reg), reg
+	return NewServer(logger, reg, Options{}), reg
 }
 
 type failingChecker struct{ name string }
@@ -32,7 +32,7 @@ func TestServer_ReadyzLogsReasonWhenNotReady(t *testing.T) {
 	reg := health.NewRegistry()
 	reg.Register(failingChecker{name: "downstream"})
 	reg.MarkReady()
-	srv := NewServer(logger, reg)
+	srv := NewServer(logger, reg, Options{})
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()

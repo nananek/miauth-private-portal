@@ -1,15 +1,19 @@
 // Package httpserver wires this service's HTTP handlers, middleware, and
-// graceful-shutdown lifecycle. It deliberately depends only on
-// internal/health and internal/logging, never on internal/config: the
-// caller (cmd/server) translates a config.Config into the primitive-typed
-// Options this package accepts, so httpserver stays testable in isolation
-// and future internal/domain or SQLite-adapter code never needs to import
-// it.
+// graceful-shutdown lifecycle. It never depends on internal/config or
+// internal/storage/sqlite: the caller (cmd/server) translates a
+// config.Config into the primitive-typed Options this package accepts
+// and constructs internal/miauth.Service itself, so httpserver stays
+// testable in isolation and a storage-adapter change never needs to
+// touch it. Since Issue #5 it also depends on internal/miauth and
+// internal/domain for the MiAuth wire boundary (miauth_handlers.go,
+// miauth_wire.go, bootstrap_handlers.go, scope_middleware.go); it still
+// never imports net/http-unaware use-case code the other direction, nor
+// a storage driver type.
 //
 // Routing uses the standard library's net/http.ServeMux with its Go
 // 1.22+ method+path patterns (e.g. "GET /healthz"). This service's
-// Misskey-compatible surface (Issue #7) is a small, mostly-static set of
-// routes with at most one path parameter per route (Aria's MiAuth
+// Misskey-compatible surface is a small, mostly-static set of routes
+// with at most one path parameter per route (Aria's MiAuth
 // "/miauth/{session}"), which ServeMux already expresses directly, so no
 // third-party router dependency is justified yet; see
 // docs/operations/configuration.md for the fuller rationale.
@@ -21,6 +25,7 @@ import (
 
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
 )
 
 // Server wraps an http.ServeMux, applying access-log middleware to every
@@ -28,12 +33,29 @@ import (
 type Server struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
+
+	miauth         *miauth.Service
+	localOrigin    string
+	identityOrigin string
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
-// ("GET /readyz") routes backed by reg already registered.
-func NewServer(logger *slog.Logger, reg *health.Registry) *Server {
-	s := &Server{mux: http.NewServeMux(), logger: logger}
+// ("GET /readyz") routes backed by reg always registered.
+//
+// opts.MiAuthService and its named origin fields configure Issue #5's
+// MiAuth routes (GET /miauth/{session}, GET /miauth/callback, GET
+// /miauth/bootstrap/{gate}, POST /api/miauth/{session}/check). A nil
+// MiAuthService registers none of them, leaving a Server with only the
+// health routes — the shape every httpserver test predating Issue #5
+// still expects.
+func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
+	s := &Server{
+		mux:            http.NewServeMux(),
+		logger:         logger,
+		miauth:         opts.MiAuthService,
+		localOrigin:    opts.LocalOrigin,
+		identityOrigin: opts.IdentityOrigin,
+	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeHealthResult(w, logger, reg.Live(r.Context()))
@@ -41,6 +63,13 @@ func NewServer(logger *slog.Logger, reg *health.Registry) *Server {
 	s.Handle("GET /readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeHealthResult(w, logger, reg.Ready(r.Context()))
 	}))
+
+	if opts.MiAuthService != nil {
+		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
+		s.Handle("GET /miauth/callback", http.HandlerFunc(s.handleMiAuthCallback))
+		s.Handle("GET /miauth/bootstrap/{gate}", http.HandlerFunc(s.handleMiAuthBootstrapStart))
+		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
+	}
 
 	return s
 }

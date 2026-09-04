@@ -26,6 +26,18 @@ func (r *actorRepository) EnsureReservedActors(ctx context.Context) error {
 	return nil
 }
 
+// Create inserts a new actor. The actors table's UNIQUE(actor_type)
+// constraint is what makes this the safe, sole path for creating the
+// Owner actor: a second concurrent attempt collides on that constraint
+// and mapWriteError turns it into domain.ErrConflict.
+func (r *actorRepository) Create(ctx context.Context, a domain.Actor) error {
+	_, err := r.q.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, ?, ?)`,
+		a.ID, string(a.Type), formatTime(a.CreatedAt),
+	)
+	return mapWriteError(err)
+}
+
 func (r *actorRepository) Get(ctx context.Context, id string) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
 		`SELECT id, actor_type, created_at FROM actors WHERE id = ?`, id))

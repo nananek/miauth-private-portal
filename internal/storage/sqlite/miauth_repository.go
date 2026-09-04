@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -41,6 +42,20 @@ func (r *bootstrapGateRepository) Consume(ctx context.Context, id string, at tim
 	return requireRowAffectedConflict(res)
 }
 
+// Fail atomically transitions an issued, unexpired gate to failed, for a
+// bootstrap attempt whose upstream verification did not succeed.
+func (r *bootstrapGateRepository) Fail(ctx context.Context, id string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE bootstrap_gates SET status = 'failed'
+		 WHERE id = ? AND status = 'issued' AND expires_at > ?`,
+		id, formatTime(at),
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
 func scanBootstrapGate(row rowScanner) (domain.BootstrapGate, error) {
 	var g domain.BootstrapGate
 	var status, createdAt, expiresAt string
@@ -66,9 +81,10 @@ func scanBootstrapGate(row rowScanner) (domain.BootstrapGate, error) {
 
 type localMiAuthSessionRepository struct{ q querier }
 
-const localMiAuthSelectColumns = `SELECT route_session_id, state, status, requested_permissions,
-	client_callback, local_actor_id, created_at, expires_at, authorized_at, consumed_at
-	FROM miauth_local_sessions`
+const localMiAuthColumns = `route_session_id, state, status, requested_permissions,
+	client_callback, local_actor_id, created_at, expires_at, authorized_at, consumed_at`
+
+const localMiAuthSelectColumns = `SELECT ` + localMiAuthColumns + ` FROM miauth_local_sessions`
 
 func (r *localMiAuthSessionRepository) Create(ctx context.Context, s domain.LocalMiAuthSession) error {
 	_, err := r.q.ExecContext(ctx,
@@ -102,14 +118,36 @@ func (r *localMiAuthSessionRepository) Authorize(ctx context.Context, routeSessi
 	return requireRowAffectedConflict(res)
 }
 
-// Consume atomically transitions an authorized session to consumed. If
-// two check() calls race, exactly one UPDATE affects a row; the other
-// affects zero and reports ErrConflict.
-func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSessionID string, at time.Time) error {
-	res, err := r.q.ExecContext(ctx,
+// Consume atomically transitions an authorized session to consumed and
+// returns that row. If two check() calls race, exactly one UPDATE returns
+// a row; the other returns no row and reports ErrConflict.
+func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSessionID string, at time.Time) (domain.LocalMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx,
 		`UPDATE miauth_local_sessions SET status = 'consumed', consumed_at = ?
-		 WHERE route_session_id = ? AND status = 'authorized' AND expires_at > ?`,
+		 WHERE route_session_id = ? AND status = 'authorized' AND expires_at > ?
+		 RETURNING `+localMiAuthColumns,
 		formatTime(at), routeSessionID, formatTime(at),
+	)
+	session, err := scanLocalMiAuthSession(row)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.LocalMiAuthSession{}, domain.ErrConflict
+	}
+	if err != nil {
+		return domain.LocalMiAuthSession{}, err
+	}
+	return session, nil
+}
+
+// Deny atomically transitions a created, unexpired session to denied,
+// for a callback whose verification did not succeed (wrong user, state
+// mismatch, malformed or replayed callback). See the interface doc for
+// why this is a distinct terminal write rather than leaving the session
+// to expire.
+func (r *localMiAuthSessionRepository) Deny(ctx context.Context, routeSessionID string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE miauth_local_sessions SET status = 'denied'
+		 WHERE route_session_id = ? AND status = 'created' AND expires_at > ?`,
+		routeSessionID, formatTime(at),
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -174,6 +212,20 @@ func (r *upstreamMiAuthSessionRepository) Get(ctx context.Context, id string) (d
 	return scanUpstreamMiAuthSession(row)
 }
 
+// GetByLocalSessionID backs idempotent resume of GET /miauth/{session}:
+// local_session_id is UNIQUE, so at most one row can match.
+func (r *upstreamMiAuthSessionRepository) GetByLocalSessionID(ctx context.Context, localSessionID string) (domain.UpstreamMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx, upstreamMiAuthSelectColumns+` WHERE local_session_id = ?`, localSessionID)
+	return scanUpstreamMiAuthSession(row)
+}
+
+// GetByBootstrapGateID is GetByLocalSessionID's counterpart for the
+// operator bootstrap flow: bootstrap_gate_id is UNIQUE.
+func (r *upstreamMiAuthSessionRepository) GetByBootstrapGateID(ctx context.Context, bootstrapGateID string) (domain.UpstreamMiAuthSession, error) {
+	row := r.q.QueryRowContext(ctx, upstreamMiAuthSelectColumns+` WHERE bootstrap_gate_id = ?`, bootstrapGateID)
+	return scanUpstreamMiAuthSession(row)
+}
+
 func (r *upstreamMiAuthSessionRepository) Authorize(ctx context.Context, id, upstreamUserID string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE miauth_upstream_sessions SET status = 'authorized', upstream_user_id = ?, authorized_at = ?
@@ -191,6 +243,21 @@ func (r *upstreamMiAuthSessionRepository) Consume(ctx context.Context, id string
 		`UPDATE miauth_upstream_sessions SET status = 'consumed', consumed_at = ?
 		 WHERE id = ? AND status = 'authorized' AND expires_at > ?`,
 		formatTime(at), id, formatTime(at),
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+// Deny atomically transitions a created, unexpired session to denied —
+// see localMiAuthSessionRepository.Deny for why this is a distinct
+// terminal write rather than leaving the session to expire.
+func (r *upstreamMiAuthSessionRepository) Deny(ctx context.Context, id string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE miauth_upstream_sessions SET status = 'denied'
+		 WHERE id = ? AND status = 'created' AND expires_at > ?`,
+		id, formatTime(at),
 	)
 	if err != nil {
 		return mapWriteError(err)

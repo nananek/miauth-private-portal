@@ -130,6 +130,13 @@ type BootstrapGateRepository interface {
 	// consumed. It returns ErrConflict if the gate is missing, expired,
 	// or already in a terminal state.
 	Consume(ctx context.Context, id string, at time.Time) error
+	// Fail atomically transitions an issued, unexpired gate to failed,
+	// for a bootstrap attempt whose upstream verification did not
+	// succeed. ADR-0001 requires the gate be invalid after a failed
+	// binding attempt, not just after expiry or explicit revocation. It
+	// returns ErrConflict if the gate is missing, expired, or already in
+	// a terminal state.
+	Fail(ctx context.Context, id string, at time.Time) error
 }
 
 // LocalMiAuthSessionRepository persists Aria-facing local MiAuth sessions.
@@ -138,10 +145,22 @@ type LocalMiAuthSessionRepository interface {
 	Get(ctx context.Context, routeSessionID string) (LocalMiAuthSession, error)
 	Authorize(ctx context.Context, routeSessionID, localActorID string, at time.Time) error
 	// Consume atomically transitions an authorized session to consumed.
+	// On success it returns the consumed row so callers can use the
+	// authorization facts covered by the same compare-and-set without a
+	// second, separate lookup.
 	// It returns ErrConflict if the session is not currently authorized
 	// (already consumed, expired, or never authorized) — the "only one
 	// winner" guarantee a racing check() call needs.
-	Consume(ctx context.Context, routeSessionID string, at time.Time) error
+	Consume(ctx context.Context, routeSessionID string, at time.Time) (LocalMiAuthSession, error)
+	// Deny atomically transitions a created, unexpired session to denied.
+	// ADR-0001 treats an unknown, malformed, replayed, mismatched, or
+	// otherwise rejected upstream callback as a terminal failure for
+	// that attempt, not something left to expire naturally, so a
+	// wrong-user or state-mismatch callback must call this instead of
+	// leaving the session retryable. It returns ErrConflict if the
+	// session is not currently in the created state (already authorized,
+	// consumed, previously denied, or expired).
+	Deny(ctx context.Context, routeSessionID string, at time.Time) error
 }
 
 // UpstreamMiAuthSessionRepository persists upstream owner-verification
@@ -149,10 +168,27 @@ type LocalMiAuthSessionRepository interface {
 type UpstreamMiAuthSessionRepository interface {
 	Create(ctx context.Context, s UpstreamMiAuthSession) error
 	Get(ctx context.Context, id string) (UpstreamMiAuthSession, error)
+	// GetByLocalSessionID looks up the upstream session bound to a given
+	// local (Aria-facing) session, backed by that column's UNIQUE
+	// constraint. It is what makes a repeated GET /miauth/{session}
+	// idempotent: the handler resumes the same upstream session instead
+	// of violating the UNIQUE constraint by creating a second one.
+	GetByLocalSessionID(ctx context.Context, localSessionID string) (UpstreamMiAuthSession, error)
+	// GetByBootstrapGateID is GetByLocalSessionID's counterpart for the
+	// operator bootstrap flow, backed by that column's UNIQUE
+	// constraint.
+	GetByBootstrapGateID(ctx context.Context, bootstrapGateID string) (UpstreamMiAuthSession, error)
 	Authorize(ctx context.Context, id, upstreamUserID string, at time.Time) error
 	// Consume atomically transitions an authorized session to consumed.
 	// It returns ErrConflict if the session is not currently authorized.
 	Consume(ctx context.Context, id string, at time.Time) error
+	// Deny atomically transitions a created, unexpired session to
+	// denied — see LocalMiAuthSessionRepository.Deny for why this is a
+	// distinct terminal write rather than leaving the session to expire.
+	// It returns ErrConflict if the session is not currently in the
+	// created state (already authorized, consumed, previously denied, or
+	// expired).
+	Deny(ctx context.Context, id string, at time.Time) error
 }
 
 // APITokenRepository persists local API tokens.

@@ -21,6 +21,14 @@ const (
 	KeyDBPath                = "DB_PATH"
 	KeyDBBusyTimeoutMS       = "DB_BUSY_TIMEOUT_MS"
 	KeyDBMaxOpenConns        = "DB_MAX_OPEN_CONNS"
+
+	KeyLocalOrigin          = "LOCAL_ORIGIN"
+	KeyIdentityOrigin       = "IDENTITY_ORIGIN"
+	KeyAllowedMisskeyUserID = "ALLOWED_MISSKEY_USER_ID"
+	KeyAriaClientCallbacks  = "ARIA_CLIENT_CALLBACKS"
+	KeyUpstreamHTTPTimeout  = "UPSTREAM_HTTP_TIMEOUT"
+	KeyOwnerUsername        = "OWNER_USERNAME"
+	KeyOwnerDisplayName     = "OWNER_DISPLAY_NAME"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -40,6 +48,13 @@ var knownKeyOrder = []string{
 	KeyDBPath,
 	KeyDBBusyTimeoutMS,
 	KeyDBMaxOpenConns,
+	KeyLocalOrigin,
+	KeyIdentityOrigin,
+	KeyAllowedMisskeyUserID,
+	KeyAriaClientCallbacks,
+	KeyUpstreamHTTPTimeout,
+	KeyOwnerUsername,
+	KeyOwnerDisplayName,
 }
 
 func isKnownKey(key string) bool {
