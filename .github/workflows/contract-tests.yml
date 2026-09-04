@@ -1,0 +1,27 @@
+name: Contract Tests
+
+# Separate from ci.yml deliberately: same push/pull_request gate as that
+# workflow (this is a correctness gate, not a release-publish step like
+# docker-publish.yml), but split into its own file so the Dart SDK setup
+# and misskey_dart dependency fetch this job needs do not add to every
+# push/PR run of ci.yml's plain Go check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: make contract-test
