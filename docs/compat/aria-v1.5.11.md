@@ -543,10 +543,15 @@ verified.
   returned with a 400 status except authentication failures (401) and
   internal errors (500). These are this implementation's contract, not a
   confirmed match to a real Misskey instance's codes/statuses.
-- **Missing, archived, and hidden notes** are never distinguished: `/api/notes/show`,
-  the conversation ancestor chain, and the children list all treat an
-  unknown, archived, or hidden note ID identically (`NO_SUCH_NOTE` for the
-  requested ID itself; silently excluded when it appears inside a list).
+- **Missing, archived, and hidden notes** are never distinguished:
+  `/api/notes/show`, the conversation ancestor chain, the children list,
+  and `/api/notes/create`'s `replyId` all treat an unknown, archived, or
+  hidden note ID identically (`NO_SUCH_NOTE` for the requested/reply-target
+  ID itself; silently excluded when it appears inside a list). Replying to
+  a hidden/archived note is rejected rather than silently succeeding, even
+  though `timeline.CreateReply`'s own parent lookup does not filter by
+  visibility — the httpserver handler checks this itself, the same way it
+  does for every note-reading endpoint.
 - **Home timeline pagination** is newest-first via a dedicated
   `EntryRepository.ListTimelineDesc` (see internal/domain/entry.go), never
   the oldest-first `ListTimeline` cursor. `limit` defaults to 30 and
@@ -559,7 +564,10 @@ verified.
   subject note itself.
 - **Children pagination**: continues `ListChildren`'s existing
   oldest-first order (no separate newest-first children query exists);
-  `untilId` resumes after the matching child.
+  `untilId` resumes after the matching child. An `untilId` that matches no
+  visible child (unknown, or hidden since an earlier page) yields an empty
+  page rather than restarting from the first page, matching the home
+  timeline's unknown-`untilId` handling.
 - **`/api/i`** always returns the `MeDetailed` superset regardless of
   which of Aria's two call sites is asking (its extra required fields
   parse successfully as the token-login fallback's minimal `{id,

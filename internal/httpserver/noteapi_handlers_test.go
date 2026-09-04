@@ -229,6 +229,39 @@ func TestHandleNotesCreate_UnknownReplyParentIsNoSuchNote(t *testing.T) {
 	assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
 }
 
+// TestHandleNotesCreate_ReplyToHiddenOrArchivedParentIsNoSuchNote pins the
+// same uniform NO_SUCH_NOTE treatment notes/show, conversation, and
+// children give a hidden/archived note ID: replying to one must not
+// silently succeed just because timeline.CreateReply's own parent lookup
+// does not filter by visibility.
+func TestHandleNotesCreate_ReplyToHiddenOrArchivedParentIsNoSuchNote(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	t.Run("hidden", func(t *testing.T) {
+		createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "parent"})
+		var created createdNoteResponse
+		mustDecode(t, createRec, &created)
+		if err := ts.timeline.SetHidden(t.Context(), created.CreatedNote.ID, true); err != nil {
+			t.Fatal(err)
+		}
+
+		rec := ts.post(t, "/api/notes/create", map[string]any{"text": "reply", "replyId": created.CreatedNote.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+
+	t.Run("archived", func(t *testing.T) {
+		createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "parent"})
+		var created createdNoteResponse
+		mustDecode(t, createRec, &created)
+		if err := ts.timeline.SetArchived(t.Context(), created.CreatedNote.ID, true); err != nil {
+			t.Fatal(err)
+		}
+
+		rec := ts.post(t, "/api/notes/create", map[string]any{"text": "reply", "replyId": created.CreatedNote.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+}
+
 // TestHandleNotesCreate_MalformedJSONIsInvalidParam exercises the
 // handler's own decode failure (a wrong-typed field), not a syntactically
 // broken body: RequireScope must itself fully parse the JSON body to
@@ -459,6 +492,31 @@ func TestHandleNotesChildren_DirectOnlyExcludesHiddenAndPaginates(t *testing.T) 
 	mustDecode(t, page, &pageNotes)
 	if len(pageNotes) != 1 || pageNotes[0].ID != childIDs[2] {
 		t.Fatalf("page after %s = %v, want [%s]", childIDs[0], noteIDs(pageNotes), childIDs[2])
+	}
+}
+
+// TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage mirrors
+// TestHandleNotesTimeline_UnknownUntilIdReturnsEmptyPage: a stale/unknown
+// untilId (including one that pointed at a now-hidden child, so it no
+// longer appears in the visible list paginateAfterID pages through) must
+// yield an empty page, not restart from the first page — otherwise a
+// client that pages by repeating the last-seen ID could loop forever.
+func TestHandleNotesChildren_UnknownUntilIdReturnsEmptyPage(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rootRec := ts.post(t, "/api/notes/create", map[string]any{"text": "root"})
+	var root createdNoteResponse
+	mustDecode(t, rootRec, &root)
+	ts.clock.Advance(time.Minute)
+	ts.post(t, "/api/notes/create", map[string]any{"text": "child", "replyId": root.CreatedNote.ID})
+
+	rec := ts.post(t, "/api/notes/children", map[string]any{"noteId": root.CreatedNote.ID, "untilId": "does-not-exist"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	var notes []note
+	mustDecode(t, rec, &notes)
+	if len(notes) != 0 {
+		t.Errorf("notes = %v, want empty", noteIDs(notes))
 	}
 }
 

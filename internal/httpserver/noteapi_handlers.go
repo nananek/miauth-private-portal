@@ -170,6 +170,26 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 	var entry domain.Entry
 	var err error
 	if req.ReplyID != nil && *req.ReplyID != "" {
+		// timeline.CreateReply's own parent lookup (repos.Entries.Get) does
+		// not filter archived/hidden rows — by design, per GetEntry's doc
+		// comment, enforcing visibility is this package's job. Without this
+		// check, replying to a hidden/archived parent would silently
+		// succeed, contradicting the uniform NO_SUCH_NOTE treatment every
+		// note-reading endpoint gives the same parent ID (see entryVisible).
+		parent, getErr := s.timeline.GetEntry(r.Context(), *req.ReplyID)
+		switch {
+		case errors.Is(getErr, domain.ErrNotFound):
+			writeNoSuchNote(w)
+			return
+		case getErr != nil:
+			s.logger.Error("get reply parent failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", getErr.Error())
+			writeInternalError(w)
+			return
+		case !entryVisible(parent):
+			writeNoSuchNote(w)
+			return
+		}
+
 		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, nil)
 		if errors.Is(err, timeline.ErrParentNotFound) {
 			writeNoSuchNote(w)
@@ -447,23 +467,30 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 
 // paginateAfterID returns the entries strictly after the one matching
 // untilID in entries' existing order, up to limit items. If untilID is
-// nil/empty or not found, it returns from the start. This continues
-// GetChildren's existing oldest-first order rather than introducing a
-// second, newest-first children query: Issue #7's plan defers a
-// dedicated ListChildrenDesc repository method until pagination
+// nil/empty, it returns from the start. If untilID is set but matches no
+// entry (a stale ID, or one that has since become hidden/archived and so
+// was already filtered out of entries), it returns an empty page rather
+// than restarting from the beginning: mirroring handleNotesTimeline's
+// unknown-untilId handling, this keeps a client that pages by repeating
+// the last-seen ID safe from looping back over the same page forever.
+// This continues GetChildren's existing oldest-first order rather than
+// introducing a second, newest-first children query: Issue #7's plan
+// defers a dedicated ListChildrenDesc repository method until pagination
 // performance actually requires it.
 func paginateAfterID(entries []domain.Entry, untilID *string, limit int) []domain.Entry {
 	start := 0
 	if untilID != nil && *untilID != "" {
+		found := false
 		for i, e := range entries {
 			if e.ID == *untilID {
 				start = i + 1
+				found = true
 				break
 			}
 		}
-	}
-	if start > len(entries) {
-		start = len(entries)
+		if !found {
+			return nil
+		}
 	}
 	end := start + limit
 	if end > len(entries) {
