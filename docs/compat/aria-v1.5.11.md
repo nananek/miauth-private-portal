@@ -527,6 +527,56 @@ contracts; the later issue owns implementation and evidence.
 | No AppFlowy/notebook export in MVP | #4, #13 | Notebook/AppFlowy export is Future #14 |
 | No arbitrary crawling, SMTP, mail mutation, or autonomous unlimited tools | #11, #12, #13 | Additional source adapters are Future #17; mail stays read-only |
 
+## Issue #7 implementation notes
+
+Issue #7 implements the endpoint handlers this document specifies. The
+decisions below fix behavior this document left 要実機確認 (needs
+real-instance verification); **no real Aria/Misskey end-to-end
+verification has been performed for this issue** — the 要実機確認 labels
+above remain accurate and unchanged. These decisions must be revisited
+against a real Aria client before any release gate treats them as
+verified.
+
+- **Error shape**: implemented as `{"error":{"id","code","message","kind","info"}}`
+  with locally-chosen `code` strings (`INVALID_PARAM`, `NO_SUCH_NOTE`,
+  `UNSUPPORTED_FEATURE`, `AUTHENTICATION_FAILED`, `INTERNAL_ERROR`), all
+  returned with a 400 status except authentication failures (401) and
+  internal errors (500). These are this implementation's contract, not a
+  confirmed match to a real Misskey instance's codes/statuses.
+- **Missing, archived, and hidden notes** are never distinguished: `/api/notes/show`,
+  the conversation ancestor chain, and the children list all treat an
+  unknown, archived, or hidden note ID identically (`NO_SUCH_NOTE` for the
+  requested ID itself; silently excluded when it appears inside a list).
+- **Home timeline pagination** is newest-first via a dedicated
+  `EntryRepository.ListTimelineDesc` (see internal/domain/entry.go), never
+  the oldest-first `ListTimeline` cursor. `limit` defaults to 30 and
+  clamps to 100; `untilId` resolves through the referenced entry's
+  `(created_at, id)` and pages strictly older. `sinceId`/`sinceDate`/
+  `untilDate` are not implemented (accepted-and-ignored is not applicable
+  since they are simply never read).
+- **Conversation ordering**: the ancestor chain is oldest-first (root,
+  then its child, ..., then the subject's direct parent), excluding the
+  subject note itself.
+- **Children pagination**: continues `ListChildren`'s existing
+  oldest-first order (no separate newest-first children query exists);
+  `untilId` resumes after the matching child.
+- **`/api/i`** always returns the `MeDetailed` superset regardless of
+  which of Aria's two call sites is asking (its extra required fields
+  parse successfully as the token-login fallback's minimal `{id,
+  username}` shape too). `isModerator`/`isAdmin` are `true` (the single
+  owner is this deployment's only login-capable, administrator-equivalent
+  actor); `alwaysMarkNsfw`/`carefulBot`/`autoAcceptFollowed` are `false`.
+- **`notesCount`** is now real on both `/api/i` and
+  `/api/miauth/{session}/check`'s `UserDetailedNotMe`, counting every
+  entry (including archived/hidden ones) authored by the actor.
+- **`/api/notes/create`** rejects `visibleUserIds`, `reactionAcceptance`,
+  `renoteId`, `channelId`, `poll`, `scheduledAt`, a non-empty `fileIds`,
+  and any `visibility` other than `"public"` with an explicit
+  `UNSUPPORTED_FEATURE` error rather than silently ignoring them.
+- **`/api/notes/children`**'s `depth` request field is accepted but not
+  otherwise enforced: `ListChildren` already returns only direct children
+  regardless of the requested depth.
+
 ## Non-goals and implementation boundary
 
 This document does not implement endpoint handlers, a database, migrations,

@@ -1,10 +1,11 @@
 # Configuration
 
 This document covers the configuration and HTTP-routing foundation added by
-Issue #3, the SQLite persistence layer added by Issue #4, and the bridged
-MiAuth authentication flow added by Issue #5. It does not cover the post API
-or LLM configuration; those are added by later issues and will extend this
-document rather than replace it. The normative design for MiAuth is
+Issue #3, the SQLite persistence layer added by Issue #4, the bridged
+MiAuth authentication flow added by Issue #5, and the Aria/Misskey-compatible
+note API added by Issue #7. It does not cover LLM configuration; that is
+added by a later issue and will extend this document rather than replace
+it. The normative design for MiAuth is
 [`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
 (ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -200,6 +201,42 @@ first-login-wins path.
   `OWNER_DISPLAY_NAME` are config-only for Issue #5; a fast-follow issue is
   expected to add an editable, database-backed profile so an operator does
   not need to edit config to change them.
+
+## Note API
+
+Issue #7 adds the minimal Aria/Misskey-compatible note surface
+[`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md) specifies. This
+section covers only the operational surface (routes, scopes, wiring); the
+wire contract itself (request/response shapes, error codes, pagination and
+visibility decisions) is normative there, in its "Issue #7 implementation
+notes" section.
+
+### Routes
+
+| Route | Auth | Scope |
+| --- | --- | --- |
+| `POST /api/meta` | Anonymous | — |
+| `POST /api/endpoints` | Anonymous | — |
+| `POST /api/i` | `i` token | `read:account` |
+| `POST /api/notes/create` | `i` token | `write:notes` |
+| `POST /api/notes/timeline` | `i` token | `read:notes` |
+| `POST /api/notes/show` | `i` token | `read:notes` |
+| `POST /api/notes/conversation` | `i` token | `read:notes` |
+| `POST /api/notes/children` | `i` token | `read:notes` |
+
+These routes register only when `httpserver.Options.TimelineService` is
+also set alongside `MiAuthService` (see `internal/httpserver.NewServer`);
+`cmd/server` always wires both. `POST /api/notes/update` and the
+WebSocket `/streaming` timeline channel are deliberately not implemented
+(docs/compat/aria-v1.5.11.md classifies both **不要** for this MVP), so
+`POST /api/endpoints` never advertises `notes/update`.
+
+### Wiring
+
+`internal/timeline.Service` is the use-case layer these handlers call
+into; `cmd/server` constructs it from the same `*sqlite.DB` as
+`internal/miauth.Service` (one `db.Repos`, two independent services, no
+shared mutable state beyond the database itself).
 
 ## SQLite
 
