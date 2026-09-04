@@ -116,7 +116,13 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 	}
 	limit := min(available, m.cfg.ClaimBatchSize)
 	now := m.now().UTC()
-	claimed, err := m.repo.Claim(claimCtx, m.cfg.WorkerID, limit, now, now.Add(m.cfg.LeaseDuration))
+	// WorkerID alone is not a sufficient fencing value: this same process can
+	// reclaim one of its expired leases while the old handler is still winding
+	// down, and operators can accidentally reuse an ID across processes. Give
+	// every claim operation a new generation so stale transitions cannot match
+	// a later lease, even when the human-readable worker identity is unchanged.
+	leaseOwner := m.newLeaseOwner()
+	claimed, err := m.repo.Claim(claimCtx, leaseOwner, limit, now, now.Add(m.cfg.LeaseDuration))
 	if err != nil {
 		if claimCtx.Err() == nil {
 			m.logger.Warn("job claim failed", "worker_id", m.cfg.WorkerID, "error_category", errorCategory(err))
@@ -139,6 +145,10 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 			m.runOne(workerCtx, job)
 		}()
 	}
+}
+
+func (m *Manager) newLeaseOwner() string {
+	return m.cfg.WorkerID + ":" + domain.NewID()
 }
 
 func (m *Manager) runOne(parent context.Context, job domain.Job) {
@@ -168,6 +178,9 @@ func (m *Manager) runOne(parent context.Context, job domain.Job) {
 	for {
 		select {
 		case err := <-result:
+			// Only cancellation of this worker context is a shutdown retry.
+			// A handler-owned timeout returned while jobCtx is still live is an
+			// ordinary retryable failure and must still obey MaxAttempts.
 			if jobCtx.Err() != nil {
 				m.retryCancelled(job, boundedErrorOr(err, "worker shutdown cancelled handler"))
 				return
@@ -189,7 +202,7 @@ func (m *Manager) runOne(parent context.Context, job domain.Job) {
 
 func (m *Manager) confirmLease(ctx context.Context, job domain.Job, periodic bool) bool {
 	now := m.now().UTC()
-	err := m.repo.Renew(ctx, job.ID, m.cfg.WorkerID, now.Add(m.cfg.LeaseDuration), now)
+	err := m.repo.Renew(ctx, job.ID, claimedLeaseOwner(job), now.Add(m.cfg.LeaseDuration), now)
 	if err == nil {
 		if periodic {
 			m.logger.Debug("job lease renewed", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt)
@@ -212,7 +225,7 @@ func (m *Manager) confirmLease(ctx context.Context, job domain.Job, periodic boo
 func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) {
 	now := m.now().UTC()
 	if handlerErr == nil {
-		if err := m.repo.Succeed(ctx, job.ID, m.cfg.WorkerID, now); err != nil {
+		if err := m.repo.Succeed(ctx, job.ID, claimedLeaseOwner(job), now); err != nil {
 			m.logTransitionFailure(job, "succeed", err)
 			return
 		}
@@ -221,14 +234,9 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 	}
 
 	lastError := boundedError(handlerErr)
-	if errors.Is(handlerErr, context.Canceled) || errors.Is(handlerErr, context.DeadlineExceeded) {
-		m.retry(ctx, job, now, lastError, "handler_cancelled")
-		return
-	}
-
 	var permanent *PermanentError
 	if errors.As(handlerErr, &permanent) {
-		if err := m.repo.Fail(ctx, job.ID, m.cfg.WorkerID, lastError, now); err != nil {
+		if err := m.repo.Fail(ctx, job.ID, claimedLeaseOwner(job), lastError, now); err != nil {
 			m.logTransitionFailure(job, "fail", err)
 			return
 		}
@@ -237,7 +245,7 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 	}
 
 	if job.Attempt+1 >= m.cfg.MaxAttempts {
-		if err := m.repo.Kill(ctx, job.ID, m.cfg.WorkerID, lastError, now); err != nil {
+		if err := m.repo.Kill(ctx, job.ID, claimedLeaseOwner(job), lastError, now); err != nil {
 			m.logTransitionFailure(job, "kill", err)
 			return
 		}
@@ -249,11 +257,18 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 }
 
 func (m *Manager) retry(ctx context.Context, job domain.Job, nextRunAt time.Time, lastError, category string) {
-	if err := m.repo.Retry(ctx, job.ID, m.cfg.WorkerID, nextRunAt, lastError, m.now().UTC()); err != nil {
+	if err := m.repo.Retry(ctx, job.ID, claimedLeaseOwner(job), nextRunAt, lastError, m.now().UTC()); err != nil {
 		m.logTransitionFailure(job, "retry", err)
 		return
 	}
 	m.logger.Info("job scheduled for retry", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt+1, "error_category", category)
+}
+
+func claimedLeaseOwner(job domain.Job) string {
+	if job.LeaseOwner == nil {
+		return ""
+	}
+	return *job.LeaseOwner
 }
 
 func (m *Manager) retryCancelled(job domain.Job, lastError string) {
@@ -332,8 +347,11 @@ func withDefaults(cfg Config) Config {
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = time.Second
 	}
-	if cfg.BackoffMax < cfg.BackoffBase {
+	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = 10 * time.Minute
+	}
+	if cfg.BackoffMax < cfg.BackoffBase {
+		cfg.BackoffMax = cfg.BackoffBase
 	}
 	if cfg.BackoffJitter < 0 || cfg.BackoffJitter > 1 {
 		cfg.BackoffJitter = 0.2

@@ -26,3 +26,13 @@ func TestBackoffDoublesWithoutJitterAndCaps(t *testing.T) {
 		}
 	}
 }
+
+func TestWithDefaultsKeepsBackoffMaximumAtLeastBase(t *testing.T) {
+	cfg := withDefaults(Config{BackoffBase: time.Hour})
+	if cfg.BackoffMax < cfg.BackoffBase {
+		t.Fatalf("BackoffMax = %v, want at least BackoffBase %v", cfg.BackoffMax, cfg.BackoffBase)
+	}
+	if got := backoff(cfg, 0); got > cfg.BackoffMax {
+		t.Fatalf("backoff() = %v, exceeds BackoffMax %v", got, cfg.BackoffMax)
+	}
+}

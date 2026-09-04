@@ -47,7 +47,9 @@ type JobRepository interface {
 	Get(ctx context.Context, id string) (Job, error)
 	// Claim atomically leases up to limit pending jobs whose next_run_at
 	// has passed, or whose previous lease has expired, transitioning them
-	// to running under leaseOwner until leaseExpiresAt.
+	// to running under leaseOwner until leaseExpiresAt. leaseOwner must be
+	// unique for each claim operation so a later reclaim by the same logical
+	// worker still fences the earlier lease generation.
 	Claim(ctx context.Context, leaseOwner string, limit int, now, leaseExpiresAt time.Time) ([]Job, error)
 	// Renew extends a still-running job's lease. It returns ErrConflict if
 	// the job is no longer running under leaseOwner.

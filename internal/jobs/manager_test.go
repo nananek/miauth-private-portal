@@ -288,20 +288,25 @@ func TestManagerRenewsLeaseForLongRunningHandler(t *testing.T) {
 	}
 }
 
-func TestStaleWorkerCannotFinalizeReclaimedJob(t *testing.T) {
+func TestStaleLeaseGenerationCannotFinalizeJobReclaimedBySameWorker(t *testing.T) {
 	db := newJobsTestDB(t)
 	job := enqueueTestJob(t, db, "test", "{}", nil)
 	now := time.Now().UTC()
-	claimed, err := db.Jobs.Claim(t.Context(), "worker-1", 1, now, now.Add(time.Millisecond))
+	m := NewManager(db.Jobs, fastConfig("worker-1"), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	firstOwner := m.newLeaseOwner()
+	claimed, err := db.Jobs.Claim(t.Context(), firstOwner, 1, now, now.Add(time.Millisecond))
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("first Claim() = %v, %v", claimed, err)
 	}
-	reclaimed, err := db.Jobs.Claim(t.Context(), "worker-2", 1, now.Add(time.Second), now.Add(time.Minute))
+	secondOwner := m.newLeaseOwner()
+	if firstOwner == secondOwner {
+		t.Fatal("successive claims reused the same lease owner")
+	}
+	reclaimed, err := db.Jobs.Claim(t.Context(), secondOwner, 1, now.Add(time.Second), now.Add(time.Minute))
 	if err != nil || len(reclaimed) != 1 {
 		t.Fatalf("reclaim = %v, %v", reclaimed, err)
 	}
 
-	m := NewManager(db.Jobs, fastConfig("worker-1"), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	var calls atomic.Int32
 	m.Register("test", func(context.Context, domain.Job) error {
 		calls.Add(1)
@@ -313,7 +318,7 @@ func TestStaleWorkerCannotFinalizeReclaimedJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != domain.JobRunning || got.LeaseOwner == nil || *got.LeaseOwner != "worker-2" {
+	if got.State != domain.JobRunning || got.LeaseOwner == nil || *got.LeaseOwner != secondOwner {
 		t.Fatalf("stale worker changed reclaimed job: %+v", got)
 	}
 	if calls.Load() != 0 {
@@ -339,6 +344,27 @@ func TestManagerExhaustsRetriesIntoDead(t *testing.T) {
 	stopManager(t, cancel, errCh)
 	if calls.Load() != 3 || got.Attempt != 2 {
 		t.Fatalf("calls=%d attempt=%d, want calls=3 attempt=2", calls.Load(), got.Attempt)
+	}
+}
+
+func TestHandlerDeadlineExhaustsRetriesIntoDead(t *testing.T) {
+	db := newJobsTestDB(t)
+	job := enqueueTestJob(t, db, "test", "{}", nil)
+	cfg := fastConfig("worker-1")
+	cfg.MaxAttempts = 2
+	cfg.BackoffBase = time.Millisecond
+	cfg.BackoffMax = time.Millisecond
+	var calls atomic.Int32
+	m := NewManager(db.Jobs, cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	m.Register("test", func(context.Context, domain.Job) error {
+		calls.Add(1)
+		return context.DeadlineExceeded
+	})
+	cancel, errCh := startManager(t, m)
+	got := waitForJob(t, db, job.ID, func(j domain.Job) bool { return j.State == domain.JobDead })
+	stopManager(t, cancel, errCh)
+	if calls.Load() != 2 || got.Attempt != 1 {
+		t.Fatalf("calls=%d attempt=%d, want calls=2 attempt=1", calls.Load(), got.Attempt)
 	}
 }
 

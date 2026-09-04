@@ -70,7 +70,7 @@ catch that class of mistake during local development.
 | `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive and at least `1s` shorter than `HTTP_WRITE_TIMEOUT`. |
 | `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
 | `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
-| `JOBS_WORKER_ID` | no | hostname + PID | Lease owner identifier. Set a stable, deployment-unique value when operational logs need one; an empty config-file value uses the generated default. |
+| `JOBS_WORKER_ID` | no | hostname + PID | Human-readable worker identity used in logs and as a lease-owner prefix. Each claim appends a random fencing value, so a reclaim never reuses the previous lease generation. Set a deployment-unique value when operational logs need one; an empty config-file value uses the generated default. |
 | `JOBS_POLL_INTERVAL` | no | `1s` | How often an idle worker checks for due or lease-expired work. Positive duration. |
 | `JOBS_CLAIM_BATCH_SIZE` | no | `10` | Maximum jobs claimed per poll, 1-100; available concurrency can reduce it further. |
 | `JOBS_LEASE_DURATION` | no | `30s` | Initial and renewed lease duration. Positive and greater than `JOBS_LEASE_RENEW_MARGIN`. |
@@ -310,6 +310,9 @@ SQLite connection pool and cancellation context. Jobs use the existing
 `jobs` table and migration `0006_jobs.sql`; Issue #8 adds no schema change.
 The worker atomically claims due `pending` rows and expired `running` leases,
 renews long-running leases, and limits claims to its available concurrency.
+Each claim stores a fresh fencing value in `lease_owner`; completion and retry
+transitions compare that exact value so an older handler cannot finalize a job
+after a later claim, including a reclaim by the same logical worker.
 This provides at-least-once execution and restart recovery. Handlers must make
 their result writes idempotent because a process can stop after an external
 side effect but before recording `succeeded`.
