@@ -78,6 +78,42 @@ func (r *entryRepository) ListTimeline(ctx context.Context, page domain.Page, in
 	return scanEntries(rows)
 }
 
+func (r *entryRepository) ListTimelineDesc(ctx context.Context, before *domain.Cursor, limit int, includeHidden bool) ([]domain.Entry, error) {
+	query := entrySelectColumns + ` FROM entries WHERE 1 = 1`
+	var args []any
+	if !includeHidden {
+		query += ` AND archived_at IS NULL AND hidden_at IS NULL`
+	}
+	if before != nil {
+		// The row-value comparison mirrors ListTimeline's cursor, just
+		// reversed: strictly older than before in (created_at, id) order.
+		query += ` AND (created_at, id) < (?, ?)`
+		args = append(args, formatTime(before.CreatedAt), before.ID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := r.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list timeline desc: %w", err)
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
+func (r *entryRepository) CountByAuthor(ctx context.Context, actorID string) (int, error) {
+	var count int
+	if err := r.q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM entries WHERE author_actor_id = ?`, actorID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count entries by author: %w", err)
+	}
+	return count, nil
+}
+
 func (r *entryRepository) UpdateBody(ctx context.Context, id, body string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE entries SET body = ?, updated_at = ? WHERE id = ?`, body, formatTime(at), id)
