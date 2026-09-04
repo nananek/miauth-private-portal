@@ -46,6 +46,9 @@ func (s *Server) handleMiAuthStart(w http.ResponseWriter, r *http.Request) {
 		// ErrClientCallbackNotAllowed and ErrSessionUnavailable are both
 		// rendered identically: neither reveals which case applies, and
 		// there is nothing sensitive in either to protect beyond that.
+		if !errors.Is(err, miauth.ErrClientCallbackNotAllowed) && !errors.Is(err, miauth.ErrSessionUnavailable) {
+			s.logger.Error("miauth start failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		}
 		writePlainTextPage(w, http.StatusBadRequest, "This sign-in request cannot be started.")
 		return
 	}
@@ -65,6 +68,9 @@ func (s *Server) handleMiAuthBootstrapStart(w http.ResponseWriter, r *http.Reque
 		// A generic 404 either way: an already-bound deployment, an
 		// unknown gate, an expired gate, and an already-consumed gate
 		// are all indistinguishable to whoever is probing this URL.
+		if !errors.Is(err, miauth.ErrBootstrapUnavailable) {
+			s.logger.Error("miauth bootstrap start failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		}
 		writePlainTextPage(w, http.StatusNotFound, "Not found.")
 		return
 	}
@@ -106,6 +112,9 @@ func (s *Server) handleMiAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.miauth.HandleUpstreamCallback(r.Context(), id, state)
 	if err != nil {
+		if !errors.Is(err, miauth.ErrCallbackInvalid) && !errors.Is(err, miauth.ErrUpstreamVerification) && !errors.Is(err, miauth.ErrOwnerBindingDenied) {
+			s.logger.Error("miauth callback failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		}
 		writePlainTextPage(w, http.StatusBadRequest, "Authentication failed. Please try again from Aria.")
 		return
 	}

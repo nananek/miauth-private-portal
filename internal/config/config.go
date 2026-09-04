@@ -272,9 +272,9 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.DB.BusyTimeout = time.Duration(busyTimeoutMS) * time.Millisecond
 	cfg.DB.MaxOpenConns = parseOptionalInt(values, KeyDBMaxOpenConns, 8, dbMaxOpenConnsMin, dbMaxOpenConnsMax, &errs)
 
-	cfg.Auth.LocalOrigin = values[KeyLocalOrigin]
+	cfg.Auth.LocalOrigin = strings.TrimSuffix(values[KeyLocalOrigin], "/")
 	validateOrigin(&errs, KeyLocalOrigin, cfg.Auth.LocalOrigin, cfg.Env)
-	cfg.Auth.IdentityOrigin = values[KeyIdentityOrigin]
+	cfg.Auth.IdentityOrigin = strings.TrimSuffix(values[KeyIdentityOrigin], "/")
 	validateOrigin(&errs, KeyIdentityOrigin, cfg.Auth.IdentityOrigin, cfg.Env)
 	cfg.Auth.AllowedMisskeyUserID = parseOptionalString(values, KeyAllowedMisskeyUserID, "")
 	cfg.Auth.AriaClientCallbacks = parseOptionalCallbackList(values, KeyAriaClientCallbacks, &errs)

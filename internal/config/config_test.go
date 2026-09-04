@@ -498,6 +498,28 @@ func TestLoad_DevelopmentAcceptsHTTPOrigin(t *testing.T) {
 	}
 }
 
+// TestLoad_OriginTrimsTrailingSlash backs the fix for a LOCAL_ORIGIN or
+// IDENTITY_ORIGIN configured with a single trailing slash: it must be
+// normalized to a bare origin, not stored as-is, or every URL this
+// service builds by naively concatenating "origin + /path" ends up with
+// a double slash.
+func TestLoad_OriginTrimsTrailingSlash(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
+		KeyAppEnv:         "development",
+		KeyLocalOrigin:    "https://portal.example/",
+		KeyIdentityOrigin: "https://misskey.example/",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Auth.LocalOrigin != "https://portal.example" {
+		t.Errorf("LocalOrigin = %q, want no trailing slash", cfg.Auth.LocalOrigin)
+	}
+	if cfg.Auth.IdentityOrigin != "https://misskey.example" {
+		t.Errorf("IdentityOrigin = %q, want no trailing slash", cfg.Auth.IdentityOrigin)
+	}
+}
+
 func TestLoad_ProductionRejectsHTTPOrigin(t *testing.T) {
 	_, err := Load(LoadOptions{Getenv: getenvFromMap(map[string]string{
 		KeyAppEnv:         "production",

@@ -124,7 +124,7 @@ func TestLocalMiAuthSessionRepository_Deny(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID); err != nil {
+	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID, now); err != nil {
 		t.Fatalf("Deny: %v", err)
 	}
 
@@ -159,8 +159,29 @@ func TestLocalMiAuthSessionRepository_Deny_RejectsAlreadyAuthorized(t *testing.T
 		t.Fatal(err)
 	}
 
-	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID); !errors.Is(err, domain.ErrConflict) {
+	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID, now); !errors.Is(err, domain.ErrConflict) {
 		t.Errorf("Deny() after Authorize error = %v, want ErrConflict", err)
+	}
+}
+
+// TestLocalMiAuthSessionRepository_Deny_RejectsExpired backs the same
+// CAS-guard convention every sibling method (Authorize, Consume,
+// BootstrapGates.Fail) already has: Deny must not affect a row whose TTL
+// has already passed, even though it was still in the created state.
+func TestLocalMiAuthSessionRepository_Deny_RejectsExpired(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	s := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID, now.Add(time.Hour))
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Deny() on expired session error = %v, want ErrConflict", err)
 	}
 }
 
@@ -243,7 +264,7 @@ func TestUpstreamMiAuthSessionRepository_Deny(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.UpstreamMiAuth.Deny(t.Context(), upstream.ID); err != nil {
+	if err := db.UpstreamMiAuth.Deny(t.Context(), upstream.ID, now); err != nil {
 		t.Fatalf("Deny: %v", err)
 	}
 
@@ -256,6 +277,33 @@ func TestUpstreamMiAuthSessionRepository_Deny(t *testing.T) {
 	}
 	if err := db.UpstreamMiAuth.Authorize(t.Context(), upstream.ID, "wrong-user", now); !errors.Is(err, domain.ErrConflict) {
 		t.Errorf("Authorize() after Deny error = %v, want ErrConflict", err)
+	}
+}
+
+// TestUpstreamMiAuthSessionRepository_Deny_RejectsExpired mirrors
+// TestLocalMiAuthSessionRepository_Deny_RejectsExpired: Deny must not
+// affect a row whose TTL has already passed.
+func TestUpstreamMiAuthSessionRepository_Deny_RejectsExpired(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	local := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), local); err != nil {
+		t.Fatal(err)
+	}
+	upstream := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), LocalSessionID: &local.RouteSessionID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	if err := db.UpstreamMiAuth.Create(t.Context(), upstream); err != nil {
+		t.Fatal(err)
+	}
+
+	err := db.UpstreamMiAuth.Deny(t.Context(), upstream.ID, now.Add(time.Hour))
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Deny() on expired session error = %v, want ErrConflict", err)
 	}
 }
 

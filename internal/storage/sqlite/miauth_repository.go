@@ -131,15 +131,16 @@ func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSession
 	return requireRowAffectedConflict(res)
 }
 
-// Deny atomically transitions a created session to denied, for a
-// callback whose verification did not succeed (wrong user, state
+// Deny atomically transitions a created, unexpired session to denied,
+// for a callback whose verification did not succeed (wrong user, state
 // mismatch, malformed or replayed callback). See the interface doc for
 // why this is a distinct terminal write rather than leaving the session
 // to expire.
-func (r *localMiAuthSessionRepository) Deny(ctx context.Context, routeSessionID string) error {
+func (r *localMiAuthSessionRepository) Deny(ctx context.Context, routeSessionID string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
-		`UPDATE miauth_local_sessions SET status = 'denied' WHERE route_session_id = ? AND status = 'created'`,
-		routeSessionID,
+		`UPDATE miauth_local_sessions SET status = 'denied'
+		 WHERE route_session_id = ? AND status = 'created' AND expires_at > ?`,
+		routeSessionID, formatTime(at),
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -242,13 +243,14 @@ func (r *upstreamMiAuthSessionRepository) Consume(ctx context.Context, id string
 	return requireRowAffectedConflict(res)
 }
 
-// Deny atomically transitions a created session to denied — see
-// localMiAuthSessionRepository.Deny for why this is a distinct terminal
-// write rather than leaving the session to expire.
-func (r *upstreamMiAuthSessionRepository) Deny(ctx context.Context, id string) error {
+// Deny atomically transitions a created, unexpired session to denied —
+// see localMiAuthSessionRepository.Deny for why this is a distinct
+// terminal write rather than leaving the session to expire.
+func (r *upstreamMiAuthSessionRepository) Deny(ctx context.Context, id string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
-		`UPDATE miauth_upstream_sessions SET status = 'denied' WHERE id = ? AND status = 'created'`,
-		id,
+		`UPDATE miauth_upstream_sessions SET status = 'denied'
+		 WHERE id = ? AND status = 'created' AND expires_at > ?`,
+		id, formatTime(at),
 	)
 	if err != nil {
 		return mapWriteError(err)

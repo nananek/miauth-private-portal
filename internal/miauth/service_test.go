@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -588,6 +589,57 @@ func TestStartBootstrapSession_RejectsOnceAlreadyBound(t *testing.T) {
 
 	if _, err := ts.StartBootstrapSession(t.Context(), gateID); !errors.Is(err, ErrBootstrapUnavailable) {
 		t.Errorf("StartBootstrapSession() once bound, error = %v, want ErrBootstrapUnavailable", err)
+	}
+}
+
+// TestStartBootstrapSession_UpstreamSessionExpiryCappedByGate backs the
+// fix for a bootstrap gate expiring before its linked upstream session's
+// own TTL would: without the cap, a callback landing in that window
+// would pass the upstream session's own not-expired check, run the
+// whole HandleUpstreamCallback transaction (creating the Owner actor and
+// OwnerBinding), and only then fail at BootstrapGates.Consume's CAS,
+// rolling back the just-created binding. With the cap, the upstream
+// session itself is already expired by then, so the callback is
+// rejected up front (ErrCallbackInvalid) before any write happens.
+func TestStartBootstrapSession_UpstreamSessionExpiryCappedByGate(t *testing.T) {
+	ts := newTestService(t, Config{IdentityOrigin: testIdentityOrigin, OwnerUsername: "owner"})
+
+	gateID, err := ts.IssueBootstrapGate(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait long enough into the gate's 15-minute TTL that the upstream
+	// session's own 10-minute TTL, if left uncapped, would outlive the
+	// gate.
+	ts.clock.Advance(6 * time.Minute)
+	started, err := ts.StartBootstrapSession(t.Context(), gateID)
+	if err != nil {
+		t.Fatalf("StartBootstrapSession: %v", err)
+	}
+	upstream, err := ts.db.UpstreamMiAuth.Get(t.Context(), started.UpstreamSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !upstream.ExpiresAt.Equal(ts.clock.Now().Add(9 * time.Minute)) {
+		t.Errorf("upstream.ExpiresAt = %v, want capped to the gate's expiry (%v)",
+			upstream.ExpiresAt, ts.clock.Now().Add(9*time.Minute))
+	}
+
+	// Advance past the gate's (and now the capped session's) expiry, but
+	// short of what the session's own uncapped 10-minute TTL would have
+	// allowed.
+	ts.clock.Advance(9*time.Minute + 30*time.Second)
+	ts.provider.check = func(context.Context, string) (string, bool, error) {
+		return "any-upstream-user", true, nil
+	}
+
+	if _, err := ts.HandleUpstreamCallback(t.Context(), started.UpstreamSessionID, upstream.State); !errors.Is(err, ErrCallbackInvalid) {
+		t.Errorf("HandleUpstreamCallback() after gate expiry, error = %v, want ErrCallbackInvalid", err)
+	}
+
+	if _, err := ts.db.OwnerBindings.Get(t.Context()); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("OwnerBindings.Get() = %v, want ErrNotFound (no partial owner bind left behind)", err)
 	}
 }
 

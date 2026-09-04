@@ -210,21 +210,36 @@ func (s *Service) createLocalAndUpstreamSession(
 		return err
 	}
 
-	upstreamState := domain.NewID()
-	upstream := domain.UpstreamMiAuthSession{
-		ID:             domain.NewID(),
-		LocalSessionID: &routeSessionID,
-		IdentityOrigin: s.cfg.IdentityOrigin,
-		State:          upstreamState,
-		Status:         domain.MiAuthCreated,
-		CreatedAt:      now,
-		ExpiresAt:      now.Add(upstreamSessionTTL),
-	}
+	upstream := s.newUpstreamSession(&routeSessionID, nil, nil, now)
 	if err := repos.UpstreamMiAuth.Create(ctx, upstream); err != nil {
 		return err
 	}
-	*out = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstreamState}
+	*out = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstream.State}
 	return nil
+}
+
+// newUpstreamSession builds the UpstreamMiAuthSession row shared by the
+// ordinary (localSessionID set) and bootstrap (bootstrapGateID set) start
+// flows. Exactly one of localSessionID or bootstrapGateID is non-nil.
+// When bound to a gate, the session's expiry is capped at gateExpiresAt
+// so a callback landing after the gate itself has expired can never
+// still find an unexpired session to authorize/consume — see
+// StartBootstrapSession's doc comment.
+func (s *Service) newUpstreamSession(localSessionID, bootstrapGateID *string, gateExpiresAt *time.Time, now time.Time) domain.UpstreamMiAuthSession {
+	expiresAt := now.Add(upstreamSessionTTL)
+	if gateExpiresAt != nil && gateExpiresAt.Before(expiresAt) {
+		expiresAt = *gateExpiresAt
+	}
+	return domain.UpstreamMiAuthSession{
+		ID:              domain.NewID(),
+		LocalSessionID:  localSessionID,
+		BootstrapGateID: bootstrapGateID,
+		IdentityOrigin:  s.cfg.IdentityOrigin,
+		State:           domain.NewID(),
+		Status:          domain.MiAuthCreated,
+		CreatedAt:       now,
+		ExpiresAt:       expiresAt,
+	}
 }
 
 // StartBootstrapSession handles GET /miauth/bootstrap/{gate}: it
@@ -268,20 +283,11 @@ func (s *Service) StartBootstrapSession(ctx context.Context, gateID string) (Sta
 			return uErr
 		}
 
-		upstreamState := domain.NewID()
-		upstream := domain.UpstreamMiAuthSession{
-			ID:              domain.NewID(),
-			BootstrapGateID: &gateID,
-			IdentityOrigin:  s.cfg.IdentityOrigin,
-			State:           upstreamState,
-			Status:          domain.MiAuthCreated,
-			CreatedAt:       now,
-			ExpiresAt:       now.Add(upstreamSessionTTL),
-		}
+		upstream := s.newUpstreamSession(nil, &gateID, &gate.ExpiresAt, now)
 		if cErr := repos.UpstreamMiAuth.Create(ctx, upstream); cErr != nil {
 			return cErr
 		}
-		started = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstreamState}
+		started = StartedSession{UpstreamSessionID: upstream.ID, UpstreamState: upstream.State}
 		return nil
 	})
 	if err != nil {
@@ -342,6 +348,10 @@ func (s *Service) HandleUpstreamCallback(ctx context.Context, upstreamSessionID,
 	if err != nil {
 		return CallbackResult{}, fmt.Errorf("%w: %v", ErrUpstreamVerification, err)
 	}
+	// s.upstream.Check is a blocking outbound HTTP call; now must be
+	// re-read afterward so every expiry-guarded write below judges
+	// expiry as of "now", not as of before the round trip.
+	now = s.clock.Now()
 	if !ok {
 		if denyErr := s.denyAttempt(ctx, upstream, now); denyErr != nil {
 			return CallbackResult{}, denyErr
@@ -418,14 +428,14 @@ func (s *Service) denyAttempt(ctx context.Context, upstream domain.UpstreamMiAut
 // non-nil error from a WithinTx callback rolls back everything the
 // callback just wrote — these writes must commit, not roll back).
 func (s *Service) denyWithinTx(ctx context.Context, repos domain.Repos, upstream domain.UpstreamMiAuthSession, now time.Time) error {
-	if err := repos.UpstreamMiAuth.Deny(ctx, upstream.ID); err != nil {
+	if err := repos.UpstreamMiAuth.Deny(ctx, upstream.ID, now); err != nil {
 		return err
 	}
 	if upstream.BootstrapGateID != nil {
 		return repos.BootstrapGates.Fail(ctx, *upstream.BootstrapGateID, now)
 	}
 	if upstream.LocalSessionID != nil {
-		return repos.LocalMiAuth.Deny(ctx, *upstream.LocalSessionID)
+		return repos.LocalMiAuth.Deny(ctx, *upstream.LocalSessionID, now)
 	}
 	return nil
 }
@@ -493,7 +503,16 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 	var result CheckResult
 	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
 		if err := repos.LocalMiAuth.Consume(ctx, routeSessionID, now); err != nil {
-			return ErrCheckNotReady
+			// ErrConflict is Consume's expected outcome whenever the
+			// session is not currently authorized (not found, still
+			// pending, expired, or already consumed/replayed) — routine
+			// and not worth logging. Any other error is a genuine
+			// storage/infra failure and must propagate so it is neither
+			// silently discarded nor confused with a routine replay.
+			if errors.Is(err, domain.ErrConflict) {
+				return ErrCheckNotReady
+			}
+			return err
 		}
 
 		local, err := repos.LocalMiAuth.Get(ctx, routeSessionID)
@@ -505,8 +524,10 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 			// LocalActorID together with the authorized status Consume
 			// requires, atomically, within this same database. Treated
 			// as a hard error rather than silently issuing a token with
-			// no owner.
-			return fmt.Errorf("miauth: consumed session %s has no local actor id", routeSessionID)
+			// no owner. routeSessionID is deliberately omitted: it is
+			// the secret Aria route-session id, and this error is logged
+			// verbatim by the caller.
+			return errors.New("miauth: consumed session has no local actor id")
 		}
 
 		owner, err := repos.Actors.Get(ctx, *local.LocalActorID)
@@ -562,9 +583,10 @@ func (s *Service) VerifyToken(ctx context.Context, rawToken, requiredScope strin
 	if !hasScope(tok.Scopes, requiredScope) {
 		return "", ErrTokenInvalid
 	}
-	if err := s.repos.APITokens.TouchLastUsed(ctx, tok.ID, s.clock.Now()); err != nil {
-		return "", err
-	}
+	// TouchLastUsed is best-effort bookkeeping, not part of what makes
+	// the token valid: a transient failure writing it must not reject an
+	// otherwise valid, correctly-scoped, unrevoked token.
+	_ = s.repos.APITokens.TouchLastUsed(ctx, tok.ID, s.clock.Now())
 	return tok.LocalActorID, nil
 }
 
