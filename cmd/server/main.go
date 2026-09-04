@@ -16,6 +16,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/provider/misskey"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
 func main() {
@@ -74,6 +75,7 @@ func run() error {
 		OwnerUsername:        cfg.Auth.OwnerUsername,
 		OwnerDisplayName:     cfg.Auth.OwnerDisplayName,
 	})
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
 
 	opts := httpserver.Options{
 		Addr:                cfg.HTTP.Addr(),
@@ -86,6 +88,7 @@ func run() error {
 		MiAuthService:       miauthSvc,
 		LocalOrigin:         cfg.Auth.LocalOrigin,
 		IdentityOrigin:      cfg.Auth.IdentityOrigin,
+		TimelineService:     timelineSvc,
 	}
 
 	return httpserver.Run(ctx, opts, logger, reg)
