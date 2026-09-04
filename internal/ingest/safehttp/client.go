@@ -95,21 +95,30 @@ func NewClient(cfg Config) *Client {
 	}
 
 	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > cfg.MaxRedirects {
-				return fmt.Errorf("%w: exceeded %d redirects", ErrPolicyViolation, cfg.MaxRedirects)
-			}
-			if err := validateScheme(req.URL.Scheme, cfg.AllowInsecureHTTP); err != nil {
-				return err
-			}
-			if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-				return fmt.Errorf("%w: redirect downgrades scheme from https to %q", ErrPolicyViolation, req.URL.Scheme)
-			}
-			return nil
-		},
+		Transport:     transport,
+		CheckRedirect: checkRedirect(cfg),
 	}
 	return &Client{cfg: cfg, httpClient: client}
+}
+
+// checkRedirect builds an http.Client.CheckRedirect func enforcing cfg's
+// redirect-count and scheme policy. It is a standalone function (rather
+// than a closure inlined into NewClient) so tests can exercise the
+// policy directly against hand-built requests, without needing a real
+// TLS handshake to exercise the https-to-http downgrade rule.
+func checkRedirect(cfg Config) func(req *http.Request, via []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) > cfg.MaxRedirects {
+			return fmt.Errorf("%w: exceeded %d redirects", ErrPolicyViolation, cfg.MaxRedirects)
+		}
+		if err := validateScheme(req.URL.Scheme, cfg.AllowInsecureHTTP); err != nil {
+			return err
+		}
+		if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+			return fmt.Errorf("%w: redirect downgrades scheme from https to %q", ErrPolicyViolation, req.URL.Scheme)
+		}
+		return nil
+	}
 }
 
 // Do validates req's own scheme, then performs it, following redirects
