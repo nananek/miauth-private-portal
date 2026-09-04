@@ -4,8 +4,9 @@ This document covers the configuration and HTTP-routing foundation added by
 Issue #3, the SQLite persistence layer added by Issue #4, the local MiAuth
 authentication flow added by Issues #5 and #28, the Aria/Misskey-compatible
 note API added by Issue #7, the durable job worker added by Issue #8, the
-LLM reply/follow-up generation added by Issue #9, and the LLM post
-classification added by Issue #10. The normative design for MiAuth is
+LLM reply/follow-up generation added by Issue #9, the LLM post
+classification added by Issue #10, and the RSS/Atom ingestion framework
+added by Issue #11. The normative design for MiAuth is
 [`docs/decisions/0002-ssh-cli-auth.md`](../decisions/0002-ssh-cli-auth.md)
 (ADR-0002) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -90,6 +91,14 @@ catch that class of mistake during local development.
 | `LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS` | no | `1024` | 1-32768. Upper bound on one classification completion's length. |
 | `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES` | no | `20` | 1-500. Maximum same-thread candidate entries offered as related-post candidates. Independent budget from `LLM_THREAD_CONTEXT_MAX_MESSAGES`. |
 | `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS` | no | `8000` | 1-200000. Maximum combined character length of included candidate entries. Independent budget from `LLM_THREAD_CONTEXT_MAX_CHARS`. |
+| `RSS_ENABLED` | no | `false` | Gates Issue #11's RSS/Atom ingestion entirely. While `false`, no `domain.ExternalSource` row is ever seeded from `RSS_FEED_URLS`, no adapter/scheduler is constructed, and no request ever reaches a configured feed URL. |
+| `RSS_FEED_URLS` | required if `RSS_ENABLED=true` | `""` | Comma-separated list of RSS/Atom feed URLs, seeded as `external_sources` rows (`kind="rss"`) at startup. Commas inside a URL's own path or query are retained (same splitting rule as `ARIA_CLIENT_CALLBACKS`); a separator is a comma followed by the next absolute URL. Each entry must be an absolute `http(s)` URL. |
+| `RSS_POLL_INTERVAL` | no | `15m` | How often each configured feed is re-fetched. Positive duration, must exceed `RSS_FETCH_TIMEOUT`. |
+| `RSS_FETCH_TIMEOUT` | no | `15s` | Bounds a single feed fetch's HTTP round trip. Positive duration, must be less than `RSS_POLL_INTERVAL`. |
+| `RSS_MAX_RESPONSE_BYTES` | no | `2097152` (2 MiB) | Integer of at least 1. Bounds how much of a feed response is read into memory; a larger response fails the fetch. |
+| `RSS_MAX_REDIRECTS` | no | `3` | 0-20. Maximum redirect hops a feed fetch follows; 0 disallows any redirect. |
+| `RSS_SUMMARY_MAX_CHARS` | no | `4000` | 1-100000. Bounds each ingested item's normalized title/body length after HTML tags are stripped. |
+| `RSS_ALLOW_INSECURE_HTTP` | no | `false` | When `false` (the default), any `http://` entry in `RSS_FEED_URLS` fails config validation — mirroring `LOCAL_ORIGIN`'s production `https` enforcement. Set `true` only for a trusted internal/test feed. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -516,6 +525,131 @@ classifications flagged accordingly, most recently generated first. These
 are Go API (use-case layer) only — no new Aria/Misskey-compatible HTTP
 endpoint exists for them, since Aria has no equivalent concept; a future
 UI or interface would need its own issue.
+
+## RSS/Atom ingestion
+
+Issue #11 adds `internal/ingest`, an extensible external-source ingestion
+framework, and its first adapter, `internal/ingest/rss` (RSS 2.0 and Atom).
+An adapter turns one external source's items into `EntryNews`/`EntryMail`
+timeline root entries, with the same "a source outage never affects a user
+post" isolation this service already gives LLM generation and
+classification: a broken or unreachable feed only ever affects its own
+durable jobs, never `notes/create`, another source, or the durable job
+worker itself.
+
+### Framework
+
+- `internal/ingest.Adapter` is the narrow interface a source kind
+  implements: `Kind()` names the `domain.ExternalSource.Kind` value it
+  handles (`"rss"`), and `Fetch(ctx, source, cursor)` retrieves and
+  normalizes that source's new items since `cursor` (an adapter-opaque
+  string). Issue #12's IMAP adapter is expected to implement the same
+  interface without this framework changing.
+- `internal/ingest.Service` implements the single job type both today's
+  RSS adapter and any future adapter share:
+  `external_source_poll` (`internal/ingest.JobType`), registered only while
+  `RSS_ENABLED=true`. `Service.Handle` looks up the claimed job's
+  `domain.ExternalSource.Kind` in its adapter registry
+  (`Service.RegisterAdapter`), so adding Issue #12 only needs one more
+  `RegisterAdapter` call in `cmd/server`, never a second
+  `jobsManager.Register`.
+- `internal/ingest/safehttp.Client` is the shared SSRF-protected outbound
+  HTTP client every future HTTP-based adapter is expected to use: it
+  resolves each hop's host, rejects any address that is not a public
+  unicast IP (loopback, private, link-local, unspecified, and multicast
+  ranges are all refused, at the initial request and at every redirect
+  hop — dialing the already-validated IP directly, not re-resolving the
+  hostname, to close the DNS-rebinding TOCTOU window), enforces a fixed
+  redirect-count bound, and rejects an in-flight `https`-to-`http` scheme
+  downgrade unconditionally, even when `RSS_ALLOW_INSECURE_HTTP=true`. Its
+  test-only IP-policy override (used so a test can target an
+  `httptest.Server` on `127.0.0.1`) is a Go-level constructor argument,
+  never an `internal/config` key: a production deployment can never
+  configure its way into disabling this protection.
+
+### Job
+
+`internal/ingest.Service.Handle`, registered under job type
+`external_source_poll` only while `RSS_ENABLED=true`:
+
+1. Decodes the job payload (`{"sourceId": "..."}`) and looks up the
+   `domain.ExternalSource` row. A malformed payload, a missing source, or
+   a source whose `Kind` has no registered adapter all fail the job
+   permanently — retrying cannot fix any of them.
+2. Calls the registered adapter's `Fetch` with the source's stored
+   `cursor` (nil on a source's first-ever fetch). A conditional-fetch
+   "not modified" result (RSS/Atom: an HTTP 304) records fetch success
+   with no cursor change and returns without touching any item.
+3. For each fetched item, calls
+   `internal/timeline.Service.CreateExternalEntry`, which atomically
+   dedupes the item (by `external_sources`+`external_id`, and by a
+   content-hash `dedupe_key` fallback) and, only when it is new, creates
+   its `EntryNews`/`EntryMail` root entry and promotes the item to it in
+   one transaction. A duplicate delivery (a retried job, or the same item
+   reappearing in a later fetch) returns the existing, already-promoted
+   entry instead of creating a second one.
+4. The source's `cursor` only advances — via
+   `domain.ExternalSourceRepository.RecordFetchSuccess` — after **every**
+   item in the batch has been durably processed. If any single item's
+   `CreateExternalEntry` call fails partway through a batch, the whole job
+   fails with a plain (retryable) error and the cursor is left unchanged:
+   a retry re-processes the same batch, and `CreateExternalEntry`'s own
+   dedupe makes re-processing the items that already succeeded a no-op.
+   This is the mechanical guarantee behind "a fetch failure never silently
+   drops unprocessed items."
+5. `RecordFetchFailure` records every fetch-level failure (last error
+   category, incremented `consecutive_failures`) on the source row for
+   operator observability, independent of and in addition to
+   `internal/jobs`' own retry/backoff/dead-job bookkeeping, which this
+   never influences.
+
+Fetch failures are classified into one of `internal/ingest.Category`'s
+values (`transport`, `timeout`, and `server_error` are retryable;
+`too_large`, `client_error`, `malformed`, and `policy` — an SSRF/scheme/
+redirect policy violation — are permanent), the same
+retryable-vs-permanent shape `internal/llmreply.Category` and
+`internal/llmclassify.Category` already use.
+
+### Scheduler
+
+`internal/ingest.Scheduler` is a small periodic ticker
+`internal/jobs.Manager` itself has no equivalent of, since every other job
+producer enqueues in reaction to a user action rather than on a fixed
+interval. It re-lists configured sources and enqueues one
+`external_source_poll` job per source every `RSS_POLL_INTERVAL`
+(immediately on start, then on each tick), using an idempotency key
+derived from the source ID and the poll interval truncated to a fixed
+window, so a restart or a duplicate tick within the same window collides
+on `Jobs.Enqueue` rather than double-enqueueing. `cmd/server` runs it
+alongside the HTTP server and job worker under the same shutdown context
+only while `RSS_ENABLED=true`.
+
+### Startup seeding
+
+While `RSS_ENABLED=true`, `cmd/server` seeds one `external_sources` row
+(`kind="rss"`) per `RSS_FEED_URLS` entry at startup via
+`ExternalSourceRepository.EnsureFromConfig`, which is idempotent: a
+`(kind, uri)` pair already present is left untouched (including its
+`display_name`, `cursor`, and failure-tracking fields), never modified or
+re-seeded. **To add a source**, add its URL to `RSS_FEED_URLS` and restart
+the server; the next startup seeds it and the scheduler begins polling it
+on its next tick. There is no HTTP endpoint or CLI command for managing
+sources — like `LLM_MODEL` and the other single-owner settings in this
+document, source configuration is env/config-file only.
+
+### Untrusted external content
+
+Ingested item bodies are HTML-stripped to plain text before ever reaching
+`Entry.Body` (`internal/ingest/rss`'s `stripHTML`: tags and `<script>`/
+`<style>` element content are discarded, entities are decoded via the
+standard library's `html` package, matching AGENTS.md's "treat feeds...as
+untrusted data" and "never execute...embedded instructions"). An ingested
+entry is never fed into an LLM prompt by this framework: `EntryNews`/
+`EntryMail` entries are a distinct generation source from `notes/create`'s
+`user_post` entries, and neither `llm_generation` nor `llm_classification`
+jobs are ever enqueued for them — the same "explicit configuration
+required" rule AGENTS.md requires before external content reaches a
+prompt.
 
 ## Health and readiness
 
