@@ -3,9 +3,9 @@
 This document covers the configuration and HTTP-routing foundation added by
 Issue #3, the SQLite persistence layer added by Issue #4, the bridged
 MiAuth authentication flow added by Issue #5, and the Aria/Misskey-compatible
-note API added by Issue #7. It does not cover LLM configuration; that is
-added by a later issue and will extend this document rather than replace
-it. The normative design for MiAuth is
+note API added by Issue #7, and the durable job worker added by Issue #8. It
+does not cover LLM configuration; that is added by a later issue and will
+extend this document rather than replace it. The normative design for MiAuth is
 [`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
 (ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
 this document covers only the operational surface (config keys, routes,
@@ -70,6 +70,16 @@ catch that class of mistake during local development.
 | `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive and at least `1s` shorter than `HTTP_WRITE_TIMEOUT`. |
 | `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
 | `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
+| `JOBS_WORKER_ID` | no | hostname + PID | Lease owner identifier. Set a stable, deployment-unique value when operational logs need one; an empty config-file value uses the generated default. |
+| `JOBS_POLL_INTERVAL` | no | `1s` | How often an idle worker checks for due or lease-expired work. Positive duration. |
+| `JOBS_CLAIM_BATCH_SIZE` | no | `10` | Maximum jobs claimed per poll, 1-100; available concurrency can reduce it further. |
+| `JOBS_LEASE_DURATION` | no | `30s` | Initial and renewed lease duration. Positive and greater than `JOBS_LEASE_RENEW_MARGIN`. |
+| `JOBS_LEASE_RENEW_MARGIN` | no | `10s` | Renewal margin; renewal runs after `lease duration - margin`. Must be positive and less than the lease duration. |
+| `JOBS_MAX_ATTEMPTS` | no | `8` | Total handler executions before a retryable failure reaches `dead`, 1-100. |
+| `JOBS_BACKOFF_BASE` | no | `1s` | Base retry delay. Positive and no greater than `JOBS_BACKOFF_MAX`. |
+| `JOBS_BACKOFF_MAX` | no | `10m` | Upper bound for exponential retry delay. Positive. The worker applies fixed ±20% jitter within the base/max bounds. |
+| `JOBS_MAX_CONCURRENT` | no | `4` | Maximum handlers running in this process, 1-64. |
+| `JOBS_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Time allowed for handlers to finish after shutdown starts. Remaining handlers are cancelled and immediately requeued. |
 
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
@@ -257,8 +267,8 @@ the database. It applies three PRAGMAs through the connection DSN (as
 `_foreign_keys`, `_busy_timeout`, and `_journal_mode` query parameters)
 rather than as a one-time `PRAGMA` statement run once after `Open` returns:
 `database/sql` can open more than one physical connection over the
-program's lifetime (concurrent HTTP handlers, and eventually Issue #8's
-worker), and a PRAGMA executed only against the first connection would
+program's lifetime (concurrent HTTP handlers and Issue #8's worker), and a
+PRAGMA executed only against the first connection would
 never reach any connection opened later. Embedding them in the DSN makes
 the driver re-apply them to every connection it opens.
 
@@ -293,6 +303,48 @@ checksum from the embedded file and fails startup immediately if it no
 longer matches. Add a new, higher-numbered migration file instead of
 changing one that has already shipped.
 
+## Durable jobs
+
+`cmd/server` starts the HTTP server and durable worker against the same
+SQLite connection pool and cancellation context. Jobs use the existing
+`jobs` table and migration `0006_jobs.sql`; Issue #8 adds no schema change.
+The worker atomically claims due `pending` rows and expired `running` leases,
+renews long-running leases, and limits claims to its available concurrency.
+This provides at-least-once execution and restart recovery. Handlers must make
+their result writes idempotent because a process can stop after an external
+side effect but before recording `succeeded`.
+
+The terminal states deliberately distinguish two failure modes:
+
+- `failed` means a handler classified the error as permanent and retrying
+  would not help;
+- `dead` means retryable failures exhausted `JOBS_MAX_ATTEMPTS`.
+
+Automatic retries use exponential backoff with fixed ±20% jitter bounded by
+`JOBS_BACKOFF_BASE` and `JOBS_BACKOFF_MAX`. An unregistered job type is treated
+as retryable so rolling deployments do not permanently discard work created by
+a newer producer. Payloads and raw errors are never logged; transition logs use
+job IDs, types, attempt numbers, and coarse error categories. The detailed
+error remains in SQLite for host-local inspection.
+
+Operators can inspect and recover jobs without adding an administrative HTTP
+surface:
+
+```sh
+go run ./cmd/jobsctl list --state=dead --limit=50
+go run ./cmd/jobsctl show <job-id>
+go run ./cmd/jobsctl retry <job-id>
+```
+
+Only `dead` and `failed` rows can be manually requeued. Requeue preserves the
+attempt count for auditability and clears the old lease and error. On forced
+worker shutdown, the existing `Retry` transition requeues the cancelled job
+immediately and increments its attempt. This intentionally reuses the one
+durable retry path rather than introducing a shutdown-only state transition.
+Worker liveness is not registered as a separate health checker: readiness
+already verifies the shared SQLite dependency, while queue inactivity by
+itself is not a reliable failure signal.
+
 ## Health and readiness
 
 - `GET /healthz` (liveness) always returns `200`. It reports only that the
@@ -316,12 +368,14 @@ on every `/readyz` poll.
 
 ## Graceful shutdown
 
-`httpserver.Run` listens for `SIGINT`/`SIGTERM` (or an externally
-cancelled `context.Context`), marks the registry not-ready, and calls
-`http.Server.Shutdown` bounded by `HTTP_SHUTDOWN_GRACE_PERIOD`. If
-in-flight requests do not finish within that window, it force-closes
-remaining connections via `http.Server.Close` rather than hanging
-indefinitely.
+`httpserver.Run` listens for `SIGINT`/`SIGTERM` (or an externally cancelled
+`context.Context`), marks the registry not-ready, and calls
+`http.Server.Shutdown` bounded by `HTTP_SHUTDOWN_GRACE_PERIOD`. In parallel,
+the job worker stops claiming and waits up to `JOBS_SHUTDOWN_GRACE_PERIOD` for
+handlers. It then cancels remaining handlers and durably requeues their jobs
+before the shared database closes. If HTTP requests do not finish within their
+window, the server force-closes remaining connections via `http.Server.Close`
+rather than hanging indefinitely.
 
 ## Running in a container
 

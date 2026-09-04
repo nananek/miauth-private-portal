@@ -19,9 +19,7 @@ const (
 // Job is one durable unit of asynchronous work (LLM generation,
 // classification, ingestion, ...). JobType and Payload are intentionally
 // unconstrained by the schema: a job-type registry belongs in Go, not
-// SQL, so adding a job type never requires a migration. The actual worker
-// loop that claims and executes jobs is out of this issue's scope (see
-// Issue #8); this package only defines the durable, restart-safe record.
+// SQL, so adding a job type never requires a migration.
 type Job struct {
 	ID             string
 	JobType        string
@@ -51,6 +49,9 @@ type JobRepository interface {
 	// has passed, or whose previous lease has expired, transitioning them
 	// to running under leaseOwner until leaseExpiresAt.
 	Claim(ctx context.Context, leaseOwner string, limit int, now, leaseExpiresAt time.Time) ([]Job, error)
+	// Renew extends a still-running job's lease. It returns ErrConflict if
+	// the job is no longer running under leaseOwner.
+	Renew(ctx context.Context, id, leaseOwner string, leaseExpiresAt, at time.Time) error
 	Succeed(ctx context.Context, id string, at time.Time) error
 	// Retry transitions a running job back to pending with an
 	// incremented attempt count, a bounded-backoff nextRunAt, and a
@@ -59,4 +60,23 @@ type JobRepository interface {
 	// Kill transitions a job to its terminal dead state after retries are
 	// exhausted.
 	Kill(ctx context.Context, id, lastError string, at time.Time) error
+	// Fail transitions a running job directly to its terminal failed state
+	// when retrying a classified permanent error would not help.
+	Fail(ctx context.Context, id, lastError string, at time.Time) error
+	// List returns jobs matching filter, most recently updated first.
+	List(ctx context.Context, filter JobFilter) ([]Job, error)
+	// Requeue moves a dead or failed job back to pending for an immediate
+	// manual retry while preserving its automatic-attempt count.
+	Requeue(ctx context.Context, id string, at time.Time) error
+	// CountByState returns the current queue depth grouped by state.
+	CountByState(ctx context.Context) (map[JobState]int, error)
+}
+
+// JobFilter narrows an administrative job listing. A nil field means no
+// filter on that dimension. A non-positive Limit uses the repository's
+// bounded default.
+type JobFilter struct {
+	State   *JobState
+	JobType *string
+	Limit   int
 }

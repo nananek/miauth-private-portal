@@ -29,6 +29,16 @@ const (
 	KeyUpstreamHTTPTimeout  = "UPSTREAM_HTTP_TIMEOUT"
 	KeyOwnerUsername        = "OWNER_USERNAME"
 	KeyOwnerDisplayName     = "OWNER_DISPLAY_NAME"
+	KeyJobsWorkerID         = "JOBS_WORKER_ID"
+	KeyJobsPollInterval     = "JOBS_POLL_INTERVAL"
+	KeyJobsClaimBatchSize   = "JOBS_CLAIM_BATCH_SIZE"
+	KeyJobsLeaseDuration    = "JOBS_LEASE_DURATION"
+	KeyJobsLeaseRenewMargin = "JOBS_LEASE_RENEW_MARGIN"
+	KeyJobsMaxAttempts      = "JOBS_MAX_ATTEMPTS"
+	KeyJobsBackoffBase      = "JOBS_BACKOFF_BASE"
+	KeyJobsBackoffMax       = "JOBS_BACKOFF_MAX"
+	KeyJobsMaxConcurrent    = "JOBS_MAX_CONCURRENT"
+	KeyJobsShutdownGrace    = "JOBS_SHUTDOWN_GRACE_PERIOD"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -55,6 +65,16 @@ var knownKeyOrder = []string{
 	KeyUpstreamHTTPTimeout,
 	KeyOwnerUsername,
 	KeyOwnerDisplayName,
+	KeyJobsWorkerID,
+	KeyJobsPollInterval,
+	KeyJobsClaimBatchSize,
+	KeyJobsLeaseDuration,
+	KeyJobsLeaseRenewMargin,
+	KeyJobsMaxAttempts,
+	KeyJobsBackoffBase,
+	KeyJobsBackoffMax,
+	KeyJobsMaxConcurrent,
+	KeyJobsShutdownGrace,
 }
 
 func isKnownKey(key string) bool {

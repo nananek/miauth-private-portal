@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
+	"github.com/nananek/miauth-private-portal/internal/jobs"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/provider/misskey"
@@ -91,7 +93,50 @@ func run() error {
 		TimelineService:     timelineSvc,
 	}
 
-	return httpserver.Run(ctx, opts, logger, reg)
+	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
+
+	// The HTTP server and durable worker share one lifecycle. If either
+	// component exits unexpectedly, cancel the sibling and wait for its
+	// graceful shutdown before closing the shared database.
+	serviceCtx, cancelServices := context.WithCancel(ctx)
+	defer cancelServices()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errCh <- httpserver.Run(serviceCtx, opts, logger, reg)
+		cancelServices()
+	}()
+	go func() {
+		defer wg.Done()
+		errCh <- jobsManager.Run(serviceCtx)
+		cancelServices()
+	}()
+	wg.Wait()
+	close(errCh)
+	for serviceErr := range errCh {
+		if serviceErr != nil {
+			return serviceErr
+		}
+	}
+	return nil
+}
+
+func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
+	return jobs.Config{
+		WorkerID:            cfg.WorkerID,
+		PollInterval:        cfg.PollInterval,
+		ClaimBatchSize:      cfg.ClaimBatchSize,
+		LeaseDuration:       cfg.LeaseDuration,
+		LeaseRenewMargin:    cfg.LeaseRenewMargin,
+		MaxAttempts:         cfg.MaxAttempts,
+		BackoffBase:         cfg.BackoffBase,
+		BackoffMax:          cfg.BackoffMax,
+		BackoffJitter:       0.2,
+		MaxConcurrentJobs:   cfg.MaxConcurrentJobs,
+		ShutdownGracePeriod: cfg.ShutdownGracePeriod,
+	}
 }
 
 // configFilePath returns the dotenv-style config file to load, defaulting
