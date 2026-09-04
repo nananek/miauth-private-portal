@@ -128,6 +128,54 @@ func TestEntryRepository_ListByThread_OrdersOldestFirst(t *testing.T) {
 	}
 }
 
+func TestEntryRepository_ListChildren_DirectOnlyAndDeterministic(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	now := time.Now()
+	root := mustCreateThreadAndRoot(t, db, actorID, now)
+	sameTime := now.Add(time.Minute)
+
+	// Insert IDs in reverse lexical order so the assertion proves the id
+	// tie-breaker is applied rather than merely observing insertion order.
+	for _, id := range []string{"child-b", "child-a"} {
+		if err := db.Entries.Create(t.Context(), domain.Entry{
+			ID: id, ThreadID: root.ThreadID, ParentEntryID: &root.ID, Kind: domain.EntryUserPost,
+			AuthorActorID: actorID, Body: id, ProcessingStatus: domain.ProcessingNone,
+			CreatedAt: sameTime, UpdatedAt: sameTime,
+		}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	parentID := "child-a"
+	if err := db.Entries.Create(t.Context(), domain.Entry{
+		ID: "grandchild", ThreadID: root.ThreadID, ParentEntryID: &parentID, Kind: domain.EntryUserPost,
+		AuthorActorID: actorID, Body: "grandchild", ProcessingStatus: domain.ProcessingNone,
+		CreatedAt: sameTime.Add(time.Minute), UpdatedAt: sameTime.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+
+	children, err := db.Entries.ListChildren(t.Context(), root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("len(children) = %d, want 2", len(children))
+	}
+	if children[0].ID != "child-a" || children[1].ID != "child-b" {
+		t.Errorf("child order = [%s, %s], want [child-a, child-b]", children[0].ID, children[1].ID)
+	}
+
+	none, err := db.Entries.ListChildren(t.Context(), "child-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("ListChildren(leaf) returned %d entries, want 0", len(none))
+	}
+}
+
 // TestEntryRepository_Pagination_UsesCreatedAtIDTieBreaker verifies the
 // stable cursor docs/compat/aria-v1.5.11.md requires: two entries sharing
 // the exact same created_at must still page deterministically via the id
@@ -226,6 +274,36 @@ func TestEntryRepository_SetProcessingStatus(t *testing.T) {
 	}
 	if got.ProcessingStatus != domain.ProcessingComplete {
 		t.Errorf("ProcessingStatus = %q, want %q", got.ProcessingStatus, domain.ProcessingComplete)
+	}
+}
+
+func TestEntryRepository_UpdateBody(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	created := time.Now()
+	root := mustCreateThreadAndRoot(t, db, actorID, created)
+	updated := created.Add(time.Hour)
+
+	if err := db.Entries.UpdateBody(t.Context(), root.ID, "edited", updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Entries.Get(t.Context(), root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != "edited" {
+		t.Errorf("Body = %q, want edited", got.Body)
+	}
+	if !got.UpdatedAt.Equal(updated) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, updated)
+	}
+}
+
+func TestEntryRepository_UpdateBody_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	err := db.Entries.UpdateBody(t.Context(), "missing", "edited", time.Now())
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("UpdateBody() error = %v, want ErrNotFound", err)
 	}
 }
 

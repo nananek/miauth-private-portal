@@ -103,10 +103,18 @@ type EntryRepository interface {
 	Get(ctx context.Context, id string) (Entry, error)
 	// ListByThread returns every entry in threadID, ordered oldest-first.
 	ListByThread(ctx context.Context, threadID string) ([]Entry, error)
+	// ListChildren returns only the entries that reply directly to
+	// parentEntryID, ordered oldest-first by (created_at, id). It does not
+	// include deeper descendants.
+	ListChildren(ctx context.Context, parentEntryID string) ([]Entry, error)
 	// ListTimeline returns entries ordered oldest-first by (created_at,
 	// id). When includeHidden is false, archived and hidden entries are
 	// excluded.
 	ListTimeline(ctx context.Context, page Page, includeHidden bool) ([]Entry, error)
+	// UpdateBody replaces an entry's body and bumps updated_at. It is a
+	// persistence primitive only: use-case callers are responsible for
+	// restricting edits to the author's own user_post entries.
+	UpdateBody(ctx context.Context, id, body string, at time.Time) error
 	SetProcessingStatus(ctx context.Context, id string, status ProcessingStatus, at time.Time) error
 	SetArchived(ctx context.Context, id string, archived bool, at time.Time) error
 	SetHidden(ctx context.Context, id string, hidden bool, at time.Time) error
