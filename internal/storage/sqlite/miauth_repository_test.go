@@ -67,6 +67,137 @@ func TestBootstrapGateRepository_Consume_RejectsExpired(t *testing.T) {
 	}
 }
 
+func TestBootstrapGateRepository_Fail(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	g := domain.BootstrapGate{
+		ID: domain.NewID(), Status: domain.BootstrapGateIssued, CreatedAt: now, ExpiresAt: now.Add(15 * time.Minute),
+	}
+	if err := db.BootstrapGates.Create(t.Context(), g); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.BootstrapGates.Fail(t.Context(), g.ID, now); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+
+	got, err := db.BootstrapGates.Get(t.Context(), g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.BootstrapGateFailed {
+		t.Errorf("Status = %q, want failed", got.Status)
+	}
+
+	// A gate already failed must not be consumable afterward.
+	if err := db.BootstrapGates.Consume(t.Context(), g.ID, now); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Consume() after Fail error = %v, want ErrConflict", err)
+	}
+}
+
+func TestBootstrapGateRepository_Fail_RejectsAlreadyTerminal(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	g := domain.BootstrapGate{
+		ID: domain.NewID(), Status: domain.BootstrapGateIssued, CreatedAt: now, ExpiresAt: now.Add(15 * time.Minute),
+	}
+	if err := db.BootstrapGates.Create(t.Context(), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BootstrapGates.Consume(t.Context(), g.ID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.BootstrapGates.Fail(t.Context(), g.ID, now); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Fail() after Consume error = %v, want ErrConflict", err)
+	}
+}
+
+func TestLocalMiAuthSessionRepository_Deny(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	s := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID); err != nil {
+		t.Fatalf("Deny: %v", err)
+	}
+
+	got, err := db.LocalMiAuth.Get(t.Context(), s.RouteSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.MiAuthDenied {
+		t.Errorf("Status = %q, want denied", got.Status)
+	}
+
+	// A denied session is terminal: it must not become authorizable
+	// afterward (for example on a late duplicate callback).
+	actorID := mustCreateActor(t, db)
+	if err := db.LocalMiAuth.Authorize(t.Context(), s.RouteSessionID, actorID, now); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Authorize() after Deny error = %v, want ErrConflict", err)
+	}
+}
+
+func TestLocalMiAuthSessionRepository_Deny_RejectsAlreadyAuthorized(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	now := time.Now()
+	s := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.LocalMiAuth.Authorize(t.Context(), s.RouteSessionID, actorID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.LocalMiAuth.Deny(t.Context(), s.RouteSessionID); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Deny() after Authorize error = %v, want ErrConflict", err)
+	}
+}
+
+func TestUpstreamMiAuthSessionRepository_Deny(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	local := domain.LocalMiAuthSession{
+		RouteSessionID: domain.NewID(), State: domain.NewID(), Status: domain.MiAuthCreated,
+		RequestedPermissions: "read:account", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.LocalMiAuth.Create(t.Context(), local); err != nil {
+		t.Fatal(err)
+	}
+	upstream := domain.UpstreamMiAuthSession{
+		ID: domain.NewID(), LocalSessionID: &local.RouteSessionID, IdentityOrigin: "https://misskey.example",
+		State: domain.NewID(), Status: domain.MiAuthCreated, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}
+	if err := db.UpstreamMiAuth.Create(t.Context(), upstream); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.UpstreamMiAuth.Deny(t.Context(), upstream.ID); err != nil {
+		t.Fatalf("Deny: %v", err)
+	}
+
+	got, err := db.UpstreamMiAuth.Get(t.Context(), upstream.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.MiAuthDenied {
+		t.Errorf("Status = %q, want denied", got.Status)
+	}
+	if err := db.UpstreamMiAuth.Authorize(t.Context(), upstream.ID, "wrong-user", now); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("Authorize() after Deny error = %v, want ErrConflict", err)
+	}
+}
+
 func TestLocalMiAuthSessionRepository_AuthorizeThenConsume(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)

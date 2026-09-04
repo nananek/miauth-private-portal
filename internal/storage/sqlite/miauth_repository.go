@@ -41,6 +41,20 @@ func (r *bootstrapGateRepository) Consume(ctx context.Context, id string, at tim
 	return requireRowAffectedConflict(res)
 }
 
+// Fail atomically transitions an issued, unexpired gate to failed, for a
+// bootstrap attempt whose upstream verification did not succeed.
+func (r *bootstrapGateRepository) Fail(ctx context.Context, id string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE bootstrap_gates SET status = 'failed'
+		 WHERE id = ? AND status = 'issued' AND expires_at > ?`,
+		id, formatTime(at),
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
 func scanBootstrapGate(row rowScanner) (domain.BootstrapGate, error) {
 	var g domain.BootstrapGate
 	var status, createdAt, expiresAt string
@@ -110,6 +124,22 @@ func (r *localMiAuthSessionRepository) Consume(ctx context.Context, routeSession
 		`UPDATE miauth_local_sessions SET status = 'consumed', consumed_at = ?
 		 WHERE route_session_id = ? AND status = 'authorized' AND expires_at > ?`,
 		formatTime(at), routeSessionID, formatTime(at),
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+// Deny atomically transitions a created session to denied, for a
+// callback whose verification did not succeed (wrong user, state
+// mismatch, malformed or replayed callback). See the interface doc for
+// why this is a distinct terminal write rather than leaving the session
+// to expire.
+func (r *localMiAuthSessionRepository) Deny(ctx context.Context, routeSessionID string) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE miauth_local_sessions SET status = 'denied' WHERE route_session_id = ? AND status = 'created'`,
+		routeSessionID,
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -191,6 +221,20 @@ func (r *upstreamMiAuthSessionRepository) Consume(ctx context.Context, id string
 		`UPDATE miauth_upstream_sessions SET status = 'consumed', consumed_at = ?
 		 WHERE id = ? AND status = 'authorized' AND expires_at > ?`,
 		formatTime(at), id, formatTime(at),
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
+// Deny atomically transitions a created session to denied — see
+// localMiAuthSessionRepository.Deny for why this is a distinct terminal
+// write rather than leaving the session to expire.
+func (r *upstreamMiAuthSessionRepository) Deny(ctx context.Context, id string) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE miauth_upstream_sessions SET status = 'denied' WHERE id = ? AND status = 'created'`,
+		id,
 	)
 	if err != nil {
 		return mapWriteError(err)

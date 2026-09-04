@@ -130,6 +130,13 @@ type BootstrapGateRepository interface {
 	// consumed. It returns ErrConflict if the gate is missing, expired,
 	// or already in a terminal state.
 	Consume(ctx context.Context, id string, at time.Time) error
+	// Fail atomically transitions an issued, unexpired gate to failed,
+	// for a bootstrap attempt whose upstream verification did not
+	// succeed. ADR-0001 requires the gate be invalid after a failed
+	// binding attempt, not just after expiry or explicit revocation. It
+	// returns ErrConflict if the gate is missing, expired, or already in
+	// a terminal state.
+	Fail(ctx context.Context, id string, at time.Time) error
 }
 
 // LocalMiAuthSessionRepository persists Aria-facing local MiAuth sessions.
@@ -142,6 +149,15 @@ type LocalMiAuthSessionRepository interface {
 	// (already consumed, expired, or never authorized) — the "only one
 	// winner" guarantee a racing check() call needs.
 	Consume(ctx context.Context, routeSessionID string, at time.Time) error
+	// Deny atomically transitions a created session to denied. ADR-0001
+	// treats an unknown, malformed, replayed, mismatched, or otherwise
+	// rejected upstream callback as a terminal failure for that attempt,
+	// not something left to expire naturally, so a wrong-user or
+	// state-mismatch callback must call this instead of leaving the
+	// session retryable. It returns ErrConflict if the session is not
+	// currently in the created state (already authorized, consumed, or
+	// previously denied).
+	Deny(ctx context.Context, routeSessionID string) error
 }
 
 // UpstreamMiAuthSessionRepository persists upstream owner-verification
@@ -153,6 +169,12 @@ type UpstreamMiAuthSessionRepository interface {
 	// Consume atomically transitions an authorized session to consumed.
 	// It returns ErrConflict if the session is not currently authorized.
 	Consume(ctx context.Context, id string, at time.Time) error
+	// Deny atomically transitions a created session to denied — see
+	// LocalMiAuthSessionRepository.Deny for why this is a distinct
+	// terminal write rather than leaving the session to expire. It
+	// returns ErrConflict if the session is not currently in the created
+	// state.
+	Deny(ctx context.Context, id string) error
 }
 
 // APITokenRepository persists local API tokens.
