@@ -1,9 +1,14 @@
 # Configuration
 
 This document covers the configuration and HTTP-routing foundation added by
-Issue #3, and the SQLite persistence layer added by Issue #4. It does not
-cover MiAuth, the post API, or LLM configuration; those are added by later
-issues and will extend this document rather than replace it.
+Issue #3, the SQLite persistence layer added by Issue #4, and the bridged
+MiAuth authentication flow added by Issue #5. It does not cover the post API
+or LLM configuration; those are added by later issues and will extend this
+document rather than replace it. The normative design for MiAuth is
+[`docs/decisions/0001-auth-topology.md`](../decisions/0001-auth-topology.md)
+(ADR-0001) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
+this document covers only the operational surface (config keys, routes,
+the bootstrap tool), not the protocol design itself.
 
 ## Loading order
 
@@ -57,6 +62,13 @@ catch that class of mistake during local development.
 | `DB_PATH` | no | `./data/portal.db` | SQLite database file path; its parent directory is created if missing. Must not be empty. |
 | `DB_BUSY_TIMEOUT_MS` | no | `5000` | Positive integer milliseconds passed to SQLite's `busy_timeout` pragma. |
 | `DB_MAX_OPEN_CONNS` | no | `8` | 1-100. Bounds the SQLite connection pool. |
+| `LOCAL_ORIGIN` | yes | — | This service's own public origin (ADR-0001 `LOCAL_ORIGIN`). Scheme+host only: no userinfo, path beyond `""`/`"/"`, query, or fragment. Must be `https` in production. |
+| `IDENTITY_ORIGIN` | yes | — | The fixed upstream Misskey origin used for owner verification (ADR-0001 `IDENTITY_ORIGIN`). Same format/production rules as `LOCAL_ORIGIN`. Never supplied by a client request. |
+| `ALLOWED_MISSKEY_USER_ID` | no | `""` (bootstrap-only) | The opaque upstream Misskey user ID allowed to bind as this deployment's single owner. Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. |
+| `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). A non-HTTPS scheme is explicitly allowed here, unlike the two origins above. |
+| `UPSTREAM_HTTP_TIMEOUT` | no | `10s` | Bounds every HTTP call this service makes to `IDENTITY_ORIGIN`. `time.ParseDuration` format, must be positive. |
+| `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
+| `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
 
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
@@ -83,16 +95,19 @@ so code must not concatenate secrets into arbitrary log fields.
 The HTTP access-log middleware (`internal/logging.AccessLog`) logs the
 **route pattern** a handler was registered under (for example
 `/miauth/{session}`), never the raw request path, query string, headers,
-or body. This matters beyond MiAuth being out of scope for Issue #3:
-ADR-0001 fixes Aria's `{session}` route value as a bearer
-capability/correlation secret, so once Issue #5/#7 add that route, its
-value must never reach a log line — a rule this middleware already
-enforces today.
+or body. ADR-0001 fixes Aria's `{session}` route value, the upstream MiAuth
+`state`, and local API tokens as secrets that must never reach a log line;
+Issue #5's MiAuth handlers rely on this pattern-only logging to satisfy
+that, and additionally never construct a log attribute containing any of
+those values in the first place (see
+[`TestMiAuthFlow_NeverLogsSensitiveValues`](../../internal/httpserver/miauth_handlers_test.go)).
 
 `Config.Redacted()` is the one place that decides which config fields are
-safe to print; no config field added by Issue #3 is itself secret, but the
-method exists so a future secret-bearing field (upstream Misskey tokens,
-etc.) only needs to be excluded once.
+safe to print. Issue #5 adds the first field this genuinely applies to:
+`ALLOWED_MISSKEY_USER_ID` is shown only as `<set>`/`<unset>`, never its
+value, per its acceptance criteria (an unauthorized login attempt's
+generic denial must never let the allowlisted ID leak into a log or
+response).
 
 ## HTTP routing
 
@@ -107,6 +122,84 @@ sub-router middleware composition, etc.) outgrow `ServeMux`, record that
 decision in a new ADR at that time. `docs/decisions/0002-*` is already
 reserved by the Open WebUI roadmap's OWUI-C track, so this decision is
 intentionally not filed as an ADR here.
+
+## MiAuth
+
+Issue #5 adds the bridged MiAuth flow ADR-0001 designs. This section covers
+only the operational surface; the protocol itself (state machines, owner
+binding rules, threat model) is normative in ADR-0001, and the exact wire
+shapes Aria expects are normative in
+[`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md).
+
+### Routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /miauth/{session}` | Aria's entry point. Starts (or idempotently resumes) the local session and redirects the browser to `IDENTITY_ORIGIN` for owner verification. |
+| `GET /miauth/callback` | The fixed internal callback `IDENTITY_ORIGIN` redirects back to, shared by the ordinary and bootstrap flows. Not part of Aria's contract; never call it directly. |
+| `GET /miauth/bootstrap/{gate}` | Operator-only entry point reached with a gate value from `cmd/bootstrapctl`. Refuses once an owner is already bound. |
+| `POST /api/miauth/{session}/check` | Aria polls this to complete the flow. Every non-success outcome (pending, denied, expired, replayed) responds identically with `200 {"ok":false}`. |
+
+Every non-success outcome across these routes is deliberately generic: an
+unauthorized login attempt, a wrong upstream user, a state mismatch, and an
+unknown session all render the same response, so a probing request cannot
+learn which case applies or exfiltrate the allowlisted user ID.
+
+### Effective scopes
+
+A successful login is always granted `read:notes`, plus `read:account`
+and/or `write:notes` if Aria requested them. `read:notes` is granted
+unconditionally rather than intersected with the request: Aria's real,
+source-traced permission list never actually requests a bare `read:notes`,
+yet the compat doc fixes it as part of the effective set a successful login
+grants — see `internal/miauth/scope.go`'s `effectiveScopes` doc comment for
+the full reasoning. Scope enforcement is exact-match only
+(`internal/httpserver.RequireScope`); Aria requesting a scope this service
+does not implement never grants a capability.
+
+### Session and gate lifetimes
+
+Local and upstream MiAuth sessions expire after 10 minutes; the operator
+bootstrap gate expires after 15 minutes. These are ADR-0001's fixed,
+accepted design, not operator-configurable settings — the same treatment
+this document's SQLite section gives `foreign_keys`/`journal_mode` below.
+
+### Binding the owner
+
+With `ALLOWED_MISSKEY_USER_ID` set, the first successful MiAuth login from
+that upstream user ID binds them as the owner; no further action is needed.
+
+With `ALLOWED_MISSKEY_USER_ID` unset, the deployment stays unbound until an
+operator runs `cmd/bootstrapctl` against the same `DB_PATH`:
+
+```sh
+go run ./cmd/bootstrapctl
+```
+
+It refuses if an owner is already bound, otherwise prints a single-use URL
+under `LOCAL_ORIGIN` valid for 15 minutes. The operator opens it, as the
+owner, from the upstream Misskey account to bind. `cmd/bootstrapctl`
+exposes no HTTP endpoint of its own — the printed URL is reachable only by
+whoever can already run the command, which is what satisfies ADR-0001's
+"shown only through the operator channel" requirement instead of a public
+first-login-wins path.
+
+### Deliberately out of scope for Issue #5
+
+- Persisting the upstream Misskey token: `internal/provider/misskey.Client`
+  uses it only within a single check call to read the verified user ID,
+  then discards it. Encryption-at-rest wiring
+  (`domain.UpstreamTokenRepository`) is deferred to whichever future issue
+  first needs to read upstream data.
+- Browser session cookies: security relies on the crypto/rand upstream
+  `state` plus TTL and atomic consume, not a same-browser confirmation
+  cookie.
+- `POST /api/meta` and `POST /api/i`: assigned to Issue #7's minimal
+  Aria/Misskey surface.
+- Self-service profile editing (`POST /api/i/update`): `OWNER_USERNAME`/
+  `OWNER_DISPLAY_NAME` are config-only for Issue #5; a fast-follow issue is
+  expected to add an editable, database-backed profile so an operator does
+  not need to edit config to change them.
 
 ## SQLite
 
