@@ -35,13 +35,11 @@ against a real `bin/server` instance, in place of the unautomated real-Aria
 end-to-end run Issue #7's acceptance criteria otherwise call for — see
 [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Issue #7
 implementation notes". It requires the [Dart SDK](https://dart.dev/get-dart)
-and `jq` in addition to this project's normal Go toolchain; everything else
-(including `cmd/fakemisskey`, a test-only stand-in for the upstream Misskey
-instance) is self-contained and needs no real credentials or network access.
+and `jq` in addition to this project's normal Go toolchain. The local MiAuth
+session is approved with `miauthctl`; no real credentials are required.
 It runs in its own CI workflow
 ([`.github/workflows/contract-tests.yml`](.github/workflows/contract-tests.yml)),
-separate from `ci.yml`, and is never built into the production image (see
-`cmd/fakemisskey`'s package doc comment).
+separate from `ci.yml`.
 
 ## Container
 
@@ -61,7 +59,6 @@ mkdir -p ./data && chmod 777 ./data  # distroless has no shell to do this
 docker run -d \
   -p 8080:8080 \
   -e LOCAL_ORIGIN=https://portal.example \
-  -e IDENTITY_ORIGIN=https://misskey.example \
   -e APP_ENV=production \
   -v "$(pwd)/data:/data" \
   ghcr.io/nananek/miauth-private-portal:latest
@@ -76,17 +73,34 @@ deployment entirely through `docker run -e` / your orchestrator's
 environment variables instead, per
 [docs/operations/configuration.md](docs/operations/configuration.md).
 
-`cmd/bootstrapctl` ships in the same image; run it against the same
-`DB_PATH` volume with an explicit entrypoint override:
+`cmd/miauthctl` ships in the same image; run it against the same `DB_PATH`
+volume with an explicit entrypoint override. Supply the same required base
+configuration as the server:
 
 ```sh
-docker run --rm -v "$(pwd)/data:/data" --entrypoint /bootstrapctl \
-  -e DB_PATH=/data/portal.db ghcr.io/nananek/miauth-private-portal:latest
+docker run --rm -it -v "$(pwd)/data:/data" --entrypoint /miauthctl \
+  -e APP_ENV=production -e LOCAL_ORIGIN=https://portal.example \
+  -e DB_PATH=/data/portal.db ghcr.io/nananek/miauth-private-portal:latest list
 ```
 
-`make build` produces `bin/server`, the one-time owner-binding tool
-`bin/bootstrapctl`, and the host-local durable-job inspection/retry tool
+`make build` produces `bin/server`, the sign-in/token operator tool
+`bin/miauthctl`, and the host-local durable-job inspection/retry tool
 `bin/jobsctl`.
+
+## Approving Aria sign-ins
+
+MiAuth requests remain pending until an operator connected to the server
+host approves the exact session. `make build` produces `bin/miauthctl`:
+
+```sh
+bin/miauthctl list
+bin/miauthctl approve <session-id>
+```
+
+The approval command displays the request details and requires an explicit
+confirmation. Use `--yes` only from trusted automation. Operators can also
+run `reject`, `tokens`, and `revoke <token-id>`; all commands use the same
+configuration and `DB_PATH` as the server.
 
 ## Roadmap
 

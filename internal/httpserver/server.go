@@ -6,7 +6,7 @@
 // testable in isolation and a storage-adapter change never needs to
 // touch it. Since Issue #5 it also depends on internal/miauth and
 // internal/domain for the MiAuth wire boundary (miauth_handlers.go,
-// miauth_wire.go, bootstrap_handlers.go, scope_middleware.go); it still
+// miauth_wire.go, scope_middleware.go); it still
 // never imports net/http-unaware use-case code the other direction, nor
 // a storage driver type.
 //
@@ -35,19 +35,17 @@ type Server struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
 
-	miauth         *miauth.Service
-	timeline       *timeline.Service
-	localOrigin    string
-	identityOrigin string
-	llmEnabled     bool
+	miauth      *miauth.Service
+	timeline    *timeline.Service
+	localOrigin string
+	llmEnabled  bool
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
 // ("GET /readyz") routes backed by reg always registered.
 //
-// opts.MiAuthService and its named origin fields configure Issue #5's
-// MiAuth routes (GET /miauth/{session}, GET /miauth/callback, GET
-// /miauth/bootstrap/{gate}, POST /api/miauth/{session}/check). A nil
+// opts.MiAuthService configures the local MiAuth routes (GET
+// /miauth/{session}, POST /api/miauth/{session}/check). A nil
 // MiAuthService registers none of them, leaving a Server with only the
 // health routes — the shape every httpserver test predating Issue #5
 // still expects.
@@ -62,13 +60,12 @@ type Server struct {
 // meaningful note API without a timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
 	s := &Server{
-		mux:            http.NewServeMux(),
-		logger:         logger,
-		miauth:         opts.MiAuthService,
-		timeline:       opts.TimelineService,
-		localOrigin:    opts.LocalOrigin,
-		identityOrigin: opts.IdentityOrigin,
-		llmEnabled:     opts.LLMEnabled,
+		mux:         http.NewServeMux(),
+		logger:      logger,
+		miauth:      opts.MiAuthService,
+		timeline:    opts.TimelineService,
+		localOrigin: opts.LocalOrigin,
+		llmEnabled:  opts.LLMEnabled,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,8 +77,6 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
-		s.Handle("GET /miauth/callback", http.HandlerFunc(s.handleMiAuthCallback))
-		s.Handle("GET /miauth/bootstrap/{gate}", http.HandlerFunc(s.handleMiAuthBootstrapStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
 	}
 

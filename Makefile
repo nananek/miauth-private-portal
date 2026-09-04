@@ -24,7 +24,7 @@ test-race:
 
 build:
 	go build -o bin/server ./cmd/server
-	go build -o bin/bootstrapctl ./cmd/bootstrapctl
+	go build -o bin/miauthctl ./cmd/miauthctl
 	go build -o bin/jobsctl ./cmd/jobsctl
 
 run: build
@@ -36,10 +36,7 @@ tidy:
 # contract-test runs Issue #7's misskey_dart contract test suite against
 # a real bin/server (scripts/run-contract-tests.sh; see fetch_doc
 # key='plan' section 9 and docs/compat/aria-v1.5.11.md's "Issue #7
-# implementation notes"). It builds and runs cmd/fakemisskey, a
-# test-only stand-in for the upstream Misskey instance that
-# unconditionally approves every session — deliberately not part of the
-# `build` target or the Dockerfile. Requires the Dart SDK in addition to
-# this target's own Go build.
+# implementation notes"). It approves the test session through miauthctl.
+# Requires the Dart SDK in addition to this target's own Go build.
 contract-test:
 	./scripts/run-contract-tests.sh

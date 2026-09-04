@@ -41,7 +41,7 @@ func writeInvalidParam(w http.ResponseWriter, message string) {
 
 // writeNoSuchNote is the uniform response for a note ID that does not
 // exist, is archived, or is hidden — deliberately not distinguished, the
-// same "generic denial" treatment ADR-0001 gives authentication failures,
+// same generic-denial treatment used for authentication failures,
 // so a caller cannot use this endpoint to probe which case applies.
 func writeNoSuchNote(w http.ResponseWriter) {
 	writeWireError(w, http.StatusBadRequest, "no-such-note", "NO_SUCH_NOTE", "No such note.", "client", nil)

@@ -27,9 +27,11 @@ func testHashToken(raw string) string {
 // issued to.
 func mintToken(t *testing.T, ts *miauthTestServer) (token, ownerActorID string) {
 	t.Helper()
-	id, state := startLocalSession(t, ts, "route-1", "read:account,write:notes", "")
-	if rec := authorizeWithUser(ts, id, state, testAllowedUserID); rec.Code != http.StatusOK {
-		t.Fatalf("callback failed: %d %s", rec.Code, rec.Body.String())
+	if rec := startLocalSession(t, ts, "route-1", "read:account,write:notes", ""); rec.Code != http.StatusOK {
+		t.Fatalf("session start failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := ts.miauth.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatalf("ApproveSession: %v", err)
 	}
 	result, err := ts.miauth.Check(t.Context(), "route-1")
 	if err != nil {

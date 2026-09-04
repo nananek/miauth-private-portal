@@ -11,14 +11,11 @@
   `misskey_dart` request/response models; no credentials, personal data, or
   live Misskey account were used.
 
-The contract distinguishes two origins. `LOCAL_ORIGIN` is the configured,
-public origin of this Misskey-compatible service and is the origin Aria calls.
-`IDENTITY_ORIGIN` is the fixed upstream Misskey origin used for owner
-verification and upstream Misskey provider requests. Neither value is
-supplied by an Aria request, and neither may contain a path. The two origins
-may be different and must not be substituted for one another. An external
-provider such as Open WebUI has a separate workspace-scoped origin policy and
-is outside this Aria compatibility contract.
+`LOCAL_ORIGIN` is the configured public origin of this Misskey-compatible
+service and is the origin Aria calls. It is not supplied by an Aria request
+and may not contain a path. Authentication approval is host-local (ADR-0002),
+not delegated to another Misskey origin. External providers such as Open
+WebUI have separate feature-specific origin policies outside this contract.
 
 The release page identifies the v1.5.11 tag as `0f957e9`, while the roadmap
 explicitly pins the source inspection snapshot to `a66c930…`, which is 11
@@ -72,7 +69,7 @@ redacted.
 
 | Endpoint | Classification | Why it is called | Authentication / scope boundary |
 | --- | --- | --- | --- |
-| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. The local session is bound to the internal callback under `LOCAL_ORIGIN`, an optional exact-match client return callback, and requested permissions; any owner verification uses `IDENTITY_ORIGIN` |
+| `GET /miauth/{session}` | **必要** | Starts the Aria-facing account-add flow | Browser session; no API token. Creates a pending local session with an optional exact-match client return callback and requested permissions; only host-local CLI approval authorizes it |
 | `POST /api/miauth/{session}/check` | **必要** | Completes the MiAuth flow | `{session}` is a bearer capability/correlation secret for this auth attempt; no `i` body field. It is not owner-binding or token-minting authentication |
 | `POST /api/meta` | **必要** | Detects `features.miauth` and optionally canonicalizes the instance URI | Anonymous; no `i` body field |
 | `POST /api/i` | **必要** | Access-token login fallback and authenticated account bootstrap | `i` token; local `read:account` equivalent |
@@ -97,7 +94,7 @@ scope. `meta`, `endpoints`, the MiAuth page, and the MiAuth check use their
 documented browser or anonymous/session capability and do not consume a local
 API token. `/api/i` and every notes endpoint in the allowlist require a
 locally issued API token; the token-login fallback accepts only such a local
-token and never accepts, exchanges, or persists an upstream Misskey token.
+token.
 Any endpoint outside this allowlist returns an explicit,
 consistently classified unsupported-endpoint error at the wire boundary; its
 exact status and code remain an implementation contract-test decision.
@@ -107,9 +104,8 @@ exact status and code remain an implementation contract-test decision.
 ### Request transport
 
 - Misskey API calls are `POST` with JSON content type.
-- The API base is `LOCAL_ORIGIN` plus `/api/`; upstream Misskey requests use
-  `IDENTITY_ORIGIN` only inside the provider boundary. Other external
-  providers use their own feature-specific origin policy.
+- The API base is `LOCAL_ORIGIN` plus `/api/`. External providers use their
+  own feature-specific origin policy.
 - Authenticated calls carry `i: <local API token>` in the JSON body. Aria does
   not use an `Authorization` header for this client path.
 - Null-valued optional request fields are omitted by the pinned client. A
@@ -143,7 +139,7 @@ decode this wrapper. Exact status-code mapping, error codes, and pending
 responses are **要実機確認**.
 
 The local implementation must not log this error body when it could contain a
-token, user content, or upstream details. It should expose a stable local
+token, user content, or external-provider details. It should expose a stable local
 error category and preserve the Misskey-compatible shape only at the wire
 boundary.
 
@@ -158,8 +154,8 @@ Aria first sends an anonymous empty object:
 ```
 
 The login path reads only these fields. The local service returns its
-configured `LOCAL_ORIGIN` (or omits `uri`); it must never return
-`IDENTITY_ORIGIN` or an arbitrary upstream authority for Aria to save.
+configured `LOCAL_ORIGIN` (or omits `uri`); it must never return an arbitrary
+external authority for Aria to save.
 
 | Field | Type | Required for this path | Null / omission behavior |
 | --- | --- | --- | --- |
@@ -182,11 +178,11 @@ Aria generates an opaque UUID-like session ID and constructs:
 
 On Android it additionally sends `callback=aria://aria/miauth`. Other
 platforms do not add a callback parameter in this source path. When present,
-the value is a client return destination, not the server's upstream callback:
-the local service validates and stores it, completes owner verification at its
-fixed internal HTTPS callback, and only then redirects to the exact stored
-Aria callback with the original route session. The exact permission values,
-in source order, are:
+the value is a client return destination: the local service validates and
+stores it, then redirects immediately to the exact callback with the original
+route session. That redirect is not authorization; the host operator must
+still approve the pending session. The exact permission values, in source
+order, are:
 
 ```text
 read:account,write:account,read:blocks,write:blocks,
@@ -205,16 +201,14 @@ The line breaks above are presentation only; the query value is one comma
 separated string. The local service records requested permissions but grants
 only its effective implemented scope set. Aria's broad request is not proof
 that blocks, drive, pages, gallery, chat, or any other non-MVP API exists.
-It must not be forwarded unchanged to the upstream identity provider; any
-upstream owner-verification/provider scopes come from a separate minimal
-server-side allowlist.
+It is not authorization by itself and must not cause unsupported local
+capabilities to be granted.
 
 The response is an interactive HTML/browser flow and is not parsed by Aria.
-The exact page status, cookie attributes, consent behavior, redirect timing,
-and whether the upstream implementation accepts every requested permission
-are **要実機確認**. The local server must use its fixed internal callback
-under `LOCAL_ORIGIN` and its exact client-return callback allowlist; it must
-reject any client attempt to select an upstream origin or an unconfigured
+The exact page status, consent behavior, and redirect timing are
+**要実機確認**. The local server creates a pending session and may return
+immediately to an exact-match-allowlisted client callback; authorization is
+performed separately by the host operator. It rejects an unconfigured
 callback.
 
 The `{session}` route value is the same opaque Aria route session ID in the
@@ -223,7 +217,7 @@ bearer capability/correlation secret for accessing the state of that one local
 auth attempt, so it must not be logged or exposed in diagnostics. Possession
 permits polling/checking that attempt only; it is not proof of owner identity,
 owner binding, or authorization to mint a local API token. Those decisions
-require the server-side state and owner verification described by ADR-0001.
+require the explicit SSH+CLI approval described by ADR-0002.
 
 ### `POST /api/miauth/{session}/check`
 
@@ -250,14 +244,13 @@ fields are listed below. Any response not matching `ok: true` plus those two
 types is a non-success response for this contract. Aria does not distinguish
 pending from denial in this method; malformed JSON or a decode failure may be
 surfaced as a transport/decode failure instead. The local server must bind the
-returned token to this local session and the configured origins; the response
-must never contain the upstream token.
+returned token to this local session and local Owner actor.
 
 The `token` in this response is a secret. It is shown in this example only as
 the literal word `REDACTED_…`; real fixtures and logs must never contain it.
 The check endpoint's exact pending body, status code, replay response, and
 whether a consumed session remains readable are **要実機確認**; the local
-service decision is one-time atomic consume as specified by ADR-0001.
+service decision is one-time atomic consume as specified by ADR-0002.
 
 #### `UserDetailedNotMe` minimum
 
@@ -294,7 +287,7 @@ Aria has two observed uses:
 1. The explicit token-login fallback sends `{"i":"<token>"}` and the account
    store reads `id` (string) and `username` (string) to save the account. For
    this local service, `<token>` is only a previously issued local API token;
-   an upstream token is not a supported login path.
+   any other token is not a supported login path.
 2. After login, the timeline loads the current account and decodes the full
    response as `MeDetailed`.
 
@@ -314,8 +307,8 @@ For the second path, the pinned `MeDetailed` parser additionally requires
 types. `followersCount` and `followingCount` use the pinned count converter.
 Most other fields are nullable or have defaults, but the exact minimum needed
 by the current timeline UI (including `policies`) is **要実機確認** against
-the target instance. The local wire projection must not expose upstream
-tokens or administrative secrets.
+the target instance. The local wire projection must not expose token hashes
+or administrative secrets.
 
 ### `POST /api/endpoints`
 
@@ -605,8 +598,7 @@ verified.
   rejecting a response this service considers valid — is exactly what
   this suite exercises. What it cannot cover is anything about the real
   Aria *application* beyond its HTTP client library: UI rendering, its
-  MiAuth browser/deep-link consent flow end to end (`cmd/fakemisskey`
-  approves unconditionally rather than reproducing a consent screen), and
+  MiAuth browser/deep-link and host-operator approval UX end to end, and
   any real Misskey server's actual behavior where this document still
   says 要実機確認. Those remain open until a real device run happens.
 

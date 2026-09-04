@@ -41,11 +41,11 @@ Use nananek/sakurasato and Aria as behavioral references. Do not copy third-part
 
 ## MiAuth and API compatibility
 
-- Keep the Aria-facing local MiAuth session, the upstream owner-verification MiAuth session, local API tokens, and upstream Misskey tokens as distinct types and records.
-- Generate session IDs, state values, setup tokens, and API tokens with crypto/rand. Compare secrets safely.
-- Do not expose a public first-login-wins path. Initial owner binding requires an explicit, single-use bootstrap gate; ALLOWED_MISSKEY_USER_ID remains the preferred production path.
-- Validate callback destinations and use a configured HTTPS identity-instance origin. Do not accept arbitrary upstream hosts or redirects.
-- Store local API tokens as hashes. If a raw token must survive briefly for MiAuth polling, minimize its lifetime, encrypt it at rest when persisted, and scrub it after the compatibility-required window.
+- Keep the Aria-facing local MiAuth session and local API tokens as distinct types and records.
+- Generate session IDs and API tokens with crypto/rand. Compare secrets safely.
+- Do not expose a public first-login-wins or HTTP approval path. Only an explicit host-local `miauthctl` action may authorize a pending session.
+- Validate client callback destinations against the configured exact-match allowlist. Do not accept arbitrary redirects.
+- Store local API tokens as hashes. Raw tokens exist only long enough to return once from a successful MiAuth check and are never persisted.
 - Enforce exact scopes on implemented endpoints. Aria requesting a scope does not mean an unimplemented feature exists.
 - Preserve the documented Misskey JSON field names, null/omission behavior, ID types, timestamp format, status codes, and error shape. Add a contract test before changing wire behavior.
 - Unsupported endpoints must fail explicitly and consistently; do not return fabricated success.
@@ -76,7 +76,7 @@ Tests must cover success and failure paths. Use temporary SQLite databases and f
 
 Each endpoint change needs protocol contract tests. Each migration needs a fresh-database test and an upgrade test. Each durable job needs restart, duplicate-delivery, retry-exhaustion, and cancellation coverage where applicable.
 
-`contract/aria_client` is a second, independent layer of note-API contract testing: a Dart package depending on `misskey_dart` (the pinned client library Aria itself uses, see `docs/compat/aria-v1.5.11.md`) that decodes real responses from a running `bin/server` with the actual generated parser Aria would use, rather than this repository's own idea of the wire shape. `make contract-test` (`scripts/run-contract-tests.sh`) drives it: it builds and runs `cmd/fakemisskey`, a test-only stand-in for the upstream Misskey instance, to complete a real MiAuth HTTP round trip and obtain a local API token exactly the way Aria does — no real credentials or network access required, consistent with the rule above. It is intentionally not part of `make check`/`test-race` or `ci.yml` (it needs the Dart SDK); it runs as its own CI job, `.github/workflows/contract-tests.yml`. It substitutes for Issue #7's real-Aria end-to-end acceptance step; see `docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for that decision's scope and limits.
+`contract/aria_client` is a second, independent layer of note-API contract testing: a Dart package depending on `misskey_dart` (the pinned client library Aria itself uses, see `docs/compat/aria-v1.5.11.md`) that decodes real responses from a running `bin/server` with the actual generated parser Aria would use, rather than this repository's own idea of the wire shape. `make contract-test` (`scripts/run-contract-tests.sh`) drives it: it creates a local MiAuth session, approves it through `miauthctl`, and obtains a local API token — no real credentials or network access required, consistent with the rule above. It is intentionally not part of `make check`/`test-race` or `ci.yml` (it needs the Dart SDK); it runs as its own CI job, `.github/workflows/contract-tests.yml`. It substitutes for Issue #7's real-Aria end-to-end acceptance step; see `docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for that decision's scope and limits.
 
 ## Definition of done
 

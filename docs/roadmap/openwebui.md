@@ -121,7 +121,7 @@ Placement: after #2 and before #4 schema work.
 
 Acceptance criteria:
 
-- [ ] Add `docs/decisions/0002-openwebui-boundary.md` covering the provider
+- [ ] Add `docs/decisions/0003-openwebui-boundary.md` covering the provider
   boundary, local source of truth, VirtualActor, non-federation scope, and
   auth/secret threat model.
 - [ ] Add a pinned compatibility document covering target base URL policy, API
@@ -735,7 +735,7 @@ pull-sync code is deliberately not a deferred TODO; it is outside this track.
 
 | Existing requirement | Outbound feature impact | Owner / dependency |
 | --- | --- | --- |
-| #2 local/upstream MiAuth and token separation | Open WebUI credentials never authenticate Aria, bind an owner, or mint a local token | #2 → OWUI-C; authentication boundary unchanged |
+| #28 local MiAuth and token separation | Open WebUI credentials never authenticate Aria, approve a session, or mint a local token | #28 → OWUI-C; authentication boundary unchanged |
 | #1 local post survives LLM/provider outage | Save Aria post and `OpenWebUITurnJob` intent atomically before any remote call | #4 + #8 + OWUI-B |
 | #1 thread/reply/restart behavior | Local `reply_to_id` and `thread_id` own the tree; remote IDs are metadata | #6 + OWUI-P + OWUI-B |
 | #1 LLM reply/follow-up remains separate | Default-model VirtualActor writes a separate assistant child; source text is immutable | #9 + OWUI-B, feature off by default |

@@ -7,8 +7,7 @@
 // package depends only on internal/domain and its own narrow Provider
 // port, never on net/http or a specific provider package (AGENTS.md:
 // "Domain/use-case code must not depend on...a specific LLM provider" —
-// internal/provider/openai depends on this package, not the reverse,
-// mirroring internal/provider/misskey's relationship to internal/miauth).
+// internal/provider/openai depends on this package, not the reverse).
 package llmreply
 
 import (

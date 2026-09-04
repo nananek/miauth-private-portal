@@ -41,14 +41,13 @@ func (c *fakeTimelineClock) Advance(d time.Duration) {
 
 // noteAPITestServer bundles a real Server with both MiAuthService and
 // TimelineService wired (Issue #7's note routes only register when both
-// are present; see NewServer), a scriptable upstream provider, and a
-// valid owner API token already issued through the full MiAuth flow.
+// are present; see NewServer), and a valid owner API token already
+// issued through the local MiAuth flow.
 type noteAPITestServer struct {
 	*Server
 	db       *sqlite.DB
 	timeline *timeline.Service
 	clock    *fakeTimelineClock
-	provider *fakeProvider
 	token    string
 	ownerID  string
 }
@@ -84,8 +83,7 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled bool) *noteAPITest
 	clock := &fakeTimelineClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{Clock: clock})
 
-	provider := fixedProvider(testAllowedUserID, true, nil)
-	miauthSvc := miauth.NewService(db, db.Repos, provider, defaultMiAuthTestConfig())
+	miauthSvc := miauth.NewService(db, db.Repos, defaultMiAuthTestConfig())
 
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
@@ -93,18 +91,16 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled bool) *noteAPITest
 		MiAuthService:   miauthSvc,
 		TimelineService: timelineSvc,
 		LocalOrigin:     testLocalOrigin,
-		IdentityOrigin:  testIdentityOrigin,
 		LLMEnabled:      llmEnabled,
 	})
 
-	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock, provider: provider}
+	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}
 	ts.token, ts.ownerID = mustIssueToken(t, ts.Server, "note-api-setup", "read:account,write:notes")
 	return ts
 }
 
-// mustIssueToken drives a full MiAuth local-session -> upstream callback
-// -> check flow against srv (whose provider must already be scripted to
-// approve testAllowedUserID) for the given requested permission string,
+// mustIssueToken drives a full MiAuth local-session -> CLI-equivalent
+// approval -> check flow against srv for the given permission string,
 // and returns the issued raw API token and the owner's local actor ID.
 // routeSessionID must be unique per call on the same srv: a route session
 // is one-time-use.
@@ -114,29 +110,11 @@ func mustIssueToken(t *testing.T, srv *Server, routeSessionID, permission string
 	startReq := httptest.NewRequest(http.MethodGet, "/miauth/"+routeSessionID+"?permission="+url.QueryEscape(permission), nil)
 	startRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(startRec, startReq)
-	if startRec.Code != http.StatusFound {
-		t.Fatalf("GET /miauth/%s = %d %q, want %d", routeSessionID, startRec.Code, startRec.Body.String(), http.StatusFound)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("GET /miauth/%s = %d %q, want %d", routeSessionID, startRec.Code, startRec.Body.String(), http.StatusOK)
 	}
-	loc, err := startRec.Result().Location()
-	if err != nil {
-		t.Fatalf("parse redirect location: %v", err)
-	}
-	cbQuery := loc.Query().Get("callback")
-	cb, err := url.Parse(cbQuery)
-	if err != nil {
-		t.Fatalf("parse embedded callback %q: %v", cbQuery, err)
-	}
-	id := cb.Query().Get("id")
-	state := cb.Query().Get("state")
-	if id == "" || state == "" {
-		t.Fatalf("callback missing id/state: %q", cbQuery)
-	}
-
-	callbackReq := httptest.NewRequest(http.MethodGet, "/miauth/callback?id="+id+"&state="+state, nil)
-	callbackRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(callbackRec, callbackReq)
-	if callbackRec.Code != http.StatusOK {
-		t.Fatalf("GET /miauth/callback = %d %q, want %d", callbackRec.Code, callbackRec.Body.String(), http.StatusOK)
+	if err := srv.miauth.ApproveSession(t.Context(), routeSessionID); err != nil {
+		t.Fatalf("approve MiAuth session: %v", err)
 	}
 
 	checkReq := httptest.NewRequest(http.MethodPost, "/api/miauth/"+routeSessionID+"/check", strings.NewReader("{}"))
