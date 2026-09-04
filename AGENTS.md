@@ -76,6 +76,8 @@ Tests must cover success and failure paths. Use temporary SQLite databases and f
 
 Each endpoint change needs protocol contract tests. Each migration needs a fresh-database test and an upgrade test. Each durable job needs restart, duplicate-delivery, retry-exhaustion, and cancellation coverage where applicable.
 
+`contract/aria_client` is a second, independent layer of note-API contract testing: a Dart package depending on `misskey_dart` (the pinned client library Aria itself uses, see `docs/compat/aria-v1.5.11.md`) that decodes real responses from a running `bin/server` with the actual generated parser Aria would use, rather than this repository's own idea of the wire shape. `make contract-test` (`scripts/run-contract-tests.sh`) drives it: it builds and runs `cmd/fakemisskey`, a test-only stand-in for the upstream Misskey instance, to complete a real MiAuth HTTP round trip and obtain a local API token exactly the way Aria does — no real credentials or network access required, consistent with the rule above. It is intentionally not part of `make check`/`test-race` or `ci.yml` (it needs the Dart SDK); it runs as its own CI job, `.github/workflows/contract-tests.yml`. It substitutes for Issue #7's real-Aria end-to-end acceptance step; see `docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for that decision's scope and limits.
+
 ## Definition of done
 
 A change is done only when:

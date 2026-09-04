@@ -590,6 +590,25 @@ verified.
 - **`/api/notes/children`**'s `depth` request field is accepted but not
   otherwise enforced: `ListChildren` already returns only direct children
   regardless of the requested depth.
+- **Real Aria end-to-end verification substitute**: this issue's
+  acceptance criteria call for a real Aria v1.5.11 login → post → reload
+  → reply → conversation run. That has not been performed. In its place,
+  `contract/aria_client` (a Dart package depending on the pinned
+  `misskey_dart` commit above, run via `make contract-test` /
+  `scripts/run-contract-tests.sh`) decodes real responses from a running
+  `bin/server` with the actual generated parser Aria itself uses, and
+  asserts on the decoded fields (created-note round trip, timeline
+  ordering and `untilId` paging, `notesCount` accounting,
+  `NO_SUCH_NOTE`/`MisskeyException` decoding). This is judged sufficient
+  to close Issue #7 without a real device run: the specific residual risk
+  the wire-shape 要実機確認 labels above exist for — Aria's real decoder
+  rejecting a response this service considers valid — is exactly what
+  this suite exercises. What it cannot cover is anything about the real
+  Aria *application* beyond its HTTP client library: UI rendering, its
+  MiAuth browser/deep-link consent flow end to end (`cmd/fakemisskey`
+  approves unconditionally rather than reproducing a consent screen), and
+  any real Misskey server's actual behavior where this document still
+  says 要実機確認. Those remain open until a real device run happens.
 
 ## Non-goals and implementation boundary
 

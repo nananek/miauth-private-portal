@@ -238,6 +238,18 @@ into; `cmd/server` constructs it from the same `*sqlite.DB` as
 `internal/miauth.Service` (one `db.Repos`, two independent services, no
 shared mutable state beyond the database itself).
 
+### Contract testing
+
+`cmd/fakemisskey` and `contract/aria_client` (run via `make
+contract-test`) are test-only tooling that verifies this note API surface
+against `misskey_dart`, the client library Aria itself uses — see
+[README.md](../../README.md#contract-tests) and
+`docs/compat/aria-v1.5.11.md`'s "Issue #7 implementation notes" for what
+it covers. `cmd/fakemisskey` unconditionally approves every MiAuth
+session; it is never reachable from a production deployment, since
+neither the `build` Makefile target nor the `Dockerfile` build or copy
+it.
+
 ## SQLite
 
 `internal/storage/sqlite.Open` is the only place in this service that opens

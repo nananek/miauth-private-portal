@@ -25,7 +25,23 @@ gracefully, waiting for in-flight requests up to
 `HTTP_SHUTDOWN_GRACE_PERIOD` before forcing connections closed.
 
 Other `make` targets: `fmt`, `fmt-check`, `vet`, `test`, `test-race`,
-`build`, `tidy`.
+`build`, `tidy`, `contract-test`.
+
+## Contract tests
+
+`make contract-test` runs `contract/aria_client`, a Dart package
+depending on `misskey_dart` (the pinned client library Aria itself uses)
+against a real `bin/server` instance, in place of the unautomated real-Aria
+end-to-end run Issue #7's acceptance criteria otherwise call for — see
+[docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Issue #7
+implementation notes". It requires the [Dart SDK](https://dart.dev/get-dart)
+and `jq` in addition to this project's normal Go toolchain; everything else
+(including `cmd/fakemisskey`, a test-only stand-in for the upstream Misskey
+instance) is self-contained and needs no real credentials or network access.
+It runs in its own CI workflow
+([`.github/workflows/contract-tests.yml`](.github/workflows/contract-tests.yml)),
+separate from `ci.yml`, and is never built into the production image (see
+`cmd/fakemisskey`'s package doc comment).
 
 ## Container
 
