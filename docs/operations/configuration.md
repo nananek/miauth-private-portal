@@ -310,3 +310,18 @@ cancelled `context.Context`), marks the registry not-ready, and calls
 in-flight requests do not finish within that window, it force-closes
 remaining connections via `http.Server.Close` rather than hanging
 indefinitely.
+
+## Running in a container
+
+See the README's [Container](../../README.md#container) section for the
+`docker build`/`docker run` commands and volume/uid requirements. Two
+configuration points specific to a container deployment:
+
+- `.env` is never baked into the image (`.dockerignore` excludes it):
+  configure a container deployment entirely through environment
+  variables (`docker run -e`, a Compose `environment:` block, or your
+  orchestrator's equivalent), never a mounted `.env` file.
+- The "set but empty" startup error above (an unresolved
+  `${VAR}` in a Compose file or an orchestrator's env-from-secret
+  wiring) is a common way a container-based deployment trips this check;
+  the fix is the same — unset the variable rather than passing it empty.
