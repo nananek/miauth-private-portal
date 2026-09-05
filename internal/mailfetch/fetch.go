@@ -98,16 +98,21 @@ func errorResponse(category ingest.Category, msg string) rpc.Response {
 }
 
 // classifyConnError maps a dial/login failure to an ingest.Category. It
-// never inspects the underlying error's text: go-imap v1's Client.Login
-// returns a plain error built from the server's own NO/BAD response text
-// for both "wrong credentials" and other command-execution failures alike
-// (there is no typed distinction to check client-side, unlike
-// server-side-only *imap.ErrStatusResp), and that text is untrusted,
-// server-controlled content this package must not pattern-match on. The
-// practical cost of this imprecision: a wrong password is retried like a
-// transient failure (internal/jobs' normal backoff, up to
-// JOBS_MAX_ATTEMPTS) rather than failing permanently on the first
-// attempt — a documented limitation, not a silent one.
+// never inspects the underlying error's text — go-imap v1's Client.Login
+// returns a plain error built from the server's own NO/BAD response text,
+// which is untrusted, server-controlled content this package must not
+// pattern-match on — but it does distinguish "the server rejected the
+// LOGIN command" (dial wraps that case as ErrLoginFailed) from every
+// earlier connection-establishment failure, without needing go-imap's
+// raw *imap.StatusResp.Type. A LOGIN rejection is always
+// CategoryClientError (permanent, unless it was actually a timeout, checked
+// first below): retrying identical credentials against the same account
+// cannot succeed, and internal/ingest.Scheduler re-enqueues a poll job
+// every PollInterval regardless of a prior job's outcome (nothing
+// disables a source after repeated failures), so classifying a bad
+// password as retryable would mean repeated failed-login attempts against
+// the mail server on every job retry *and* every poll tick indefinitely —
+// a real risk of tripping the provider's own account lockout.
 func classifyConnError(err error) (ingest.Category, string) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
@@ -118,6 +123,9 @@ func classifyConnError(err error) (ingest.Category, string) {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return ingest.CategoryTimeout, "connect timed out"
+	}
+	if errors.Is(err, ErrLoginFailed) {
+		return ingest.CategoryClientError, "imap server rejected login (bad credentials or access denied)"
 	}
 	return ingest.CategoryTransport, "connection failed"
 }

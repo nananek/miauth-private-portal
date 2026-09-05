@@ -34,6 +34,24 @@ var ErrUnsupportedTLSMode = errors.New("mailfetch: unsupported tls mode")
 // req.Password in the clear, so the connection is refused instead.
 var ErrStartTLSUnavailable = errors.New("mailfetch: server does not support STARTTLS")
 
+// ErrLoginFailed reports that the server accepted the connection (and,
+// for "starttls", the TLS upgrade) but rejected the LOGIN command
+// itself — a tagged NO or BAD response to c.Login. classifyConnError
+// maps this to ingest.CategoryClientError (permanent) rather than
+// CategoryTransport: retrying the exact same credentials against the
+// same account cannot succeed, and unlike a transient network blip,
+// retrying it anyway on internal/jobs' backoff schedule — and then
+// again from scratch on every ingest.Scheduler poll tick, since nothing
+// disables a source after repeated failures — risks tripping the mail
+// provider's own failed-login lockout. dial reaches this classification
+// without needing go-imap's raw *imap.StatusResp.Type (NO vs BAD): that
+// distinction is only observable via the low-level Client.Execute path,
+// which does not update Client's private auth-state bookkeeping the way
+// Client.Login does, so using it here would leave the connection unable
+// to Select/Examine afterwards. Tagging the error by which step
+// produced it (post-connect, at LOGIN) is sufficient and much simpler.
+var ErrLoginFailed = errors.New("mailfetch: imap server rejected login")
+
 // dial connects to req's IMAP server, negotiates TLS per req.TLSMode, and
 // logs in. On any error the caller owns no connection to close.
 func dial(req rpc.Request, timeout time.Duration) (*client.Client, error) {
@@ -71,7 +89,7 @@ func dial(req rpc.Request, timeout time.Duration) (*client.Client, error) {
 	c.Timeout = timeout
 	if err := c.Login(req.Username, req.Password); err != nil {
 		_ = c.Logout()
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrLoginFailed, err)
 	}
 	return c, nil
 }

@@ -60,6 +60,7 @@ func TestClassifyConnError(t *testing.T) {
 		{"net timeout", timeoutError{}, ingest.CategoryTimeout},
 		{"unsupported tls mode", ErrUnsupportedTLSMode, ingest.CategoryPolicy},
 		{"starttls unavailable", ErrStartTLSUnavailable, ingest.CategoryPolicy},
+		{"login failed", ErrLoginFailed, ingest.CategoryClientError},
 		{"other", errors.New("connection reset"), ingest.CategoryTransport},
 	}
 	for _, tt := range tests {
@@ -285,6 +286,13 @@ func TestFetch_WrongPasswordFails(t *testing.T) {
 	}
 	if len(resp.Items) != 0 {
 		t.Errorf("Items = %v, want none on a failed login", resp.Items)
+	}
+	// A rejected LOGIN must fail permanently (ingest.CategoryClientError),
+	// not be retried like a transient transport failure: retrying the
+	// same wrong password on every job attempt and every scheduler poll
+	// tick risks tripping the mail provider's own failed-login lockout.
+	if resp.Error.Category != string(ingest.CategoryClientError) {
+		t.Errorf("Error.Category = %q, want %q", resp.Error.Category, ingest.CategoryClientError)
 	}
 }
 
