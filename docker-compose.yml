@@ -1,0 +1,61 @@
+# Issue #12 / docs/decisions/0003-imap-mailfetch-isolation.md: the
+# "mailfetch" service is this repository's untrusted IMAP/MIME
+# processing sidecar, isolated from "server" in its own container.
+#
+# - Plain `docker compose up -d` starts only "server" (RSS ingestion,
+#   LLM features, and everything else this service does, all work
+#   without IMAP). Leave IMAP_ENABLED=false (the default) in .env.
+# - `docker compose --profile imap up -d` also starts "mailfetch", for a
+#   deployment with IMAP_ENABLED=true.
+#
+# "server" does not declare a depends_on against "mailfetch": a fetch
+# against an unreachable mailfetch socket is already a normal, retried
+# transport failure (internal/ingest's existing job backoff), so there is
+# no hard startup-order requirement between the two containers.
+#
+# Configure both services from the same .env (copy .env.example first);
+# see docs/operations/configuration.md for every key.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Overrides .env's own IMAP_MAILFETCH_SOCKET/DB_PATH defaults to
+      # this compose file's volume mount points, since a value pointing
+      # at a bare-host path would not resolve inside the container.
+      IMAP_MAILFETCH_SOCKET: /run/mailfetch/mailfetch.sock
+      DB_PATH: /data/portal.db
+    volumes:
+      - portal-data:/data
+      - mailfetch-socket:/run/mailfetch
+    restart: unless-stopped
+
+  mailfetch:
+    profiles: ["imap"]
+    build:
+      context: .
+      dockerfile: Dockerfile.mailfetch
+    environment:
+      MAILFETCH_SOCKET_PATH: /run/mailfetch/mailfetch.sock
+    volumes:
+      - mailfetch-socket:/run/mailfetch
+    # Untrusted-data hardening from ADR-0003: no published port (only
+    # reachable through the shared socket volume above), a read-only root
+    # filesystem (the socket directory itself stays writable because it
+    # is a mounted volume, not part of the image's own filesystem), every
+    # Linux capability dropped, and no privilege escalation.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  portal-data:
+  mailfetch-socket:

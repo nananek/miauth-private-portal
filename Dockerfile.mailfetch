@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+
+# Builder: same pure-Go, CGO_ENABLED=0 static-binary pattern as the main
+# Dockerfile. This image builds only cmd/mailfetch, so
+# github.com/emersion/go-imap and github.com/emersion/go-message
+# (imported by internal/mailfetch, used only from cmd/mailfetch) are
+# compiled into this binary and this binary alone — never into the main
+# server image built by ./Dockerfile. See
+# docs/decisions/0003-imap-mailfetch-isolation.md for why this is a
+# separate image/container rather than a second binary bundled into the
+# main one.
+FROM golang:1.25-bookworm AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mailfetch ./cmd/mailfetch
+# An empty placeholder directory, copied into the runtime stage below
+# with nonroot ownership. Docker/Compose populates a freshly created
+# named volume mounted at that same path from whatever the image already
+# has there (files and, notably, the mount point directory's own
+# ownership/permissions) — this is what makes a brand-new
+# `mailfetch-socket` volume (docker-compose.yml) already writable by the
+# nonroot runtime user without ever needing a shell inside the final
+# image to chown it.
+RUN mkdir -p /out/socket-dir
+
+# Runtime: distroless static + nonroot (uid 65532), no shell — the same
+# posture as the main Dockerfile. This process publishes no network
+# port; it only ever listens on a Unix domain socket under
+# MAILFETCH_SOCKET_PATH's directory, which must be a volume shared with
+# whatever container/process runs cmd/server. A bind-mounted host
+# directory here (rather than a named volume) still needs the same
+# manual chmod/chown the main Dockerfile's README section documents for
+# /data, for the same "no shell to fix it from inside" reason.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/mailfetch /mailfetch
+COPY --chown=nonroot:nonroot --from=builder /out/socket-dir /run/mailfetch
+
+ENV MAILFETCH_SOCKET_PATH=/run/mailfetch/mailfetch.sock
+
+VOLUME ["/run/mailfetch"]
+
+ENTRYPOINT ["/mailfetch"]
