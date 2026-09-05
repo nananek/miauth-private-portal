@@ -5,12 +5,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -81,6 +83,7 @@ var implementedEndpoints = []string{
 	"meta",
 	"endpoints",
 	"i",
+	"i/update",
 	"notes/create",
 	"notes/timeline",
 	"notes/show",
@@ -100,6 +103,68 @@ func (s *Server) handleAPII(w http.ResponseWriter, r *http.Request) {
 	owner, err := s.miauth.DescribeOwner(r.Context(), actorID)
 	if err != nil {
 		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newMeDetailed(owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
+}
+
+// handleAPIIUpdate handles POST /api/i/update (Issue #23 PR1). Only
+// display-name self-edit is implemented: docs/compat/aria-v1.5.11.md's
+// "POST /api/i/update" section records that the pinned misskey_dart
+// IUpdateRequest model has no username field at all, and Aria's profile
+// screen has no username input either, so there is no observed wire
+// path to accept-and-apply a username change (AGENTS.md: do not invent
+// a protocol beyond what a real client is shown to use).
+//
+// Unlike handleNotesCreate's enumerated per-field rejection,
+// IUpdateRequest has 40+ other fields (avatar, description, locked
+// status, mute lists, ...) this issue's Non-goals exclude; naming each
+// one here would risk silently missing one (and getting an exact
+// wire-key name wrong would itself be a guess). Decoding into a raw
+// key set and rejecting anything beyond "i"/"name" rejects all of them
+// correctly without needing to know their exact names.
+func (s *Server) handleAPIIUpdate(w http.ResponseWriter, r *http.Request) {
+	raw := map[string]json.RawMessage{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+			writeInvalidParam(w, "malformed request body")
+			return
+		}
+	}
+	fields := make([]string, 0, len(raw))
+	for field := range raw {
+		if field == "i" || field == "name" {
+			continue
+		}
+		fields = append(fields, field)
+	}
+	if len(fields) > 0 {
+		sort.Strings(fields)
+		writeUnsupportedFeature(w, fields[0])
+		return
+	}
+
+	var name *string
+	if nameRaw, ok := raw["name"]; ok {
+		if err := json.Unmarshal(nameRaw, &name); err != nil {
+			writeInvalidParam(w, "name must be a string")
+			return
+		}
+	}
+	if name == nil {
+		writeInvalidParam(w, "name is required")
+		return
+	}
+
+	actorID := LocalActorIDFromContext(r.Context())
+	owner, err := s.miauth.UpdateOwnerDisplayName(r.Context(), actorID, *name)
+	if err != nil {
+		if errors.Is(err, miauth.ErrNotOwner) {
+			writeAuthenticationFailed(w)
+			return
+		}
+		s.logger.Error("update owner display name failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)
 		return
 	}

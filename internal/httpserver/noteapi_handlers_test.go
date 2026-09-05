@@ -39,7 +39,7 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	want := map[string]bool{
-		"meta": true, "endpoints": true, "i": true,
+		"meta": true, "endpoints": true, "i": true, "i/update": true,
 		"notes/create": true, "notes/timeline": true, "notes/show": true,
 		"notes/conversation": true, "notes/children": true,
 	}
@@ -123,6 +123,7 @@ var protectedEndpoints = []struct {
 	body map[string]any
 }{
 	{"/api/i", map[string]any{}},
+	{"/api/i/update", map[string]any{"name": "new name"}},
 	{"/api/notes/create", map[string]any{"text": "hello"}},
 	{"/api/notes/timeline", map[string]any{}},
 	{"/api/notes/show", map[string]any{"noteId": "does-not-exist"}},
@@ -159,6 +160,7 @@ func TestProtectedEndpoints_WrongScopeIsAuthenticationFailed(t *testing.T) {
 		body map[string]any
 	}{
 		{"/api/i", map[string]any{}},                           // needs read:account
+		{"/api/i/update", map[string]any{"name": "new name"}},  // needs write:account
 		{"/api/notes/create", map[string]any{"text": "hello"}}, // needs write:notes
 	}
 	for _, c := range cases {

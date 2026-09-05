@@ -218,3 +218,144 @@ func TestCheckTokenListRevokeAndDescribeOwner(t *testing.T) {
 		t.Fatalf("revoked VerifyToken error = %v", err)
 	}
 }
+
+// TestUpdateOwnerDisplayName_PersistsAndReplacesConfigValue is Issue #23
+// PR1's core case: once the owner exists, DescribeOwner/Check must read
+// display name from the actors row, not from cfg.OwnerDisplayName ("Test
+// Owner" here) at all — updating it must fully replace the initial
+// config-seeded value, not merely append to or coexist with it.
+func TestUpdateOwnerDisplayName_PersistsAndReplacesConfigValue(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ts.Check(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := ts.UpdateOwnerDisplayName(t.Context(), result.OwnerActorID, "New Display Name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DisplayName != "New Display Name" {
+		t.Fatalf("UpdateOwnerDisplayName result.DisplayName = %q, want %q", updated.DisplayName, "New Display Name")
+	}
+	if updated.Username != "owner" {
+		t.Fatalf("UpdateOwnerDisplayName result.Username = %q, want unchanged %q", updated.Username, "owner")
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), result.OwnerActorID)
+	if err != nil || profile.DisplayName != "New Display Name" {
+		t.Fatalf("DescribeOwner after update = %+v, err = %v, want DisplayName %q", profile, err, "New Display Name")
+	}
+
+	// Clearing back to "" must also persist (not be confused with "never
+	// set"): DescribeOwner must report "" again, not fall back to the
+	// original config value or the previous display name.
+	if _, err := ts.UpdateOwnerDisplayName(t.Context(), result.OwnerActorID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if profile, err := ts.DescribeOwner(t.Context(), result.OwnerActorID); err != nil || profile.DisplayName != "" {
+		t.Fatalf("DescribeOwner after clearing = %+v, err = %v, want empty DisplayName", profile, err)
+	}
+}
+
+// TestUpdateOwnerDisplayName_RejectsNonOwnerActor is a defense-in-depth
+// check: no real code path issues a write:account-scoped token bound to
+// a non-owner actor (RequireScope/VerifyToken only ever resolve to the
+// owner), but UpdateOwnerDisplayName must still refuse to silently edit
+// the reserved assistant/system presentation actors if it were ever
+// called with one of their IDs.
+func TestUpdateOwnerDisplayName_RejectsNonOwnerActor(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.db.Actors.EnsureReservedActors(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := ts.db.Actors.GetByType(t.Context(), domain.ActorAssistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.UpdateOwnerDisplayName(t.Context(), assistant.ID, "Should Not Apply"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("UpdateOwnerDisplayName on assistant actor error = %v, want ErrNotOwner", err)
+	}
+	after, err := ts.db.Actors.Get(t.Context(), assistant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DisplayName != nil {
+		t.Fatalf("assistant actor DisplayName = %v, want unchanged nil", after.DisplayName)
+	}
+}
+
+// TestBackfillOwnerDisplayName_SeedsNilDisplayName covers the pre-Issue-#23
+// PR1 owner row case: an Owner actor created before migration 0012 added
+// display_name (or by a caller whose Config left OwnerDisplayName unset)
+// has display_name = NULL, and DescribeOwner must not keep reporting ""
+// forever once cfg.OwnerDisplayName ("Test Owner", from newTestService)
+// is available to backfill it from.
+func TestBackfillOwnerDisplayName_SeedsNilDisplayName(t *testing.T) {
+	ts := newTestService(t)
+	owner := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: ts.clock.Now()}
+	if err := ts.db.Actors.Create(t.Context(), owner); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName: %v", err)
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.DisplayName != "Test Owner" {
+		t.Errorf("DescribeOwner.DisplayName after backfill = %q, want %q", profile.DisplayName, "Test Owner")
+	}
+}
+
+// TestBackfillOwnerDisplayName_LeavesExplicitValueAlone ensures the
+// backfill never overwrites a display name that was already explicitly
+// set, including an explicit "" from UpdateOwnerDisplayName clearing it
+// — that must stay distinct from "never set" (see SetDisplayName's doc
+// comment) and must never revert to the config value.
+func TestBackfillOwnerDisplayName_LeavesExplicitValueAlone(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ts.Check(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.UpdateOwnerDisplayName(t.Context(), result.OwnerActorID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName: %v", err)
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), result.OwnerActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.DisplayName != "" {
+		t.Errorf("DescribeOwner.DisplayName after backfill = %q, want unchanged empty string", profile.DisplayName)
+	}
+}
+
+// TestBackfillOwnerDisplayName_NoOwnerYet must be a no-op, not an error,
+// when no MiAuth session has ever been approved yet.
+func TestBackfillOwnerDisplayName_NoOwnerYet(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName with no owner yet: %v", err)
+	}
+}

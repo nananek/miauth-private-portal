@@ -254,6 +254,65 @@ func TestMigrate_UpgradeAppliesExternalSourceCursorColumns(t *testing.T) {
 	}
 }
 
+// TestMigrate_UpgradeAppliesActorDisplayNameColumn backs migration 0012
+// (Issue #23 PR1): a pre-existing actors row created before 0012 applied
+// must survive with display_name defaulted to NULL (meaning "never
+// explicitly set" — see actorRepository.SetDisplayName's doc comment),
+// and a fresh database must expose the same column from the start
+// (covered generically by TestMigrate_FreshDatabase above).
+func TestMigrate_UpgradeAppliesActorDisplayNameColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 11 {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+
+	const ownerID = "pre-existing-owner"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var displayName sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT display_name FROM actors WHERE id = ?`, ownerID,
+	).Scan(&displayName); err != nil {
+		t.Fatalf("query upgraded row: %v", err)
+	}
+	if displayName.Valid {
+		t.Errorf("upgraded row has non-NULL display_name: %v", displayName)
+	}
+}
+
 func TestMigrate_RejectsEditedAppliedMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := t.Context()

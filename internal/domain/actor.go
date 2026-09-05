@@ -27,6 +27,13 @@ type Actor struct {
 	ID        string
 	Type      ActorType
 	CreatedAt time.Time
+	// DisplayName is nil until explicitly set. It is the only Actor field
+	// this deployment lets the owner self-edit (Issue #23 PR1's POST
+	// /api/i/update); Username has no such field — see
+	// docs/compat/aria-v1.5.11.md's "POST /api/i/update" section for why
+	// this is deliberately narrower than Misskey's real profile-edit
+	// surface, not an oversight.
+	DisplayName *string
 }
 
 // ActorRepository persists and looks up this service's local actors.
@@ -44,4 +51,10 @@ type ActorRepository interface {
 	Create(ctx context.Context, a Actor) error
 	Get(ctx context.Context, id string) (Actor, error)
 	GetByType(ctx context.Context, actorType ActorType) (Actor, error)
+	// SetDisplayName updates actorID's mutable display name, including
+	// clearing it back to empty. It returns ErrNotFound if actorID does
+	// not exist. Callers are responsible for restricting this to the
+	// Owner actor (internal/miauth.Service.UpdateOwnerDisplayName does):
+	// this method itself applies to whatever actorID it is given.
+	SetDisplayName(ctx context.Context, actorID string, displayName string) error
 }
