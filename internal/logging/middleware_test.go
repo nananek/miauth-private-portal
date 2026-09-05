@@ -1,12 +1,31 @@
 package logging
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// fakeHijacker wraps an http.ResponseWriter to additionally implement
+// http.Hijacker, standing in for the real net/http ResponseWriter these
+// tests cannot construct directly (httptest.NewRecorder does not
+// implement http.Hijacker at all, which is exactly why statusRecorder's
+// own Hijack needs a dedicated test rather than reusing the httptest
+// recorder every other test in this file relies on).
+type fakeHijacker struct {
+	http.ResponseWriter
+	conn net.Conn
+	rw   *bufio.ReadWriter
+}
+
+func (f *fakeHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return f.conn, f.rw, nil
+}
 
 func TestAccessLog_LogsPatternNotRawPath(t *testing.T) {
 	var buf bytes.Buffer
@@ -138,6 +157,77 @@ func TestAccessLog_PanicAfterWriteHeaderLogsActualStatus(t *testing.T) {
 
 	if !strings.Contains(buf.String(), `"status":200`) {
 		t.Errorf("expected the already-written 200 status logged, not a hardcoded 500, got: %s", buf.String())
+	}
+}
+
+func TestStatusRecorder_HijackDelegatesToUnderlyingResponseWriter(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	fake := &fakeHijacker{
+		ResponseWriter: httptest.NewRecorder(),
+		conn:           server,
+		rw:             bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)),
+	}
+
+	rec := &statusRecorder{ResponseWriter: fake, status: http.StatusOK}
+
+	hijacker, ok := http.ResponseWriter(rec).(http.Hijacker)
+	if !ok {
+		t.Fatal("expected *statusRecorder to implement http.Hijacker")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatalf("Hijack() error = %v", err)
+	}
+	if conn != server {
+		t.Error("Hijack() did not return the underlying ResponseWriter's connection")
+	}
+}
+
+func TestStatusRecorder_HijackErrorsWhenUnderlyingResponseWriterCannotHijack(t *testing.T) {
+	// httptest.NewRecorder does not implement http.Hijacker, matching a
+	// ResponseWriter type that genuinely cannot be hijacked (e.g. an
+	// HTTP/2 stream).
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), status: http.StatusOK}
+
+	if _, _, err := rec.Hijack(); err == nil {
+		t.Fatal("expected an error when the underlying ResponseWriter does not support hijacking")
+	}
+}
+
+func TestAccessLog_AllowsHandlerToHijackConnection(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, Config{Format: "json", Level: "info"})
+
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	fake := &fakeHijacker{
+		ResponseWriter: httptest.NewRecorder(),
+		conn:           server,
+		rw:             bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)),
+	}
+
+	var hijackErr error
+	handler := AccessLog(logger, "/streaming", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			hijackErr = errors.New("ResponseWriter passed through AccessLog does not implement http.Hijacker")
+			return
+		}
+		_, _, hijackErr = hijacker.Hijack()
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
+	handler.ServeHTTP(fake, req)
+
+	if hijackErr != nil {
+		t.Fatalf("handler could not hijack through AccessLog's statusRecorder: %v", hijackErr)
 	}
 }
 

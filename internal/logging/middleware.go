@@ -1,7 +1,10 @@
 package logging
 
 import (
+	"bufio"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -35,6 +38,23 @@ func (r *statusRecorder) WriteHeader(status int) {
 func (r *statusRecorder) Write(b []byte) (int, error) {
 	r.wrote = true
 	return r.ResponseWriter.Write(b)
+}
+
+// Hijack implements http.Hijacker by delegating to the wrapped
+// ResponseWriter. statusRecorder embeds http.ResponseWriter, but Go does
+// not promote Hijack through that embedding because http.ResponseWriter
+// itself does not declare it — so without this method, every route
+// AccessLog wraps (i.e. every route, see Server.Handle) failed a
+// `w.(http.Hijacker)` type assertion even on a real connection that
+// supports hijacking. GET /streaming (streaming_handlers.go) needs to
+// hijack the connection to hand it to the WebSocket library, and was the
+// first route in this codebase to need it.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("logging: underlying ResponseWriter does not support http.Hijacker")
+	}
+	return hijacker.Hijack()
 }
 
 // AccessLog wraps h with a request-completion log line recording the

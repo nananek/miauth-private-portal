@@ -82,6 +82,29 @@ func LocalActorIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// verifyTokenFromQuery authenticates a request whose local API token
+// arrives as the "i" query parameter instead of the JSON request body's
+// "i" field RequireScope expects. Its only caller is GET /streaming
+// (streaming_handlers.go): a WebSocket upgrade is a GET request with no
+// body, so Aria/misskey_dart's streaming client puts the token on the
+// URL instead — the same convention real Misskey servers and
+// nananek/sakurasato's /streaming precedent use (AGENTS.md). It shares
+// miauth.Service.VerifyToken with RequireScope; only the token's
+// transport differs, not the verification logic.
+//
+// Like the request path for GET /miauth/{session} (see
+// logging.AccessLog's doc comment), the query string here carries a
+// bearer-equivalent secret; AccessLog only ever logs the route pattern,
+// never the raw path or query, so this does not introduce a new logging
+// exposure.
+func verifyTokenFromQuery(ctx context.Context, svc *miauth.Service, r *http.Request, scope string) (string, error) {
+	token := r.URL.Query().Get("i")
+	if token == "" {
+		return "", miauth.ErrTokenInvalid
+	}
+	return svc.VerifyToken(ctx, token, scope)
+}
+
 func writeAuthenticationFailed(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)

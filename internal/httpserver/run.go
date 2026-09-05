@@ -58,6 +58,12 @@ type Options struct {
 	// Independent of LLMEnabled: an operator can run one feature without
 	// the other.
 	LLMClassificationEnabled bool
+
+	// StreamPingInterval configures GET /streaming's keepalive ping
+	// interval (Issue #41). Zero (its safe default) means
+	// defaultStreamPingInterval (streaming_handlers.go); tests shorten it
+	// to observe a ping/pong cycle without waiting 30+ seconds.
+	StreamPingInterval time.Duration
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once
