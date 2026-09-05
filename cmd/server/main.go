@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/ingest"
+	"github.com/nananek/miauth-private-portal/internal/ingest/imap"
 	"github.com/nananek/miauth-private-portal/internal/ingest/rss"
 	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/jobs"
@@ -142,6 +144,20 @@ func run() error {
 		jobsManager.Register(llmclassify.JobType, llmClassifySvc.Handle)
 	}
 
+	// ingestSvc is shared by every internal/ingest.Adapter kind (RSS,
+	// IMAP, ...): internal/ingest.Service.Handle dispatches to the right
+	// one by the claimed job's source.Kind, and jobs.Manager.Register
+	// overwrites any earlier registration for the same job type, so
+	// registering ingest.JobType more than once (one Service per kind)
+	// would silently make only the last-registered kind's adapters
+	// reachable. Constructed only when at least one ingestion feature is
+	// enabled, so a deployment with both disabled never builds one at all.
+	var ingestSvc *ingest.Service
+	if cfg.RSS.Enabled || cfg.IMAP.Enabled {
+		ingestSvc = ingest.NewService(db.Repos, timelineSvc, logger)
+		jobsManager.Register(ingest.JobType, ingestSvc.Handle)
+	}
+
 	// Registered, seeded, and scheduled only when the feature is on: no
 	// safehttp.Client request ever reaches a configured feed URL while
 	// RSS_ENABLED is false, and no domain.ExternalSource row is ever
@@ -159,9 +175,7 @@ func run() error {
 			MaxResponseBytes: cfg.RSS.MaxResponseBytes,
 			SummaryMaxChars:  cfg.RSS.SummaryMaxChars,
 		})
-		ingestSvc := ingest.NewService(db.Repos, timelineSvc, logger)
 		ingestSvc.RegisterAdapter(rssAdapter)
-		jobsManager.Register(ingest.JobType, ingestSvc.Handle)
 
 		seedNow := time.Now().UTC()
 		rssSources := make([]domain.ExternalSource, len(cfg.RSS.FeedURLs))
@@ -178,14 +192,52 @@ func run() error {
 		}, logger)
 	}
 
+	// Registered, seeded, and scheduled only when the feature is on: no
+	// cmd/mailfetch socket is ever dialed while IMAP_ENABLED is false, and
+	// no domain.ExternalSource row is ever created either. Issue #12
+	// supports exactly one configured mailbox (unlike RSS's list of feed
+	// URLs), so exactly one source is seeded here; its URI exists only as
+	// that source's (kind, uri) database identity (see
+	// internal/ingest/imap.Config's doc comment) and is never
+	// re-interpreted by the adapter.
+	var imapScheduler *ingest.Scheduler
+	if cfg.IMAP.Enabled {
+		imapAdapter := imap.NewAdapter(imap.Config{
+			Host:             cfg.IMAP.Host,
+			Port:             cfg.IMAP.Port,
+			TLSMode:          cfg.IMAP.TLSMode,
+			Username:         cfg.IMAP.Username,
+			Password:         cfg.IMAP.Password,
+			Mailbox:          cfg.IMAP.Mailbox,
+			SocketPath:       cfg.IMAP.MailfetchSocket,
+			FetchTimeout:     cfg.IMAP.FetchTimeout,
+			MaxMessageBytes:  cfg.IMAP.MaxMessageBytes,
+			SnippetMaxChars:  cfg.IMAP.SnippetMaxChars,
+			StoreFullBody:    cfg.IMAP.StoreFullBody,
+			FullBodyMaxChars: cfg.IMAP.FullBodyMaxChars,
+		})
+		ingestSvc.RegisterAdapter(imapAdapter)
+
+		imapURI := (&url.URL{Scheme: "imap", Host: fmt.Sprintf("%s:%d", cfg.IMAP.Host, cfg.IMAP.Port), Path: "/" + cfg.IMAP.Mailbox}).String()
+		imapSource := domain.ExternalSource{ID: domain.NewID(), Kind: imap.Kind, URI: imapURI, CreatedAt: time.Now().UTC()}
+		if err := db.ExternalSources.EnsureFromConfig(ctx, []domain.ExternalSource{imapSource}); err != nil {
+			return fmt.Errorf("seed imap source: %w", err)
+		}
+
+		imapScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
+			Kind:         imap.Kind,
+			PollInterval: cfg.IMAP.PollInterval,
+		}, logger)
+	}
+
 	// The HTTP server, durable worker, and (when enabled) ingestion
-	// scheduler share one lifecycle. If any component exits unexpectedly,
+	// schedulers share one lifecycle. If any component exits unexpectedly,
 	// cancel the others and wait for graceful shutdown before closing the
 	// shared database.
 	serviceCtx, cancelServices := context.WithCancel(ctx)
 	defer cancelServices()
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -202,6 +254,14 @@ func run() error {
 		go func() {
 			defer wg.Done()
 			errCh <- rssScheduler.Run(serviceCtx)
+			cancelServices()
+		}()
+	}
+	if imapScheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- imapScheduler.Run(serviceCtx)
 			cancelServices()
 		}()
 	}
