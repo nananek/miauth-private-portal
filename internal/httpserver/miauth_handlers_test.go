@@ -91,10 +91,13 @@ func TestHandleMiAuthStart_RejectsDisallowedCallback(t *testing.T) {
 // handful of fixed constant strings), and the Content-Type is always
 // text/plain, not text/html, so nothing here is ever eligible for
 // browser script execution even if that changed. This test pins both
-// properties.
+// properties by exercising both the success page (permission-only
+// request) and the disallowed-callback error page (a distinct code
+// path, ErrClientCallbackNotAllowed) with the same payload.
 func TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody(t *testing.T) {
 	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
 	payload := `<script>alert(document.cookie)</script>`
+
 	recorder := startLocalSession(t, ts, "route-1", payload, "")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
@@ -104,6 +107,17 @@ func TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody(t *testing.T) 
 	}
 	if strings.Contains(recorder.Body.String(), payload) {
 		t.Errorf("response body echoed the query-supplied permission value verbatim: %q", recorder.Body.String())
+	}
+
+	errRecorder := startLocalSession(t, ts, "route-2", "read:account", payload)
+	if errRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", errRecorder.Code)
+	}
+	if ct := errRecorder.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if strings.Contains(errRecorder.Body.String(), payload) {
+		t.Errorf("error response body echoed the query-supplied callback value verbatim: %q", errRecorder.Body.String())
 	}
 }
 
