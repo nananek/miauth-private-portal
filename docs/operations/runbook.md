@@ -152,10 +152,11 @@ and be re-approved (`miauthctl approve`) to obtain a new one.
   the container has no shell to narrow it from the inside; if your host
   can pre-create the directory as uid `65532`, prefer `chown 65532` plus
   a narrower mode instead.
-- **`cmd/mailfetch`**: ADR-0003 recommends running it under its own
-  low-privilege OS user on a bare host, or (in `docker-compose.yml`)
-  already runs read-only-root-filesystem with every Linux capability
-  dropped — see configuration.md's "Deploying `cmd/mailfetch`" section.
+- **`cmd/mailfetch`**: on a bare host, run it under its own low-privilege
+  OS user; in `docker-compose.yml` it already runs with a read-only root
+  filesystem and every Linux capability dropped, per ADR-0003's
+  untrusted-data hardening — see configuration.md's "Deploying
+  `cmd/mailfetch`" section for both.
 
 ## Reverse proxy and TLS termination
 
