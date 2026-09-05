@@ -121,10 +121,12 @@ type EntryRepository interface {
 	// docs/compat/aria-v1.5.11.md's pagination section. When includeHidden
 	// is false, archived and hidden entries are excluded.
 	ListTimelineDesc(ctx context.Context, before *Cursor, limit int, includeHidden bool) ([]Entry, error)
-	// CountByAuthor returns the total number of entries authored by
-	// actorID, including archived and hidden ones (a Misskey notesCount
-	// never decreases when a note is merely hidden/archived, only when it
-	// is actually deleted, which this service does not support).
+	// CountByAuthor returns the number of entries authored by actorID,
+	// excluding archived and hidden ones. POST /api/notes/delete (Issue
+	// #23 PR3) maps Misskey-compatible delete onto SetHidden(id, true), so
+	// this count must drop when a note is deleted, matching real
+	// Misskey's notesCount decreasing on delete. See
+	// docs/decisions/0004-note-delete-as-hide.md.
 	CountByAuthor(ctx context.Context, actorID string) (int, error)
 	// CountAll returns the total number of entries across every actor,
 	// including archived and hidden ones. It backs POST /api/stats'

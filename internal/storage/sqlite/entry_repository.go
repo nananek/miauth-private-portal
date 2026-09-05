@@ -107,7 +107,7 @@ func (r *entryRepository) ListTimelineDesc(ctx context.Context, before *domain.C
 func (r *entryRepository) CountByAuthor(ctx context.Context, actorID string) (int, error) {
 	var count int
 	if err := r.q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entries WHERE author_actor_id = ?`, actorID,
+		`SELECT COUNT(*) FROM entries WHERE author_actor_id = ? AND archived_at IS NULL AND hidden_at IS NULL`, actorID,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count entries by author: %w", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/nananek/miauth-private-portal/internal/domain"
 )
 
 func TestHandleMeta_AnonymousReturnsLocalOriginOnly(t *testing.T) {
@@ -41,7 +43,8 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 	want := map[string]bool{
 		"meta": true, "endpoints": true, "i": true, "i/update": true,
 		"notes/create": true, "notes/timeline": true, "notes/show": true,
-		"notes/conversation": true, "notes/children": true, "stats": true,
+		"notes/conversation": true, "notes/children": true, "notes/delete": true,
+		"stats": true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("endpoints = %v, want exactly %v", got, want)
@@ -171,6 +174,7 @@ var protectedEndpoints = []struct {
 	{"/api/notes/show", map[string]any{"noteId": "does-not-exist"}},
 	{"/api/notes/conversation", map[string]any{"noteId": "does-not-exist"}},
 	{"/api/notes/children", map[string]any{"noteId": "does-not-exist"}},
+	{"/api/notes/delete", map[string]any{"noteId": "does-not-exist"}},
 }
 
 func TestProtectedEndpoints_MissingTokenIsAuthenticationFailed(t *testing.T) {
@@ -201,9 +205,10 @@ func TestProtectedEndpoints_WrongScopeIsAuthenticationFailed(t *testing.T) {
 		path string
 		body map[string]any
 	}{
-		{"/api/i", map[string]any{}},                           // needs read:account
-		{"/api/i/update", map[string]any{"name": "new name"}},  // needs write:account
-		{"/api/notes/create", map[string]any{"text": "hello"}}, // needs write:notes
+		{"/api/i", map[string]any{}},                                      // needs read:account
+		{"/api/i/update", map[string]any{"name": "new name"}},             // needs write:account
+		{"/api/notes/create", map[string]any{"text": "hello"}},            // needs write:notes
+		{"/api/notes/delete", map[string]any{"noteId": "does-not-exist"}}, // needs write:notes
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {
@@ -602,6 +607,181 @@ func TestHandleNotesChildren_SubjectNotFound(t *testing.T) {
 	ts := newNoteAPITestServer(t)
 	rec := ts.post(t, "/api/notes/children", map[string]any{"noteId": "does-not-exist"})
 	assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+}
+
+// TestHandleNotesDelete_SuccessHidesEverywhereAndDecrementsCount covers
+// Issue #23 PR3's core contract: a successful delete of the owner's own
+// user_post maps onto SetHidden, so the note disappears from every
+// note-reading endpoint (docs/decisions/0004-note-delete-as-hide.md) and
+// notesCount drops by one.
+func TestHandleNotesDelete_SuccessHidesEverywhereAndDecrementsCount(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	firstRec := ts.post(t, "/api/notes/create", map[string]any{"text": "keep"})
+	var first createdNoteResponse
+	mustDecode(t, firstRec, &first)
+	ts.clock.Advance(time.Minute)
+
+	toDeleteRec := ts.post(t, "/api/notes/create", map[string]any{"text": "to delete"})
+	var toDelete createdNoteResponse
+	mustDecode(t, toDeleteRec, &toDelete)
+
+	rec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": toDelete.CreatedNote.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+
+	showRec := ts.post(t, "/api/notes/show", map[string]any{"noteId": toDelete.CreatedNote.ID})
+	assertWireError(t, showRec, http.StatusBadRequest, "NO_SUCH_NOTE")
+
+	timelineRec := ts.post(t, "/api/notes/timeline", map[string]any{})
+	var notes []note
+	mustDecode(t, timelineRec, &notes)
+	for _, n := range notes {
+		if n.ID == toDelete.CreatedNote.ID {
+			t.Errorf("deleted note %q still present in timeline", n.ID)
+		}
+	}
+
+	iRec := ts.post(t, "/api/i", nil)
+	var me meDetailed
+	mustDecode(t, iRec, &me)
+	if me.NotesCount != 1 {
+		t.Errorf("notesCount = %d, want 1", me.NotesCount)
+	}
+	if first.CreatedNote.ID == toDelete.CreatedNote.ID {
+		t.Fatal("test setup produced identical note IDs")
+	}
+}
+
+// TestHandleNotesDelete_ChildSurvivesParentDelete pins plan-issue-23's
+// PR3 acceptance criterion that a deleted note's own children remain
+// reachable (real Misskey deletes only the parent, orphaning children),
+// while the parent itself becomes uniformly unreachable, including
+// through /api/notes/children keyed by the parent's own ID.
+func TestHandleNotesDelete_ChildSurvivesParentDelete(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	rootRec := ts.post(t, "/api/notes/create", map[string]any{"text": "root"})
+	var root createdNoteResponse
+	mustDecode(t, rootRec, &root)
+	ts.clock.Advance(time.Minute)
+
+	replyRec := ts.post(t, "/api/notes/create", map[string]any{"text": "reply", "replyId": root.CreatedNote.ID})
+	var reply createdNoteResponse
+	mustDecode(t, replyRec, &reply)
+
+	deleteRec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": root.CreatedNote.ID})
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete root: %d %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	t.Run("child still visible by direct id", func(t *testing.T) {
+		rec := ts.post(t, "/api/notes/show", map[string]any{"noteId": reply.CreatedNote.ID})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+		}
+	})
+
+	t.Run("child still visible in home timeline", func(t *testing.T) {
+		rec := ts.post(t, "/api/notes/timeline", map[string]any{})
+		var notes []note
+		mustDecode(t, rec, &notes)
+		found := false
+		for _, n := range notes {
+			if n.ID == reply.CreatedNote.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("child %q missing from timeline after parent delete", reply.CreatedNote.ID)
+		}
+	})
+
+	t.Run("children lookup keyed by the deleted parent is NO_SUCH_NOTE", func(t *testing.T) {
+		rec := ts.post(t, "/api/notes/children", map[string]any{"noteId": root.CreatedNote.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+}
+
+// TestHandleNotesDelete_RejectsUnknownAlreadyDeletedAndNonOwnEntries
+// verifies every disallowed case collapses onto the same NO_SUCH_NOTE
+// response, matching this codebase's existing uniform-denial pattern
+// (writeNoSuchNote) rather than letting the caller distinguish "not
+// found" from "not yours" from "already deleted".
+func TestHandleNotesDelete_RejectsUnknownAlreadyDeletedAndNonOwnEntries(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	t.Run("missing_note_id", func(t *testing.T) {
+		rec := ts.post(t, "/api/notes/delete", map[string]any{})
+		assertWireError(t, rec, http.StatusBadRequest, "INVALID_PARAM")
+	})
+
+	t.Run("unknown_note_id", func(t *testing.T) {
+		rec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": "does-not-exist"})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+
+	t.Run("already_hidden", func(t *testing.T) {
+		createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "already hidden"})
+		var created createdNoteResponse
+		mustDecode(t, createRec, &created)
+		if err := ts.timeline.SetHidden(t.Context(), created.CreatedNote.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		rec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": created.CreatedNote.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+
+	t.Run("already_archived", func(t *testing.T) {
+		createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "already archived"})
+		var created createdNoteResponse
+		mustDecode(t, createRec, &created)
+		if err := ts.timeline.SetArchived(t.Context(), created.CreatedNote.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		rec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": created.CreatedNote.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+
+	t.Run("already_deleted_is_not_re_deletable", func(t *testing.T) {
+		createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "delete twice"})
+		var created createdNoteResponse
+		mustDecode(t, createRec, &created)
+		firstDelete := ts.post(t, "/api/notes/delete", map[string]any{"noteId": created.CreatedNote.ID})
+		if firstDelete.Code != http.StatusOK {
+			t.Fatalf("first delete: %d %s", firstDelete.Code, firstDelete.Body.String())
+		}
+		secondDelete := ts.post(t, "/api/notes/delete", map[string]any{"noteId": created.CreatedNote.ID})
+		assertWireError(t, secondDelete, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
+
+	t.Run("non_owner_authored_entry", func(t *testing.T) {
+		rootRec := ts.post(t, "/api/notes/create", map[string]any{"text": "root for reply"})
+		var root createdNoteResponse
+		mustDecode(t, rootRec, &root)
+
+		gen := domain.LLMGeneration{
+			ID:            domain.NewID(),
+			TargetEntryID: root.CreatedNote.ID,
+			Kind:          domain.GenerationReply,
+			Provider:      "test-provider",
+			Model:         "test-model",
+			PromptVersion: "test-v1",
+			Status:        domain.GenerationPending,
+			RequestedAt:   ts.clock.Now(),
+		}
+		if err := ts.db.Generations.Create(t.Context(), gen); err != nil {
+			t.Fatalf("create generation: %v", err)
+		}
+		reply, err := ts.timeline.CreateGeneratedReply(t.Context(), root.CreatedNote.ID, domain.EntryLLMReply, "llm reply body", gen.ID, nil, nil)
+		if err != nil {
+			t.Fatalf("create generated reply: %v", err)
+		}
+
+		rec := ts.post(t, "/api/notes/delete", map[string]any{"noteId": reply.ID})
+		assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_NOTE")
+	})
 }
 
 func noteIDs(notes []note) []string {

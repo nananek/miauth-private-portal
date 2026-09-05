@@ -87,7 +87,7 @@ redacted.
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
 | WebSocket `/streaming` timeline channel | **不要** for MVP; **minimal stub since Issue #41** | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
 | `POST /api/stats` | **必要** for Issue #23 PR2 (implemented) | Server-info page, always reachable via `/{acct}/servers/{host}` | Anonymous; the traced call site always builds a tokenless guest account, so no `i` field is ever sent |
-| `POST /api/notes/delete` | **必要** for Issue #23 (not yet implemented — PR3) | Note footer/sheet delete action, and the post-edit dialog's delete option | `i` token; `write:notes` (already granted — no new scope) |
+| `POST /api/notes/delete` | **必要** for Issue #23 PR3 (implemented) | Note footer/sheet delete action, and the post-edit dialog's delete option | `i` token; `write:notes` (already granted — no new scope) |
 | `POST /api/notes/renote` | **不要** | No traced Aria/misskey_dart source ever sends a dedicated renote-creation request to this path; renoting is `notes/create` with `renoteId` set (already rejected as `UNSUPPORTED_FEATURE`) | N/A — never implement without a new observed source |
 | `POST /api/notes/reactions/create` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's reaction button/picker | `i` token; new `write:reactions` scope (already in Aria's requested permission list, not yet granted by this service) |
 | `POST /api/notes/reactions/delete` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's un-react / change-reaction actions | `i` token; new `write:reactions` scope |
@@ -549,7 +549,7 @@ The pinned `StatsResponse` parser treats every field as optional:
 | `instances` | int | Always `0` — no federation |
 | `driveUsageLocal` / `driveUsageRemote` | int | Always `0` — no drive |
 
-### `POST /api/notes/delete` (Issue #23, not yet implemented — PR3)
+### `POST /api/notes/delete` (Issue #23 PR3, implemented)
 
 Traced from
 [`lib/provider/notes_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/notes_notifier_provider.dart)'s
@@ -573,6 +573,25 @@ call succeeds. This reuses the already-granted `write:notes` scope; no
 new scope is needed. `plan-issue-23`'s confirmed direction (mapping
 delete onto `timeline.Service.SetHidden`, restricted to the owner's own
 `user_post` entries) is unaffected by this trace and remains PR3's basis.
+
+**Implemented as** `Server.handleNotesDelete`
+(`internal/httpserver/noteapi_handlers.go`), registered with the existing
+`write:notes` scope. It resolves `noteId` through `timeline.GetEntry`,
+then collapses every non-deletable case onto the uniform `NO_SUCH_NOTE`
+response `writeNoSuchNote` already gives every other note-reading
+endpoint for an unknown/hidden/archived ID: an unknown note, an
+already-hidden/archived note (`entryVisible`), and a note that exists but
+is not the caller's own `user_post` (`entry.Kind !=
+domain.EntryUserPost || entry.AuthorActorID !=
+LocalActorIDFromContext(ctx)`) are all indistinguishable to the caller. A
+permitted delete calls `timeline.Service.SetHidden(id, true)` and
+responds `200 {}`. See `docs/decisions/0004-note-delete-as-hide.md` for
+why hide (not a new hard delete) was chosen, and why `hidden` rather than
+`archived` is the primitive this maps onto. `EntryRepository.CountByAuthor`
+(hence `/api/i`'s and `/api/miauth/{session}/check`'s `notesCount`) now
+excludes archived/hidden entries, so a successful delete visibly
+decrements it; `EntryRepository.CountAll` (PR2's `/api/stats`) is
+unaffected and keeps counting every entry.
 
 ### `POST /api/notes/renote` (不要 — confirmed no dedicated wire path)
 
@@ -1028,7 +1047,10 @@ verified.
   actor); `alwaysMarkNsfw`/`carefulBot`/`autoAcceptFollowed` are `false`.
 - **`notesCount`** is now real on both `/api/i` and
   `/api/miauth/{session}/check`'s `UserDetailedNotMe`, counting every
-  entry (including archived/hidden ones) authored by the actor.
+  entry (including archived/hidden ones) authored by the actor. **Updated
+  by Issue #23 PR3**: since `/api/notes/delete` shipped, this count
+  excludes archived/hidden entries instead — see the "Issue #23 PR3
+  implementation notes" section below.
 - **`/api/notes/create`** rejects `visibleUserIds`, `reactionAcceptance`,
   `renoteId`, `channelId`, `poll`, `scheduledAt`, a non-empty `fileIds`,
   and any `visibility` other than `"public"` with an explicit
@@ -1234,6 +1256,42 @@ convention for the same kind of field. The handler is registered
 alongside `/api/meta`/`/api/endpoints` — anonymous, no `RequireScope`
 wrapper — because the trace showed Aria's only call site never attaches
 an API token.
+
+## Issue #23 PR3 implementation notes
+
+PR3 implements `POST /api/notes/delete`, mapping it onto
+`timeline.Service.SetHidden(id, true)` per
+`docs/decisions/0004-note-delete-as-hide.md` rather than adding a new
+hard-delete primitive. No migration was needed: the existing
+`entries.hidden_at` column (from
+`internal/storage/sqlite/migrations/0004_threads_entries.sql`) is reused,
+and this PR is what gives it its first concrete product meaning.
+
+- `Server.handleNotesDelete` restricts deletion to the owner's own
+  `user_post` entries (`entry.Kind == domain.EntryUserPost &&
+  entry.AuthorActorID == LocalActorIDFromContext(ctx)`), mirroring
+  `timeline.Service.EditPost`'s existing author/kind restriction. Every
+  disallowed case — unknown note ID, already hidden/archived note, and a
+  note that exists but is not the owner's own `user_post` — returns the
+  same `NO_SUCH_NOTE` this document's other note-reading endpoints already
+  give for an unknown/hidden/archived ID, so the endpoint cannot be used
+  to probe which case applies.
+- A deleted note's children are unaffected (their own `HiddenAt` stays
+  `nil`), so they remain visible in the home timeline and by direct ID —
+  matching real Misskey's "delete removes the parent, orphans the
+  children" behavior, and requiring no new code since `entryVisible`
+  already evaluates each entry independently.
+- `EntryRepository.CountByAuthor`'s SQL now adds `AND archived_at IS NULL
+  AND hidden_at IS NULL`, so `/api/i`'s and `/api/miauth/{session}/check`'s
+  `notesCount` decrements on a successful delete, matching what Aria's UI
+  expects (see the updated note under this document's Issue #7
+  implementation notes above). This reuses the existing partial index
+  `idx_entries_timeline_default` (`WHERE archived_at IS NULL AND
+  hidden_at IS NULL`), so no new index was added.
+  `EntryRepository.CountAll` (PR2's `/api/stats` server-wide count) is a
+  separate method and keeps counting every entry regardless of
+  archived/hidden state — this PR does not touch it.
+- No new scope: `write:notes` was already granted for `/api/notes/create`.
 
 ## Non-goals and implementation boundary
 

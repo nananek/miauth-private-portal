@@ -89,6 +89,7 @@ var implementedEndpoints = []string{
 	"notes/show",
 	"notes/conversation",
 	"notes/children",
+	"notes/delete",
 	"stats",
 }
 
@@ -486,6 +487,59 @@ func (s *Server) handleNotesShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newNote(entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner)))
+}
+
+type notesDeleteRequest struct {
+	NoteID string `json:"noteId"`
+}
+
+// handleNotesDelete handles POST /api/notes/delete (Issue #23 PR3). Per
+// docs/decisions/0004-note-delete-as-hide.md, delete is mapped onto
+// timeline.Service.SetHidden rather than a true hard delete: the note
+// becomes invisible to every note-reading endpoint (entryVisible), and
+// CountByAuthor's notesCount projection drops, mirroring real Misskey's
+// wire behavior, while the row and any replies survive.
+//
+// Only the owner's own user_post entries are deletable — an unknown ID,
+// an already hidden/archived note, and a non-owner-authored entry (an
+// llm_reply/llm_follow_up/news/mail/system entry) all collapse onto the
+// same NO_SUCH_NOTE response, the uniform denial writeNoSuchNote already
+// documents for notes/show et al., so this endpoint cannot be used to
+// probe which case applies.
+func (s *Server) handleNotesDelete(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesDeleteRequest](r)
+	if !ok || req.NoteID == "" {
+		writeInvalidParam(w, "noteId is required")
+		return
+	}
+
+	entry, err := s.timeline.GetEntry(r.Context(), req.NoteID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+		s.logger.Error("get note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	if !entryVisible(entry) {
+		writeNoSuchNote(w)
+		return
+	}
+	if entry.Kind != domain.EntryUserPost || entry.AuthorActorID != LocalActorIDFromContext(r.Context()) {
+		writeNoSuchNote(w)
+		return
+	}
+
+	if err := s.timeline.SetHidden(r.Context(), entry.ID, true); err != nil {
+		s.logger.Error("delete note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	// Aria never decodes a typed response here (docs/compat/aria-v1.5.11.md's
+	// POST /api/notes/delete section): any 2xx JSON body is accepted.
+	writeJSON(w, http.StatusOK, struct{}{})
 }
 
 type notesConversationRequest struct {
