@@ -152,6 +152,42 @@ type meDetailed struct {
 	AutoAcceptFollowed bool `json:"autoAcceptFollowed"`
 }
 
+// statsResponse is the Misskey-compatible projection POST /api/stats
+// returns (Issue #23 PR2). The pinned misskey_dart StatsResponse parser
+// treats every field as optional, so omitting a field this service has
+// no concept for would decode identically to sending it as 0 — this
+// service sends explicit values throughout, matching newNote's
+// always-present-default convention for fields with no local concept
+// (federation/drive), rather than omitting them.
+type statsResponse struct {
+	NotesCount         int `json:"notesCount"`
+	OriginalNotesCount int `json:"originalNotesCount"`
+	UsersCount         int `json:"usersCount"`
+	OriginalUsersCount int `json:"originalUsersCount"`
+	ReactionsCount     int `json:"reactionsCount"`
+	Instances          int `json:"instances"`
+	DriveUsageLocal    int `json:"driveUsageLocal"`
+	DriveUsageRemote   int `json:"driveUsageRemote"`
+}
+
+// newStatsResponse builds statsResponse from notesCount (every entry
+// this deployment has ever stored, regardless of author or archived/
+// hidden state — see EntryRepository.CountAll). usersCount/
+// originalUsersCount are always 1: the single owner is this
+// deployment's only registered user, and there is no federation to tell
+// local from remote users apart. reactionsCount is always 0: no
+// reaction persists anywhere yet (Issue #23 PR4 introduces the
+// reactions table). instances/driveUsageLocal/driveUsageRemote are
+// always 0: this service has no federation and no drive.
+func newStatsResponse(notesCount int) statsResponse {
+	return statsResponse{
+		NotesCount:         notesCount,
+		OriginalNotesCount: notesCount,
+		UsersCount:         1,
+		OriginalUsersCount: 1,
+	}
+}
+
 func newMeDetailed(owner miauth.OwnerProfile, notesCount int) meDetailed {
 	return meDetailed{
 		userDetailedNotMe: newUserDetailedNotMe(owner.ActorID, owner.Username, owner.DisplayName, owner.CreatedAt, notesCount),

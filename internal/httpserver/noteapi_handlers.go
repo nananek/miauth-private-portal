@@ -89,10 +89,27 @@ var implementedEndpoints = []string{
 	"notes/show",
 	"notes/conversation",
 	"notes/children",
+	"stats",
 }
 
 func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, implementedEndpoints)
+}
+
+// handleStats handles POST /api/stats (Issue #23 PR2). It is anonymous
+// and body-independent like handleMeta/handleEndpoints: the pinned
+// Aria/misskey_dart source trace (docs/compat/aria-v1.5.11.md) shows
+// Aria's only call site (the server-info page) always builds a
+// guest/tokenless account for this call, so it never sends an "i"
+// field — this handler must not require one.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	notesCount, err := s.timeline.CountAll(r.Context())
+	if err != nil {
+		s.logger.Error("count all entries failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newStatsResponse(notesCount))
 }
 
 // handleAPII handles POST /api/i. See meDetailed's doc comment for why

@@ -41,7 +41,7 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 	want := map[string]bool{
 		"meta": true, "endpoints": true, "i": true, "i/update": true,
 		"notes/create": true, "notes/timeline": true, "notes/show": true,
-		"notes/conversation": true, "notes/children": true,
+		"notes/conversation": true, "notes/children": true, "stats": true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("endpoints = %v, want exactly %v", got, want)
@@ -53,6 +53,48 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		if e == "notes/update" {
 			t.Error("notes/update must never be advertised (not implemented)")
 		}
+	}
+}
+
+// TestHandleStats_AnonymousReturnsCounts covers Issue #23 PR2's finding
+// that Aria's only /api/stats call site (the server-info page) always
+// builds a guest/tokenless account, so this contract test deliberately
+// sends no "i" field at all (docs/compat/aria-v1.5.11.md's "POST
+// /api/stats" section) — unlike every protectedEndpoints case below.
+func TestHandleStats_AnonymousReturnsCounts(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	rec := ts.postRaw(t, "/api/stats", "{}")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	var resp statsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.NotesCount != 0 || resp.OriginalNotesCount != 0 {
+		t.Errorf("notesCount/originalNotesCount = %d/%d, want 0/0 with no notes yet", resp.NotesCount, resp.OriginalNotesCount)
+	}
+	if resp.UsersCount != 1 || resp.OriginalUsersCount != 1 {
+		t.Errorf("usersCount/originalUsersCount = %d/%d, want 1/1 (single owner)", resp.UsersCount, resp.OriginalUsersCount)
+	}
+	if resp.ReactionsCount != 0 || resp.Instances != 0 || resp.DriveUsageLocal != 0 || resp.DriveUsageRemote != 0 {
+		t.Errorf("unsupported-feature stats fields must stay zero, got %+v", resp)
+	}
+
+	if rec := ts.post(t, "/api/notes/create", map[string]any{"text": "one"}); rec.Code != http.StatusOK {
+		t.Fatalf("create note: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = ts.postRaw(t, "/api/stats", "{}")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.NotesCount != 1 || resp.OriginalNotesCount != 1 {
+		t.Errorf("notesCount/originalNotesCount = %d/%d, want 1/1 after one note", resp.NotesCount, resp.OriginalNotesCount)
 	}
 }
 

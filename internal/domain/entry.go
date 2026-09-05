@@ -126,6 +126,11 @@ type EntryRepository interface {
 	// never decreases when a note is merely hidden/archived, only when it
 	// is actually deleted, which this service does not support).
 	CountByAuthor(ctx context.Context, actorID string) (int, error)
+	// CountAll returns the total number of entries across every actor,
+	// including archived and hidden ones. It backs POST /api/stats'
+	// server-wide notesCount (Issue #23 PR2), which — unlike /api/i's
+	// per-owner notesCount — is not scoped to one author.
+	CountAll(ctx context.Context) (int, error)
 	// UpdateBody replaces an entry's body and bumps updated_at. It is a
 	// persistence primitive only: use-case callers are responsible for
 	// restricting edits to the author's own user_post entries.
