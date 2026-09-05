@@ -111,6 +111,61 @@ func TestHandle_Success_CreatesEntriesAndAdvancesCursor(t *testing.T) {
 	}
 }
 
+// TestHandle_ImapItem_NeverEnqueuesLLMJobs pins Issue #12's plan section
+// 9 requirement: mail ingested through this framework must never
+// automatically reach an LLM prompt. internal/ingest.Service imports
+// neither internal/llmreply nor internal/llmclassify at all (only
+// internal/httpserver's handleNotesCreate, for EntryUserPost, ever
+// enqueues those job types), so this asserts the observable consequence
+// instead: ingesting an IMAP-sourced item never enqueues any job as a
+// side effect.
+func TestHandle_ImapItem_NeverEnqueuesLLMJobs(t *testing.T) {
+	db := newTestDB(t)
+	source := mustCreateSource(t, db, "imap", "imap://mail.example.com:993/INBOX")
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
+
+	adapter := &fakeAdapter{kind: "imap", fn: func(ctx context.Context, source domain.ExternalSource, cursor *string) (FetchResult, error) {
+		return FetchResult{
+			Items:      []FetchedItem{{ExternalID: "<msg@example.com>", DedupeKey: "dedupe-mail-1", Body: "From: a@example.com\nSubject: Hi\n\nBody"}},
+			NextCursor: `{"uidValidity":1,"lastUid":1}`,
+		}, nil
+	}}
+
+	svc := NewService(db.Repos, timelineSvc, nil)
+	svc.RegisterAdapter(adapter)
+
+	payload, err := NewJobPayload(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Handle(t.Context(), newTestJob(payload)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	item, err := db.ExternalItems.GetByDedupeKey(t.Context(), "dedupe-mail-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.EntryID == nil {
+		t.Fatal("mail item was not promoted to an entry")
+	}
+	entry, err := db.Entries.Get(t.Context(), *item.EntryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Kind != domain.EntryMail {
+		t.Errorf("Entry.Kind = %q, want %q", entry.Kind, domain.EntryMail)
+	}
+
+	gotJobs, err := db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotJobs) != 0 {
+		t.Errorf("Jobs.List() = %+v, want no job enqueued as a side effect of ingesting a mail item", gotJobs)
+	}
+}
+
 func TestHandle_NotModified_RecordsSuccessWithoutCreatingItems(t *testing.T) {
 	db := newTestDB(t)
 	source := mustCreateSource(t, db, "rss", "https://example.com/feed.xml")
