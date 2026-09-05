@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -41,12 +42,22 @@ func TestBackup_DestPathWithSingleQuoteIsBoundSafely(t *testing.T) {
 // database without stopping the server: it keeps a writer busy
 // inserting rows on the same *DB for the whole duration of Backup and
 // requires both the backup and every write to succeed.
+//
+// Starting the goroutine with "go" does not guarantee it gets scheduled
+// before Backup returns, so without more this could pass having raced
+// nothing at all (Backup finishing before the writer ever ran). started
+// blocks Backup from beginning until the writer has already completed at
+// least one write, and the completed-count check after Backup returns
+// fails loudly if the writer made no further progress while Backup was
+// running, rather than silently accepting a non-concurrent run as a pass.
 func TestBackup_SucceedsAlongsideConcurrentWrites(t *testing.T) {
 	db := newTestDB(t)
 	mustCreateActor(t, db)
 
+	started := make(chan struct{})
 	stop := make(chan struct{})
 	writeErrs := make(chan error, 1)
+	var completed int64
 	go func() {
 		defer close(writeErrs)
 		for {
@@ -64,11 +75,17 @@ func TestBackup_SucceedsAlongsideConcurrentWrites(t *testing.T) {
 				writeErrs <- err
 				return
 			}
+			if n := atomic.AddInt64(&completed, 1); n == 1 {
+				close(started)
+			}
 		}
 	}()
+	<-started
 
 	dest := filepath.Join(t.TempDir(), "backup-concurrent.db")
+	beforeBackup := atomic.LoadInt64(&completed)
 	backupErr := db.Backup(t.Context(), dest)
+	duringBackup := atomic.LoadInt64(&completed) - beforeBackup
 	close(stop)
 	writeErr := <-writeErrs
 
@@ -77,6 +94,9 @@ func TestBackup_SucceedsAlongsideConcurrentWrites(t *testing.T) {
 	}
 	if writeErr != nil {
 		t.Errorf("concurrent write during Backup() = %v, want nil", writeErr)
+	}
+	if duringBackup == 0 {
+		t.Fatal("no writes completed while Backup() was running; this run raced nothing, so it is not evidence that Backup is safe alongside concurrent writes")
 	}
 }
 
