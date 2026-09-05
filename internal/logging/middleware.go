@@ -57,6 +57,26 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hijacker.Hijack()
 }
 
+// HijackStatusSetter lets a handler that completed an HTTP protocol
+// upgrade (a WebSocket handshake, in particular) tell AccessLog what
+// status actually went out on the wire. A library that upgrades a
+// connection (e.g. gorilla/websocket's Upgrade) writes its own status
+// line — "101 Switching Protocols" — directly to the raw net.Conn/
+// bufio.ReadWriter Hijack returns, entirely bypassing WriteHeader/Write.
+// Without this, statusRecorder never observes that write, so every
+// *successful* upgrade — not merely an edge case — would have its
+// completion log line silently default to 200 instead of reporting what
+// actually happened.
+type HijackStatusSetter interface {
+	SetHijackedStatus(status int)
+}
+
+// SetHijackedStatus implements HijackStatusSetter.
+func (r *statusRecorder) SetHijackedStatus(status int) {
+	r.status = status
+	r.wrote = true
+}
+
 // AccessLog wraps h with a request-completion log line recording the
 // method, pattern, status, duration, and request ID. It deliberately logs
 // pattern (the route string a handler was registered under, e.g.

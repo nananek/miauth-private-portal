@@ -118,6 +118,15 @@ func (s *Server) handleStreaming(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Upgrade just wrote "101 Switching Protocols" directly to the
+	// hijacked connection, bypassing statusRecorder entirely (see
+	// logging.HijackStatusSetter's doc comment) — without this, the
+	// eventual AccessLog completion line for this connection would
+	// misreport the default 200.
+	if setter, ok := w.(logging.HijackStatusSetter); ok {
+		setter.SetHijackedStatus(http.StatusSwitchingProtocols)
+	}
+
 	serveStreamConn(conn, s.streamPingInterval)
 }
 

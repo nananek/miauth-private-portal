@@ -231,6 +231,43 @@ func TestAccessLog_AllowsHandlerToHijackConnection(t *testing.T) {
 	}
 }
 
+func TestAccessLog_LogsHijackedStatusInsteadOfDefaultingTo200(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, Config{Format: "json", Level: "info"})
+
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	fake := &fakeHijacker{
+		ResponseWriter: httptest.NewRecorder(),
+		conn:           server,
+		rw:             bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)),
+	}
+
+	handler := AccessLog(logger, "/streaming", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker := w.(http.Hijacker)
+		if _, _, err := hijacker.Hijack(); err != nil {
+			t.Errorf("Hijack() error = %v", err)
+		}
+		// Mirrors streaming_handlers.go: mark the true wire status after a
+		// successful upgrade, since Upgrade wrote it directly to the raw
+		// connection rather than through w.
+		w.(HijackStatusSetter).SetHijackedStatus(http.StatusSwitchingProtocols)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
+	handler.ServeHTTP(fake, req)
+
+	if strings.Contains(buf.String(), `"status":200`) {
+		t.Errorf("expected the hijacked status (101) logged, not the unset default 200, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"status":101`) {
+		t.Errorf("expected status 101 logged for a hijacked upgrade, got: %s", buf.String())
+	}
+}
+
 func TestStatusRecorder_SecondWriteHeaderCallDoesNotOverwriteStatus(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(&buf, Config{Format: "json", Level: "info"})
