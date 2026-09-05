@@ -533,7 +533,7 @@ contracts; the later issue owns implementation and evidence.
 
 | Issue #1 requirement | MVP owner issues | Future owner / note |
 | --- | --- | --- |
-| Only the allowed Misskey user can add an account through MiAuth | #5, #7, #13 | #2 ADR and contract are prerequisites |
+| Only the allowed Misskey user can add an account through MiAuth | #5, #7, #28, #13 | #2 ADR and contract are prerequisites; #28 replaced the upstream-Misskey-owner check with host-local SSH+CLI approval (ADR-0002) |
 | Aria post, reload, reply, thread view, and restart persistence | #3, #4, #6, #7, #13 | Requires storage, domain semantics, transport, and E2E evidence |
 | Posts succeed while LLM is stopped; recovery reprocesses reply/classification | #4, #8, #9, #10, #13 | Durable job intent is part of the same post transaction |
 | Distinguish LLM reply and follow-up; answer stays in one thread | #6, #9, #10, #13 | Generated records remain separate from source text |
@@ -628,6 +628,98 @@ verified.
   MiAuth browser/deep-link and host-operator approval UX end to end, and
   any real Misskey server's actual behavior where this document still
   says 要実機確認. Those remain open until a real device run happens.
+
+## Issue #13 implementation notes
+
+Issue #13 is the MVP release gate: it closes the remaining acceptance
+criteria across restart persistence, LLM outage recovery, provenance
+distinguishing, backup/restore, security regression coverage, and
+operator documentation, without changing the endpoint handlers Issue #7
+implemented. As with Issue #7, **no real Aria/Misskey end-to-end
+verification has been performed for this issue either** — every 要実機確認
+label in this document remains accurate and unchanged, and the
+decisions below only extend Issue #7's substitute evidence strategy
+rather than replacing it.
+
+- **Real Aria end-to-end verification substitute, extended**: following
+  the same precedent as Issue #7's implementation notes above,
+  `contract/aria_client` gains a restart-persistence scenario
+  (`restart_persistence_test.dart`): `scripts/run-contract-tests.sh` now
+  creates a note, kills and relaunches `bin/server` against the same
+  `DB_PATH`, and passes the note's id/text to the suite via
+  `TEST_PRE_RESTART_NOTE_ID`/`TEST_PRE_RESTART_NOTE_TEXT` so the pinned
+  decoder — against a server that was actually restarted as a process,
+  not merely reopened in-process — confirms the note (and the local API
+  token obtained before the restart) both survive. Reply/conversation
+  round-trip coverage already existed
+  (`notes_conversation_test.dart`'s root/child/grandchild ancestor-chain
+  assertion) and needed no further extension for this issue.
+- **Provenance marker evidence, deliberately split across two layers**:
+  the "Note.text provenance markers" table above is pinned at the unit
+  level by `internal/httpserver/noteapi_wire_test.go` and
+  `internal/ingest/service_test.go`. Whether the marker actually reaches
+  a real HTTP response is instead proven by
+  `internal/integration`'s `TestServerE2E_PostSucceedsWhileLLMDownAndReplyRecoversWithMarker`
+  (a real `bin/server` subprocess, a real `/api/notes/create` call, and
+  a real `/api/notes/children` call asserting the decoded `text` starts
+  with `"[reply]\n\n"`), not by an addition to
+  `contract/aria_client`. Driving an `llm_reply`/`llm_follow_up`
+  marker to completion needs a controllable fake LLM provider and an
+  asynchronous job to actually finish; `internal/provider/openai`'s
+  HTTP client (unlike RSS/IMAP's `internal/ingest/safehttp`) has no SSRF
+  restriction blocking a loopback `LLM_BASE_URL`, which makes an
+  in-process Go `httptest.Server` a much more direct way to get real
+  end-to-end evidence than teaching the Dart/bash contract harness to
+  also stand up a fake provider and poll an async job to completion. The
+  `news`/`mail` markers are lower-risk by comparison — they are folded
+  directly into the persisted `Body` at ingestion time
+  (`internal/ingest/service_test.go` already covers `composeExternalBody`
+  against real `FetchedItem` values) rather than at wire-projection
+  time, and driving them through a real RSS/IMAP fetch end to end is
+  outside this issue's remaining scope.
+- **Clean-environment deploy lifecycle** (AC1): `internal/integration`'s
+  `TestServerE2E_MigrateReadyRestartShutdown` builds the real
+  `cmd/server` binary, runs it against a fresh SQLite database with no
+  pre-existing `.env`, and asserts migrate → `/readyz` 200 → SIGTERM →
+  graceful exit, then repeats first boot's readiness/shutdown cycle a
+  second time against the same already-migrated `DB_PATH` to prove the
+  restart path (an idempotent migration re-run, not just first boot)
+  also works. This complements `internal/httpserver/run_test.go`, which
+  already covers `Run`'s shutdown behavior in detail in-process but
+  never builds `cmd/server`'s own configuration/migration/actor-seeding/
+  job-manager wiring around it.
+- **LLM outage and recovery** (AC4): the same
+  `TestServerE2E_PostSucceedsWhileLLMDownAndReplyRecoversWithMarker`
+  above also carries this issue's AC4 evidence: `/api/notes/create`
+  returns 200 while the fake LLM provider answers every request with
+  503 (internal/provider/openai's `categoryServerError`, retryable), and
+  once the provider is flipped to succeed, the pending `llm_generation`
+  job's own backoff/retry loop (internal/jobs) picks it up and completes
+  it with no `jobsctl retry` call — proving both "posts succeed while
+  the LLM is stopped" and "recovery reprocesses the job automatically"
+  over the real durable-job path rather than a unit test double.
+- **Backup/restore** (AC6): `cmd/backupctl` (`backup`/`verify`, both
+  built on `modernc.org/sqlite`'s `VACUUM INTO`, no external `sqlite3`
+  binary) and its automated restore drill
+  (`cmd/backupctl/main_test.go`'s
+  `TestRestoreDrill_BackupSurvivesSourceDestructionAndRestoresRelationships`)
+  were added in a prior PR on this same issue; see
+  [`docs/operations/backup-restore.md`](../operations/backup-restore.md).
+- **Security regression** (AC8): `docs/operations/security-regression.md`
+  maps every AC8 bullet to its evidencing test, added in a prior PR on
+  this same issue. Request rate/concurrency limiting is confirmed
+  intentionally absent from the application layer and delegated to the
+  reverse proxy (see
+  [`docs/operations/runbook.md`](../operations/runbook.md)'s "Request
+  rate and concurrency limits" section); no new middleware was added for
+  it.
+- **Operator documentation** (AC7, AC11): day-two operations
+  (incident response, secret rotation, revoking access, database/file
+  permissions, reverse proxy/TLS termination, log retention) live in
+  [`docs/operations/runbook.md`](../operations/runbook.md), added in a
+  prior PR on this same issue. The README's "Known limitations" section
+  and this document's non-goals below cover what remains permanently
+  out of scope rather than merely deferred.
 
 ## Non-goals and implementation boundary
 

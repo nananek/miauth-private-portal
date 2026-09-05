@@ -5,7 +5,7 @@ import 'package:misskey_dart/misskey_dart.dart';
 /// The running server's API base, e.g. `http://localhost:18080/api/`.
 /// scripts/run-contract-tests.sh sets TEST_API_URL after starting
 /// bin/server and approving its MiAuth session through miauthctl.
-Uri testApiUrl() => Uri.parse(_requiredEnv('TEST_API_URL'));
+Uri testApiUrl() => Uri.parse(requiredEnv('TEST_API_URL'));
 
 /// An authenticated [Misskey] client using the local API token
 /// scripts/run-contract-tests.sh obtained by driving a local MiAuth flow
@@ -17,7 +17,7 @@ Uri testApiUrl() => Uri.parse(_requiredEnv('TEST_API_URL'));
 Misskey buildTestClient() {
   final apiUrl = testApiUrl();
   return Misskey(
-    token: _requiredEnv('TEST_TOKEN'),
+    token: requiredEnv('TEST_TOKEN'),
     serverUrl: apiUrl,
     apiUrl: apiUrl,
   );
@@ -30,7 +30,10 @@ Misskey buildAnonymousClient() {
   return Misskey(serverUrl: apiUrl, apiUrl: apiUrl);
 }
 
-String _requiredEnv(String name) {
+/// Reads a required environment variable set by
+/// scripts/run-contract-tests.sh, failing fast with a clear message if a
+/// test file is run directly (`dart test`) without going through it.
+String requiredEnv(String name) {
   final value = Platform.environment[name];
   if (value == null || value.isEmpty) {
     throw StateError(
