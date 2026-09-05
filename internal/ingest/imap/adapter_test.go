@@ -179,6 +179,12 @@ func TestAdapter_Fetch_MalformedResponseIsMalformed(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		// Read the request first (so the client's own WriteFrame does not
+		// race this goroutine's write/close and fail with a broken pipe
+		// before it ever reaches ReadFrame): only then reply with a
+		// malformed frame, exercising CategoryMalformed specifically.
+		var req rpc.Request
+		_ = rpc.ReadFrame(conn, &req)
 		_, _ = conn.Write([]byte("not json\n"))
 	}()
 
