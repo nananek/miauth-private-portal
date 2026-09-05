@@ -84,11 +84,17 @@ func waitForServing(t *testing.T, addr string) {
 // request ever reached the checker, so Ready() short-circuited on the
 // startup-complete check and returned 503 without the checker ever
 // running).
+//
+// The timeout here is deliberately much longer than this file's other
+// time.After deadlines: it only guards against a genuinely hung/missing
+// signal, not normal scheduling delay, so a busy CI runner (e.g. two
+// merge pushes' CI runs landing at once) must not make it fire while the
+// request is merely queued behind other goroutines.
 func waitForEntered(t *testing.T, entered <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("in-flight request never reached the checker")
 	}
 }
