@@ -79,12 +79,11 @@ that something else broke.
   `IMAP_MAILFETCH_SOCKET` (server side) and `MAILFETCH_SOCKET_PATH`
   (`cmd/mailfetch` side) resolve to the same socket path/volume.
 - **Suspected database corruption, or before relying on any backup**: see
-  `cmd/backupctl`'s `verify` subcommand (Issue #13 AC6, a separate PR in
-  this same release-gate effort — see "Backup and restore" below if it
-  has not landed on your checkout yet) for a read-only schema/row-count
-  check, and its `backup` subcommand for taking an online snapshot
-  without stopping the server. If the live database itself is damaged,
-  stop the server and restore from the most recent verified backup.
+  `cmd/backupctl`'s `verify` subcommand (see "Backup and restore" below)
+  for a read-only schema/row-count check, and its `backup` subcommand for
+  taking an online snapshot without stopping the server. If the live
+  database itself is damaged, stop the server and restore from the most
+  recent verified backup.
 
 ## Secret rotation
 
@@ -305,10 +304,9 @@ about secrets appearing in logs in the first place.
 
 ## Backup and restore
 
-Issue #13 AC6, tracked as its own PR in this same release-gate effort,
-adds `cmd/backupctl`, an online-safe SQLite backup/verify tool, and a
-documented restore procedure. Once that PR has landed, see
-`docs/operations/backup-restore.md` for the full `backupctl backup`/
+`cmd/backupctl`, an online-safe SQLite backup/verify tool, and a
+documented restore procedure are Issue #13 AC6's evidence. See
+[backup-restore.md](backup-restore.md) for the full `backupctl backup`/
 `backupctl verify` usage and the manual restore steps — this runbook's
-"Incident response" section above only points to it for
-the corruption/restore scenario, rather than duplicating the procedure.
+"Incident response" section above only points to it for the corruption/
+restore scenario, rather than duplicating the procedure.

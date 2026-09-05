@@ -108,6 +108,19 @@ never needs to run at all. A bare-host deployment instead runs
 [docs/operations/configuration.md](docs/operations/configuration.md)'s
 "Deploying `cmd/mailfetch`" section.
 
+## Connecting Aria
+
+In Aria's "Add account" screen, enter this deployment's `LOCAL_ORIGIN`
+(scheme+host only, e.g. `https://portal.example`) as the server address.
+Aria starts a MiAuth flow against `GET /miauth/{session}`; the request
+stays pending until you approve it as described below. Once approved,
+Aria completes the flow itself and loads its home timeline over the
+Misskey-compatible note API — see
+[docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md) for exactly
+which endpoints are implemented and why, and this README's "Known
+limitations" section below for what Aria features this deployment does
+not support.
+
 ## Approving Aria sign-ins
 
 MiAuth requests remain pending until an operator connected to the server
@@ -127,12 +140,83 @@ configuration and `DB_PATH` as the server.
 
 [docs/operations/runbook.md](docs/operations/runbook.md) covers day-two
 operator procedures this README's setup instructions above don't:
-incident response/troubleshooting, secret rotation, revoking access,
-database/file permissions, reverse proxy and TLS termination (this
-service never terminates TLS itself), request rate/concurrency limits
-(delegated to the reverse proxy), and log retention. See
+starting/stopping, incident response/troubleshooting (`/readyz` 503, an
+LLM/RSS/IMAP outage, an unreachable `cmd/mailfetch`, suspected database
+corruption), secret rotation, revoking access, database/file
+permissions, reverse proxy and TLS termination (this service never
+terminates TLS itself), request rate/concurrency limits (delegated to
+the reverse proxy), log retention, and backup/restore (see
+[docs/operations/backup-restore.md](docs/operations/backup-restore.md)
+for the full `backupctl` procedure). See
 [docs/operations/configuration.md](docs/operations/configuration.md) for
 the config reference the runbook builds on.
+
+## Privacy boundary
+
+- Post/reply text, mail bodies and subjects, RSS/Atom content, and full
+  LLM prompts are never written to logs — `internal/logging` redacts
+  known-sensitive attribute keys and access tokens/API keys/cookies/
+  MiAuth session IDs are never logged at all (see
+  [docs/operations/security-regression.md](docs/operations/security-regression.md)
+  for the tests that pin this).
+- This service only ever makes outbound requests to endpoints you
+  configure: the LLM provider at `LLM_BASE_URL`, the RSS/Atom feeds in
+  `RSS_FEED_URLS`, and the IMAP server `cmd/mailfetch` connects to. It
+  never calls out to any other third party, and IMAP access is
+  read-only by design (see `AGENTS.md`'s "Security and privacy").
+- Everything this service stores — posts, generated replies/follow-ups,
+  ingested RSS/mail content, and classification metadata — stays in the
+  single local SQLite database at `DB_PATH`; there is no external
+  storage or analytics destination.
+- User-authored post text is authoritative and is never altered or
+  overwritten by LLM output; generated content and classification
+  results are always separate, versioned records (see
+  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Note.text
+  provenance markers").
+
+## Known limitations
+
+This service intentionally implements only the Misskey-compatible
+surface the pinned Aria target needs (`AGENTS.md`'s "Product boundary").
+The following are permanent, deliberate non-goals rather than deferred
+work:
+
+- **No streaming**: the `/streaming` WebSocket timeline channel is not
+  implemented. Aria's HTTP poll/reload/pagination flow is sufficient for
+  every supported journey (see
+  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s
+  "Streaming decision").
+- **No full Misskey compatibility or federation**: reactions, files/
+  drive, polls, renotes, notifications, channels, chat, and every other
+  non-MVP Misskey feature are unimplemented; unsupported endpoints fail
+  explicitly rather than returning fabricated success.
+- **No note editing**: `notes/update` is not implemented.
+- **Single-process, single-writer SQLite only**: there is no horizontal
+  scaling and no PostgreSQL backend; this is a single-owner deployment
+  by design, not a multi-tenant service.
+- **No application-layer rate or concurrency limiting**: bounded request
+  size/timeouts are implemented, but rate and concurrency limits are a
+  deliberate reverse-proxy responsibility — see the runbook's "Request
+  rate and concurrency limits" section.
+- **Provenance is text-only, not a new UI concept**: RSS/mail/reply/
+  follow-up entries are distinguished by a fixed marker folded into the
+  wire-visible `Note.text` (see
+  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Note.text
+  provenance markers"); Aria's own UI has no separate concept of this and
+  always shows them as posts from the single local owner/system actor.
+- **IMAP ingestion is read-only and minimal**: no attachments, no
+  marking/moving/deleting mail, and no SMTP (sending mail) support of any
+  kind.
+- **No hidden LLM reasoning or tool use is retained**: generation records
+  store the provider's final output, prompt version, and token usage,
+  never a hidden chain-of-thought, and the LLM never executes tools.
+- **Real Aria v1.5.11 end-to-end verification has not been performed**:
+  `contract/aria_client` decodes real server responses with Aria's own
+  pinned parser library as a substitute (see
+  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Issue #7
+  implementation notes" and "Issue #13 implementation notes"); a real
+  device/app run, including its browser/deep-link MiAuth UX, remains
+  unverified.
 
 ## Roadmap
 
