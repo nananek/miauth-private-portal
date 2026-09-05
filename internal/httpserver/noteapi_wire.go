@@ -58,7 +58,7 @@ type note struct {
 // or an actor-type lookup this package deliberately keeps out of the pure
 // wire-conversion helpers.
 func newNote(e domain.Entry, user userLite) note {
-	text := e.Body
+	text := wireText(e)
 	return note{
 		ID:             e.ID,
 		CreatedAt:      e.CreatedAt.UTC().Format(time.RFC3339),
@@ -78,6 +78,26 @@ func newNote(e domain.Entry, user userLite) note {
 		Files:          []any{},
 		VisibleUserIDs: []string{},
 		Mentions:       []string{},
+	}
+}
+
+// wireText composes the wire-visible note text. Only llm_reply/
+// llm_follow_up get a fixed distinguishing marker: Misskey's Note has
+// no "kind" field, so this is the only way Aria's timeline can tell a
+// generated reply from a generated follow-up question apart. This is
+// presentation-only — domain.Entry.Body and LLMGeneration.Body (the
+// generation audit record) are never touched, matching AGENTS.md's
+// "keep wire projections separate from domain models". EntryUserPost is
+// deliberately excluded: user-authored text is authoritative and must
+// never be altered (AGENTS.md).
+func wireText(e domain.Entry) string {
+	switch e.Kind {
+	case domain.EntryLLMReply:
+		return "[reply]\n\n" + e.Body
+	case domain.EntryLLMFollowUp:
+		return "[follow-up question]\n\n" + e.Body
+	default:
+		return e.Body
 	}
 }
 

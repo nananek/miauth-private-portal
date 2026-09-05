@@ -471,6 +471,33 @@ The redacted fixture is
 [`fixtures/note.json`](fixtures/note.json). It intentionally contains no
 access token, real user content, real instance host, or personal identifier.
 
+### Note.text provenance markers
+
+Misskey's `Note` carries no field of its own to say how a note originated, so
+Issue #13 (AC5) distinguishes the four non-`user_post` entry kinds Aria can
+see by folding a fixed marker into the wire-visible `text` itself:
+
+| Entry kind | `text` shape | Where the marker is added |
+| --- | --- | --- |
+| `user_post` | Verbatim user text, never altered | n/a |
+| `llm_reply` | `"[reply]\n\n" + body` | `internal/httpserver`'s `wireText`, at wire-projection time only |
+| `llm_follow_up` | `"[follow-up question]\n\n" + body` | `internal/httpserver`'s `wireText`, at wire-projection time only |
+| `news` (RSS/Atom) | `"[news[: <source display name>]] <title>\n[<provenance URL>]\n\n" + body` | `internal/ingest`'s `composeExternalBody`, folded into the stored `Body` itself when the adapter sets a `Title` |
+| `mail` (IMAP) | `"From: ...\nSubject: ...\nDate: ...\n\n" + snippet` | `internal/mailfetch`, folded into the stored `Body` itself; IMAP items never set `Title`, so `composeExternalBody` is a no-op for them |
+
+The `llm_reply`/`llm_follow_up` markers are presentation-only: the underlying
+`domain.Entry.Body` and the `LLMGeneration.Body` audit record both keep the
+provider's unmarked output, so the generation log always reflects what the
+provider actually produced. The `news`/`mail` markers, by contrast, are part
+of the persisted `Body` (there is no separate wire/domain split for ingested
+content), matching `internal/mailfetch`'s pre-existing header-block
+convention that this issue extends to RSS/Atom rather than replacing.
+
+Aria's own classification results (`internal/domain.LLMClassificationRepository`)
+are never exposed through any Note field — no marker is needed for them, since
+no Aria/Misskey-compatible HTTP endpoint exposes them at all (see
+`docs/operations/configuration.md`'s "Review/notebook/unresolved queries").
+
 ## Pagination and reload semantics
 
 | Journey | Aria request cursor | Client behavior | Local contract decision |

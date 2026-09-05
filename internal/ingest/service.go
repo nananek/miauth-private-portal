@@ -134,7 +134,8 @@ func (s *Service) Handle(ctx context.Context, job domain.Job) error {
 			PublishedAt:   item.PublishedAt,
 			DedupeKey:     item.DedupeKey,
 		}
-		_, wasCreated, err := s.timeline.CreateExternalEntry(ctx, entryKind, domainItem, item.Body)
+		body := composeExternalBody(source, entryKind, item)
+		_, wasCreated, err := s.timeline.CreateExternalEntry(ctx, entryKind, domainItem, body)
 		if err != nil {
 			// A failure partway through the batch must not advance the
 			// cursor past unprocessed items (they would then be lost
@@ -175,6 +176,27 @@ func (s *Service) handleFetchFailure(ctx context.Context, sourceID string, fetch
 		return jobs.Permanent(fmt.Errorf("ingest: fetch failed: %s", category))
 	}
 	return fmt.Errorf("ingest: fetch failed: %s", category)
+}
+
+// composeExternalBody folds an adapter-supplied title and the source's
+// display name into the entry body when Title is non-empty (RSS/Atom
+// today). internal/mailfetch already folds its own From/Subject/Date
+// header block directly into Body and never sets Title (see its own
+// doc comment), so this is a no-op for IMAP items and never
+// double-prefixes them.
+func composeExternalBody(source domain.ExternalSource, kind domain.EntryKind, item FetchedItem) string {
+	if item.Title == "" {
+		return item.Body
+	}
+	label := string(kind) // "news" today; automatically follows any future adapter's own EntryKind mapping
+	if source.DisplayName != nil && *source.DisplayName != "" {
+		label += ": " + *source.DisplayName
+	}
+	header := fmt.Sprintf("[%s] %s", label, item.Title)
+	if item.ProvenanceURL != nil && *item.ProvenanceURL != "" {
+		header += "\n" + *item.ProvenanceURL
+	}
+	return header + "\n\n" + item.Body
 }
 
 // entryKindForSourceKind maps a domain.ExternalSource.Kind to the
