@@ -218,8 +218,12 @@ allowed per unit time.
 This is a deliberate, accepted design choice, not a gap: given the
 single-owner, permission-gated nature of this deployment (only an
 operator-approved Aria client ever holds a valid local API token, and
-every route that is not `/healthz`/`/readyz`/`/api/meta`/`/api/endpoints`
-requires one), the realistic threat this would defend against is a
+every route that is not `/healthz`, `/readyz`, `/api/meta`,
+`/api/endpoints`, `GET /miauth/{session}`, or
+`POST /api/miauth/{session}/check` requires one via `RequireScope` — the
+last two are themselves the pre-authentication MiAuth flow, gated by
+session-id knowledge and one-time consume rather than a token), the
+realistic threat this would defend against is a
 compromised or misbehaving already-trusted client, or an unauthenticated
 flood against the small public surface — both are better handled at the
 reverse proxy, which already terminates TLS and sees every connection
