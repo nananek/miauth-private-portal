@@ -91,13 +91,13 @@ but create/reply/reload/thread journeys do not depend on it. The local server
 must not claim edit support until the later endpoint decision is made.
 
 For this contract, the exact effective local API scope set is
-`read:account`, `read:notes`, and `write:notes`. The broad `permission` query
-from Aria is recorded for compatibility but does not grant any additional
-scope. `meta`, `endpoints`, the MiAuth page, and the MiAuth check use their
-documented browser or anonymous/session capability and do not consume a local
-API token. `/api/i` and every notes endpoint in the allowlist require a
-locally issued API token; the token-login fallback accepts only such a local
-token.
+`read:account`, `read:notes`, `write:notes`, and (since Issue #23 PR1)
+`write:account`. The broad `permission` query from Aria is recorded for
+compatibility but does not grant any additional scope. `meta`, `endpoints`,
+the MiAuth page, and the MiAuth check use their documented browser or
+anonymous/session capability and do not consume a local API token. `/api/i`,
+`/api/i/update`, and every notes endpoint in the allowlist require a locally
+issued API token; the token-login fallback accepts only such a local token.
 Any endpoint outside this allowlist returns an explicit,
 consistently classified unsupported-endpoint error at the wire boundary; its
 exact status and code remain an implementation contract-test decision.

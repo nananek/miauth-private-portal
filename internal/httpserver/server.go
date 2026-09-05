@@ -60,11 +60,12 @@ type Server struct {
 // opts.TimelineService additionally configures Issue #7's minimal
 // Aria/Misskey-compatible note routes (POST /api/meta, /api/i,
 // /api/endpoints, /api/notes/create, /api/notes/timeline,
-// /api/notes/show, /api/notes/conversation, /api/notes/children). They
-// register only when both opts.MiAuthService and opts.TimelineService
-// are non-nil: every protected note route authenticates through
-// RequireScope (which needs the MiAuth service), and there is no
-// meaningful note API without a timeline to back it.
+// /api/notes/show, /api/notes/conversation, /api/notes/children), plus
+// Issue #23 PR1's POST /api/i/update. They register only when both
+// opts.MiAuthService and opts.TimelineService are non-nil: every
+// protected note route authenticates through RequireScope (which needs
+// the MiAuth service), and there is no meaningful note API without a
+// timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
 	pingInterval := opts.StreamPingInterval
 	if pingInterval <= 0 {
@@ -104,6 +105,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /api/meta", http.HandlerFunc(s.handleMeta))
 		s.Handle("POST /api/endpoints", http.HandlerFunc(s.handleEndpoints))
 		s.Handle("POST /api/i", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleAPII)))
+		s.Handle("POST /api/i/update", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleAPIIUpdate)))
 		s.Handle("POST /api/notes/create", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesCreate)))
 		s.Handle("POST /api/notes/timeline", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesTimeline)))
 		s.Handle("POST /api/notes/show", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesShow)))

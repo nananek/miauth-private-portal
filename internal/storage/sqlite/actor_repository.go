@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -32,29 +33,44 @@ func (r *actorRepository) EnsureReservedActors(ctx context.Context) error {
 // and mapWriteError turns it into domain.ErrConflict.
 func (r *actorRepository) Create(ctx context.Context, a domain.Actor) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, ?, ?)`,
-		a.ID, string(a.Type), formatTime(a.CreatedAt),
+		`INSERT INTO actors (id, actor_type, created_at, display_name) VALUES (?, ?, ?, ?)`,
+		a.ID, string(a.Type), formatTime(a.CreatedAt), nullableString(a.DisplayName),
 	)
 	return mapWriteError(err)
 }
 
 func (r *actorRepository) Get(ctx context.Context, id string) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
-		`SELECT id, actor_type, created_at FROM actors WHERE id = ?`, id))
+		`SELECT id, actor_type, created_at, display_name FROM actors WHERE id = ?`, id))
 }
 
 func (r *actorRepository) GetByType(ctx context.Context, actorType domain.ActorType) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
-		`SELECT id, actor_type, created_at FROM actors WHERE actor_type = ?`, string(actorType)))
+		`SELECT id, actor_type, created_at, display_name FROM actors WHERE actor_type = ?`, string(actorType)))
+}
+
+// SetDisplayName always writes displayName as given (including ""),
+// never SQL NULL: NULL on this column means "never explicitly set"
+// (e.g. the reserved assistant/system actors, or an owner row from
+// before Issue #23 PR1's migration), distinct from an owner who
+// explicitly cleared their display name back to empty.
+func (r *actorRepository) SetDisplayName(ctx context.Context, actorID string, displayName string) error {
+	res, err := r.q.ExecContext(ctx, `UPDATE actors SET display_name = ? WHERE id = ?`, displayName, actorID)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
 }
 
 func scanActor(row rowScanner) (domain.Actor, error) {
 	var a domain.Actor
 	var actorType, createdAt string
-	if err := row.Scan(&a.ID, &actorType, &createdAt); err != nil {
+	var displayName sql.NullString
+	if err := row.Scan(&a.ID, &actorType, &createdAt, &displayName); err != nil {
 		return domain.Actor{}, mapReadError(err)
 	}
 	a.Type = domain.ActorType(actorType)
+	a.DisplayName = stringPtr(displayName)
 	t, err := parseTime(createdAt)
 	if err != nil {
 		return domain.Actor{}, err
