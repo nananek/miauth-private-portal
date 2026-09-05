@@ -20,6 +20,7 @@ type Repos struct {
 	ExternalSources ExternalSourceRepository
 	ExternalItems   ExternalItemRepository
 	Reactions       ReactionRepository
+	Mentions        MentionRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made

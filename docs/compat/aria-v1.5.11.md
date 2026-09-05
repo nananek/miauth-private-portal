@@ -734,7 +734,7 @@ reacted" call happens to touch. `POST /api/stats`' `reactionsCount` is
 likewise no longer a fixed `0` (see this document's `POST /api/stats`
 section).
 
-### `POST /api/notes/mentions` (Issue #23, not yet implemented — PR5)
+### `POST /api/notes/mentions` (Issue #23 PR5, implemented)
 
 **Finding that revises `plan-issue-23`'s premise**: the plan and Issue
 #23 body both treat this as a "縁辺のユースケース" that might warrant
@@ -770,13 +770,44 @@ that tab variant will always resolve to an empty result here; only the
 plain `mention` tab variant can ever return anything. The response is a
 JSON array of `Note` — the existing wire `note` type, no new shape.
 
-This does not change PR5's scope decision by itself (still recorded as
+This does not change PR5's scope decision by itself (recorded as
 "要検討" between real `@username` extraction and a minimal empty
-response in `plan-issue-23`), but it does mean option (B) (minimal empty
-array) is a deliberate simplification of a real, owner-reachable
-feature, not a no-op for dead code — worth weighing accordingly when PR5
-is scoped. No new scope is needed either way: `read:notes` already
-covers it.
+response in `plan-issue-23`), but it did mean option (B) (minimal empty
+array) would have been a deliberate simplification of a real,
+owner-reachable feature, not a no-op for dead code. Weighed on exactly
+that basis, option (A) (real `@username` detection) was adopted
+(owner-confirmed, 2026-09-06). No new scope is needed either way:
+`read:notes` already covers it.
+
+**Implemented as** `Server.handleNotesMentions`
+(`internal/httpserver/mentions_handlers.go`), registered with the
+existing `read:notes` scope. `visibility: "specified"` (the "Direct" tab)
+short-circuits to an empty page without running any query, matching the
+trace above; otherwise pagination mirrors `handleNotesTimeline`
+(`untilId` resolved through `timeline.GetEntry`, `limit`
+default/clamp, newest-first). Detection itself lives in
+`timeline.Service.recordSelfMentionIfAny`
+(`internal/timeline/service.go`): a `user_post`'s `Body` is matched
+against `(^|[^A-Za-z0-9_])@` + the configured `OWNER_USERNAME` +
+`([^A-Za-z0-9_]|$)` at creation time, word-bounded so a longer
+`@`-handle merely starting with the owner's username (or an
+email-like `name@owner.example` token) never false-positives. Only
+`user_post` is ever scanned — `llm_reply`/`llm_follow_up`/`news`/`mail`
+entries are not, since Issue #23's own text already treats an LLM reply
+deliberately mentioning the owner as overlapping with the existing
+`EntryLLMFollowUp` concept, and this deployment's single login-capable
+actor means the mentioned actor is always the post's own author, so no
+lookup beyond the entry itself is needed. Detection is forward-only: it
+runs once, at creation time, for every entry-creation path
+(`CreateRoot`/`CreateReply`/`CreateGeneratedReply`/
+`CreateExternalEntry`, the latter two always no-op on the `Kind` check),
+and pre-existing entries from before this feature shipped are never
+scanned or backfilled (owner-confirmed, 2026-09-06). The persisted
+`mentions` table (migration `0014_mentions.sql`) is a thin
+`(entry_id, mentioned_actor_id, created_at)` index joined against
+`entries` for the actual read (`MentionRepository
+.ListEntriesByMentionedActor`), so no new `Note` field beyond the
+already-static `mentions` array's own JSON shape is needed.
 
 ### `POST /api/i/notifications` (Issue #23, not yet implemented — PR6)
 
