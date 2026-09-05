@@ -123,6 +123,17 @@ confirmation. Use `--yes` only from trusted automation. Operators can also
 run `reject`, `tokens`, and `revoke <token-id>`; all commands use the same
 configuration and `DB_PATH` as the server.
 
+## Operations runbook
+
+[docs/operations/runbook.md](docs/operations/runbook.md) covers day-two
+operator procedures this README's setup instructions above don't:
+incident response/troubleshooting, secret rotation, revoking access,
+database/file permissions, reverse proxy and TLS termination (this
+service never terminates TLS itself), request rate/concurrency limits
+(delegated to the reverse proxy), and log retention. See
+[docs/operations/configuration.md](docs/operations/configuration.md) for
+the config reference the runbook builds on.
+
 ## Roadmap
 
 - Open WebUI integration: [docs/roadmap/openwebui.md](docs/roadmap/openwebui.md)
