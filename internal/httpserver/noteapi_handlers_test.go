@@ -44,6 +44,7 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		"meta": true, "endpoints": true, "i": true, "i/update": true,
 		"notes/create": true, "notes/timeline": true, "notes/show": true,
 		"notes/conversation": true, "notes/children": true, "notes/delete": true,
+		"notes/reactions/create": true, "notes/reactions/delete": true, "notes/reactions": true,
 		"stats": true,
 	}
 	if len(got) != len(want) {
@@ -85,8 +86,22 @@ func TestHandleStats_AnonymousReturnsCounts(t *testing.T) {
 		t.Errorf("unsupported-feature stats fields must stay zero, got %+v", resp)
 	}
 
-	if rec := ts.post(t, "/api/notes/create", map[string]any{"text": "one"}); rec.Code != http.StatusOK {
-		t.Fatalf("create note: %d %s", rec.Code, rec.Body.String())
+	createRec := ts.post(t, "/api/notes/create", map[string]any{"text": "one"})
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create note: %d %s", createRec.Code, createRec.Body.String())
+	}
+	var created createdNoteResponse
+	mustDecode(t, createRec, &created)
+
+	// Issue #23 PR4 unlocks reactionsCount from its previous fixed 0
+	// (see newStatsResponse's doc comment); this needs its own token
+	// since ts.token predates the write:reactions scope.
+	reactionToken, _ := mustIssueToken(t, ts.Server, "stats-reaction-session", "write:reactions")
+	reactRec := ts.post(t, "/api/notes/reactions/create", map[string]any{
+		"i": reactionToken, "noteId": created.CreatedNote.ID, "reaction": "👍",
+	})
+	if reactRec.Code != http.StatusOK {
+		t.Fatalf("create reaction: %d %s", reactRec.Code, reactRec.Body.String())
 	}
 
 	rec = ts.postRaw(t, "/api/stats", "{}")
@@ -98,6 +113,9 @@ func TestHandleStats_AnonymousReturnsCounts(t *testing.T) {
 	}
 	if resp.NotesCount != 1 || resp.OriginalNotesCount != 1 {
 		t.Errorf("notesCount/originalNotesCount = %d/%d, want 1/1 after one note", resp.NotesCount, resp.OriginalNotesCount)
+	}
+	if resp.ReactionsCount != 1 {
+		t.Errorf("reactionsCount = %d, want 1 after one reaction", resp.ReactionsCount)
 	}
 }
 
@@ -175,6 +193,9 @@ var protectedEndpoints = []struct {
 	{"/api/notes/conversation", map[string]any{"noteId": "does-not-exist"}},
 	{"/api/notes/children", map[string]any{"noteId": "does-not-exist"}},
 	{"/api/notes/delete", map[string]any{"noteId": "does-not-exist"}},
+	{"/api/notes/reactions/create", map[string]any{"noteId": "does-not-exist", "reaction": "👍"}},
+	{"/api/notes/reactions/delete", map[string]any{"noteId": "does-not-exist"}},
+	{"/api/notes/reactions", map[string]any{"noteId": "does-not-exist"}},
 }
 
 func TestProtectedEndpoints_MissingTokenIsAuthenticationFailed(t *testing.T) {
@@ -205,10 +226,13 @@ func TestProtectedEndpoints_WrongScopeIsAuthenticationFailed(t *testing.T) {
 		path string
 		body map[string]any
 	}{
-		{"/api/i", map[string]any{}},                                      // needs read:account
-		{"/api/i/update", map[string]any{"name": "new name"}},             // needs write:account
-		{"/api/notes/create", map[string]any{"text": "hello"}},            // needs write:notes
-		{"/api/notes/delete", map[string]any{"noteId": "does-not-exist"}}, // needs write:notes
+		{"/api/i", map[string]any{}},                                                                 // needs read:account
+		{"/api/i/update", map[string]any{"name": "new name"}},                                        // needs write:account
+		{"/api/notes/create", map[string]any{"text": "hello"}},                                       // needs write:notes
+		{"/api/notes/delete", map[string]any{"noteId": "does-not-exist"}},                            // needs write:notes
+		{"/api/notes/reactions/create", map[string]any{"noteId": "does-not-exist", "reaction": "👍"}}, // needs write:reactions
+		{"/api/notes/reactions/delete", map[string]any{"noteId": "does-not-exist"}},                  // needs write:reactions
+		{"/api/notes/reactions", map[string]any{"noteId": "does-not-exist"}},                         // needs read:reactions
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {

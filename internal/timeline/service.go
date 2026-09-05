@@ -402,6 +402,68 @@ func (s *Service) CountAll(ctx context.Context) (int, error) {
 	return s.repos.Entries.CountAll(ctx)
 }
 
+// SetReaction creates or replaces reactorActorID's reaction to entryID
+// with emoji (Issue #23 PR4). Callers are responsible for restricting
+// entryID to a visible entry and emoji to a plain Unicode emoji (the
+// httpserver layer does both, mirroring how SetHidden/SetArchived above
+// leave visibility/ownership checks to their own callers). See
+// domain.ReactionRepository.Create's doc comment for why a second call
+// for the same (entry, actor) pair overwrites rather than conflicts.
+func (s *Service) SetReaction(ctx context.Context, entryID, reactorActorID, emoji string) error {
+	return s.repos.Reactions.Create(ctx, domain.Reaction{
+		ID:             domain.NewID(),
+		EntryID:        entryID,
+		ReactorActorID: reactorActorID,
+		Emoji:          emoji,
+		CreatedAt:      s.clock.Now().UTC(),
+	})
+}
+
+// RemoveReaction removes reactorActorID's reaction to entryID, if any
+// (Issue #23 PR4). It is idempotent: removing an absent reaction is not
+// an error (see domain.ReactionRepository.Delete's doc comment).
+func (s *Service) RemoveReaction(ctx context.Context, entryID, reactorActorID string) error {
+	return s.repos.Reactions.Delete(ctx, entryID, reactorActorID)
+}
+
+// ReactionCounts returns entryID's reaction counts keyed by emoji (Issue
+// #23 PR4), backing Note.reactions.
+func (s *Service) ReactionCounts(ctx context.Context, entryID string) (map[string]int, error) {
+	return s.repos.Reactions.CountsByEmoji(ctx, entryID)
+}
+
+// MyReaction returns viewerActorID's own reaction emoji to entryID, or
+// nil if they have not reacted (Issue #23 PR4), backing Note.myReaction.
+func (s *Service) MyReaction(ctx context.Context, entryID, viewerActorID string) (*string, error) {
+	r, err := s.repos.Reactions.GetByActor(ctx, entryID, viewerActorID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r.Emoji, nil
+}
+
+// CountAllReactions returns the total number of reactions across every
+// entry (Issue #23 PR4), backing POST /api/stats' reactionsCount.
+func (s *Service) CountAllReactions(ctx context.Context) (int, error) {
+	return s.repos.Reactions.CountAll(ctx)
+}
+
+// ListReactions returns entryID's reactions, newest-first, optionally
+// filtered to one emoji (Issue #23 PR4's "who reacted" sheet). See
+// domain.ReactionRepository.ListByEntry's doc comment for before/limit.
+func (s *Service) ListReactions(ctx context.Context, entryID string, emoji *string, before *domain.Cursor, limit int) ([]domain.Reaction, error) {
+	return s.repos.Reactions.ListByEntry(ctx, entryID, emoji, before, limit)
+}
+
+// GetReaction returns one reaction by its opaque ID (Issue #23 PR4),
+// used only to resolve ListReactions' untilId pagination anchor.
+func (s *Service) GetReaction(ctx context.Context, id string) (domain.Reaction, error) {
+	return s.repos.Reactions.Get(ctx, id)
+}
+
 // ResolveAuthor returns the Actor an entry's AuthorActorID names, so
 // callers projecting an Entry onto a Misskey-compatible wire type (Note.
 // user) can determine whether it is the owner or one of the reserved
