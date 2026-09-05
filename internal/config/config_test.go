@@ -58,6 +58,22 @@ func defaultRSSConfig() RSSConfig {
 	}
 }
 
+func defaultIMAPConfig() IMAPConfig {
+	return IMAPConfig{
+		Enabled:          false,
+		Port:             993,
+		TLSMode:          "implicit",
+		Mailbox:          "INBOX",
+		PollInterval:     5 * time.Minute,
+		FetchTimeout:     30 * time.Second,
+		MaxMessageBytes:  1_048_576,
+		SnippetMaxChars:  2000,
+		StoreFullBody:    false,
+		FullBodyMaxChars: 20_000,
+		MailfetchSocket:  "/run/mailfetch/mailfetch.sock",
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -140,6 +156,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 		Jobs: defaultJobsConfig(),
 		LLM:  defaultLLMConfig(),
 		RSS:  defaultRSSConfig(),
+		IMAP: defaultIMAPConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -1122,5 +1139,165 @@ func TestLoad_RSSBoundsRejectOutOfRangeValues(t *testing.T) {
 				t.Errorf("error %q does not mention %s", err.Error(), tt.key)
 			}
 		})
+	}
+}
+
+func validIMAPEnv() map[string]string {
+	return map[string]string{
+		KeyIMAPEnabled:  "true",
+		KeyIMAPHost:     "imap.example.com",
+		KeyIMAPUsername: "mailbox-user",
+		KeyIMAPPassword: "hunter2",
+	}
+}
+
+func TestLoad_IMAPDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.IMAP, defaultIMAPConfig()) {
+		t.Errorf("IMAP = %+v, want %+v", cfg.IMAP, defaultIMAPConfig())
+	}
+}
+
+func TestLoad_IMAPEnabledRequiresHostUsernamePassword(t *testing.T) {
+	tests := []struct {
+		name    string
+		missing string
+	}{
+		{"missing host", KeyIMAPHost},
+		{"missing username", KeyIMAPUsername},
+		{"missing password", KeyIMAPPassword},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := mergeMaps(validAuthEnv(), validIMAPEnv())
+			delete(env, tt.missing)
+			env[KeyAppEnv] = "development"
+
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(env)})
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.missing) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.missing)
+			}
+		})
+	}
+}
+
+func TestLoad_IMAPEnabledWithRequiredFieldsSucceeds(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), validIMAPEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.IMAP.Enabled {
+		t.Error("IMAP.Enabled = false, want true")
+	}
+	if cfg.IMAP.Host != "imap.example.com" {
+		t.Errorf("IMAP.Host = %q, want imap.example.com", cfg.IMAP.Host)
+	}
+	if cfg.IMAP.Mailbox != "INBOX" {
+		t.Errorf("IMAP.Mailbox = %q, want INBOX (default)", cfg.IMAP.Mailbox)
+	}
+	if cfg.IMAP.TLSMode != "implicit" {
+		t.Errorf("IMAP.TLSMode = %q, want implicit (default)", cfg.IMAP.TLSMode)
+	}
+}
+
+func TestLoad_IMAPEnabledRejectsPlaintextTLSMode(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), validIMAPEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyIMAPTLSMode: "plaintext",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyIMAPTLSMode) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyIMAPTLSMode)
+	}
+}
+
+func TestLoad_IMAPEnabledAcceptsStartTLSMode(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), validIMAPEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyIMAPTLSMode: "starttls",
+		KeyIMAPPort:    "143",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.IMAP.TLSMode != "starttls" {
+		t.Errorf("IMAP.TLSMode = %q, want starttls", cfg.IMAP.TLSMode)
+	}
+	if cfg.IMAP.Port != 143 {
+		t.Errorf("IMAP.Port = %d, want 143", cfg.IMAP.Port)
+	}
+}
+
+func TestLoad_IMAPEnabledRequiresFetchTimeoutLessThanPollInterval(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), validIMAPEnv(), map[string]string{
+		KeyAppEnv:           "development",
+		KeyIMAPPollInterval: "10s",
+		KeyIMAPFetchTimeout: "15s",
+	}))})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyIMAPFetchTimeout) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyIMAPFetchTimeout)
+	}
+}
+
+func TestLoad_IMAPBoundsRejectOutOfRangeValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"port too low", KeyIMAPPort, "0"},
+		{"port too high", KeyIMAPPort, "70000"},
+		{"snippet max chars too low", KeyIMAPSnippetMaxChars, "0"},
+		{"full body max chars too low", KeyIMAPFullBodyMaxChars, "0"},
+		{"max message bytes too low", KeyIMAPMaxMessageBytes, "0"},
+		{"poll interval not a duration", KeyIMAPPollInterval, "not-a-duration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+				KeyAppEnv: "development",
+				tt.key:    tt.val,
+			}))})
+			if err == nil {
+				t.Fatalf("%s=%s: expected error, got nil", tt.key, tt.val)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error %q does not mention %s", err.Error(), tt.key)
+			}
+		})
+	}
+}
+
+func TestConfig_Redacted_IMAPCredentialsShowOnlySetOrUnset(t *testing.T) {
+	cfg := Config{IMAP: IMAPConfig{Username: "mailbox-user", Password: "hunter2"}}
+	redacted := cfg.Redacted()
+	if redacted[KeyIMAPUsername] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyIMAPUsername, redacted[KeyIMAPUsername])
+	}
+	if redacted[KeyIMAPPassword] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyIMAPPassword, redacted[KeyIMAPPassword])
+	}
+
+	unsetRedacted := Config{}.Redacted()
+	if unsetRedacted[KeyIMAPUsername] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyIMAPUsername, unsetRedacted[KeyIMAPUsername])
+	}
+	if unsetRedacted[KeyIMAPPassword] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyIMAPPassword, unsetRedacted[KeyIMAPPassword])
 	}
 }

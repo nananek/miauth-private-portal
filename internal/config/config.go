@@ -38,6 +38,7 @@ type Config struct {
 	Jobs JobsConfig
 	LLM  LLMConfig
 	RSS  RSSConfig
+	IMAP IMAPConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -199,6 +200,59 @@ type RSSConfig struct {
 	AllowInsecureHTTP bool
 }
 
+// IMAPConfig configures Issue #12's read-only IMAP mail ingestion. Enabled
+// defaults to false: no source is ever seeded, no adapter/scheduler is
+// constructed, and cmd/mailfetch's socket is never dialed until an
+// operator explicitly turns this on — the same safe-default shape as
+// RSSConfig.Enabled. Unlike RSS, actually fetching a message requires
+// cmd/mailfetch (see docs/decisions/0003-imap-mailfetch-isolation.md) to
+// be running and reachable at MailfetchSocket; internal/ingest/imap never
+// imports an IMAP or MIME library itself.
+type IMAPConfig struct {
+	// Enabled gates the ingestion scheduler, adapter, and job handler
+	// entirely. False is the safe default.
+	Enabled bool
+	// Host and Port name the IMAP server. Seeded into the single
+	// domain.ExternalSource this config produces (kind "imap").
+	Host string
+	Port int
+	// TLSMode is "implicit" (TLS from the first byte, conventionally port
+	// 993) or "starttls" (plaintext CAPABILITY/STARTTLS negotiation before
+	// LOGIN, conventionally port 143). There is deliberately no plaintext
+	// option: AGENTS.md requires IMAP credentials never cross the network
+	// unencrypted.
+	TLSMode string
+	// Username and Password authenticate to the IMAP server. Sent to
+	// cmd/mailfetch only in the per-request RPC payload over
+	// MailfetchSocket, never as a command-line argument or logged value;
+	// see Redacted.
+	Username string
+	Password string
+	// Mailbox is EXAMINE'd (never SELECT'd: this service never marks,
+	// moves, or deletes mail). Defaults to "INBOX".
+	Mailbox string
+	// PollInterval is how often the mailbox is re-fetched.
+	PollInterval time.Duration
+	// FetchTimeout bounds a single fetch's IMAP round trip (connect
+	// through LOGOUT); must be less than PollInterval.
+	FetchTimeout time.Duration
+	// MaxMessageBytes bounds how much of a single message's body
+	// cmd/mailfetch reads (the BODY.PEEK<0,N> upper bound N); a larger
+	// body is truncated at this limit before sanitization.
+	MaxMessageBytes int64
+	// SnippetMaxChars bounds the plain-text snippet stored per message
+	// after HTML sanitization, mirroring RSSConfig.SummaryMaxChars.
+	SnippetMaxChars int
+	// StoreFullBody additionally stores a longer plain-text body (bounded
+	// by FullBodyMaxChars) instead of only SnippetMaxChars. False is the
+	// safe, storage-minimizing default.
+	StoreFullBody    bool
+	FullBodyMaxChars int
+	// MailfetchSocket is the Unix domain socket path cmd/mailfetch
+	// listens on and internal/ingest/imap dials.
+	MailfetchSocket string
+}
+
 // FieldError names one invalid, missing, or unknown config field. It never
 // carries the offending raw value, so it is always safe to log.
 type FieldError struct {
@@ -350,7 +404,19 @@ const (
 	rssMaxResponseBytesMin                       = 1
 	rssMaxRedirectsMin, rssMaxRedirectsMax       = 0, 20
 	rssSummaryMaxCharsMin, rssSummaryMaxCharsMax = 1, 100_000
+
+	imapPortMin, imapPortMax                         = 1, 65535
+	imapMaxMessageBytesMin                           = 1
+	imapSnippetMaxCharsMin, imapSnippetMaxCharsMax   = 1, 100_000
+	imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax = 1, 1_000_000
 )
+
+// imapAllowedTLSModes is the single source of truth for IMAP_TLS_MODE:
+// deliberately just these two values, never a plaintext option (AGENTS.md:
+// "IMAP is read-only by default and must not mark, move, or delete mail"
+// sits alongside the broader rule that credentials never cross the network
+// unencrypted).
+var imapAllowedTLSModes = []string{"implicit", "starttls"}
 
 func parse(values map[string]string) (Config, []FieldError) {
 	var errs []FieldError
@@ -416,6 +482,21 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.RSS.MaxRedirects = parseOptionalInt(values, KeyRSSMaxRedirects, 3, rssMaxRedirectsMin, rssMaxRedirectsMax, &errs)
 	cfg.RSS.SummaryMaxChars = parseOptionalInt(values, KeyRSSSummaryMaxChars, 4000, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax, &errs)
 	cfg.RSS.AllowInsecureHTTP = parseOptionalBool(values, KeyRSSAllowInsecureHTTP, false, &errs)
+
+	cfg.IMAP.Enabled = parseOptionalBool(values, KeyIMAPEnabled, false, &errs)
+	cfg.IMAP.Host = parseOptionalString(values, KeyIMAPHost, "")
+	cfg.IMAP.Port = parseOptionalInt(values, KeyIMAPPort, 993, imapPortMin, imapPortMax, &errs)
+	cfg.IMAP.TLSMode = parseOptionalString(values, KeyIMAPTLSMode, "implicit")
+	cfg.IMAP.Username = parseOptionalString(values, KeyIMAPUsername, "")
+	cfg.IMAP.Password = parseOptionalString(values, KeyIMAPPassword, "")
+	cfg.IMAP.Mailbox = parseOptionalString(values, KeyIMAPMailbox, "INBOX")
+	cfg.IMAP.PollInterval = parseOptionalDuration(values, KeyIMAPPollInterval, 5*time.Minute, &errs)
+	cfg.IMAP.FetchTimeout = parseOptionalDuration(values, KeyIMAPFetchTimeout, 30*time.Second, &errs)
+	cfg.IMAP.MaxMessageBytes = parseOptionalInt64(values, KeyIMAPMaxMessageBytes, 1_048_576, imapMaxMessageBytesMin, &errs)
+	cfg.IMAP.SnippetMaxChars = parseOptionalInt(values, KeyIMAPSnippetMaxChars, 2000, imapSnippetMaxCharsMin, imapSnippetMaxCharsMax, &errs)
+	cfg.IMAP.StoreFullBody = parseOptionalBool(values, KeyIMAPStoreFullBody, false, &errs)
+	cfg.IMAP.FullBodyMaxChars = parseOptionalInt(values, KeyIMAPFullBodyMaxChars, 20_000, imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax, &errs)
+	cfg.IMAP.MailfetchSocket = parseOptionalString(values, KeyIMAPMailfetchSocket, "/run/mailfetch/mailfetch.sock")
 
 	return cfg, errs
 }
@@ -515,6 +596,40 @@ func (c Config) Validate() error {
 		validateIntBounds(&errs, KeyRSSSummaryMaxChars, c.RSS.SummaryMaxChars, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax)
 	}
 
+	// IMAP fields are only required/bound-checked when the feature is
+	// actually enabled: IMAP_ENABLED defaults to false, and a disabled
+	// deployment must not fail startup over an unset IMAP setting it will
+	// never use.
+	if c.IMAP.Enabled {
+		if c.IMAP.Host == "" {
+			errs = append(errs, FieldError{Key: KeyIMAPHost, Reason: "required when " + KeyIMAPEnabled + "=true"})
+		}
+		if c.IMAP.Username == "" {
+			errs = append(errs, FieldError{Key: KeyIMAPUsername, Reason: "required when " + KeyIMAPEnabled + "=true"})
+		}
+		if c.IMAP.Password == "" {
+			errs = append(errs, FieldError{Key: KeyIMAPPassword, Reason: "required when " + KeyIMAPEnabled + "=true"})
+		}
+		if c.IMAP.Mailbox == "" {
+			errs = append(errs, FieldError{Key: KeyIMAPMailbox, Reason: "must not be empty"})
+		}
+		if !slices.Contains(imapAllowedTLSModes, c.IMAP.TLSMode) {
+			errs = append(errs, FieldError{Key: KeyIMAPTLSMode, Reason: "must be one of " + strings.Join(imapAllowedTLSModes, ", ")})
+		}
+		if c.IMAP.MailfetchSocket == "" {
+			errs = append(errs, FieldError{Key: KeyIMAPMailfetchSocket, Reason: "must not be empty"})
+		}
+		validateIntBounds(&errs, KeyIMAPPort, c.IMAP.Port, imapPortMin, imapPortMax)
+		validatePositiveDuration(&errs, KeyIMAPPollInterval, c.IMAP.PollInterval)
+		validatePositiveDuration(&errs, KeyIMAPFetchTimeout, c.IMAP.FetchTimeout)
+		if c.IMAP.FetchTimeout > 0 && c.IMAP.PollInterval > 0 && c.IMAP.FetchTimeout >= c.IMAP.PollInterval {
+			errs = append(errs, FieldError{Key: KeyIMAPFetchTimeout, Reason: "must be less than " + KeyIMAPPollInterval})
+		}
+		validateInt64Min(&errs, KeyIMAPMaxMessageBytes, c.IMAP.MaxMessageBytes, imapMaxMessageBytesMin)
+		validateIntBounds(&errs, KeyIMAPSnippetMaxChars, c.IMAP.SnippetMaxChars, imapSnippetMaxCharsMin, imapSnippetMaxCharsMax)
+		validateIntBounds(&errs, KeyIMAPFullBodyMaxChars, c.IMAP.FullBodyMaxChars, imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax)
+	}
+
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
 			errs = append(errs, FieldError{Key: KeyLogFormat, Reason: "must be json in production"})
@@ -587,6 +702,22 @@ func (c Config) Redacted() map[string]string {
 		KeyRSSMaxRedirects:                           strconv.Itoa(c.RSS.MaxRedirects),
 		KeyRSSSummaryMaxChars:                        strconv.Itoa(c.RSS.SummaryMaxChars),
 		KeyRSSAllowInsecureHTTP:                      strconv.FormatBool(c.RSS.AllowInsecureHTTP),
+		KeyIMAPEnabled:                               strconv.FormatBool(c.IMAP.Enabled),
+		KeyIMAPHost:                                  c.IMAP.Host,
+		KeyIMAPPort:                                  strconv.Itoa(c.IMAP.Port),
+		KeyIMAPTLSMode:                               c.IMAP.TLSMode,
+		// IMAP_USERNAME can be a personal email address; only whether it
+		// is set is shown here, matching LLM_API_KEY's treatment.
+		KeyIMAPUsername:         redactedSetOrUnset(c.IMAP.Username),
+		KeyIMAPPassword:         redactedSetOrUnset(c.IMAP.Password),
+		KeyIMAPMailbox:          c.IMAP.Mailbox,
+		KeyIMAPPollInterval:     c.IMAP.PollInterval.String(),
+		KeyIMAPFetchTimeout:     c.IMAP.FetchTimeout.String(),
+		KeyIMAPMaxMessageBytes:  strconv.FormatInt(c.IMAP.MaxMessageBytes, 10),
+		KeyIMAPSnippetMaxChars:  strconv.Itoa(c.IMAP.SnippetMaxChars),
+		KeyIMAPStoreFullBody:    strconv.FormatBool(c.IMAP.StoreFullBody),
+		KeyIMAPFullBodyMaxChars: strconv.Itoa(c.IMAP.FullBodyMaxChars),
+		KeyIMAPMailfetchSocket:  c.IMAP.MailfetchSocket,
 	}
 }
 

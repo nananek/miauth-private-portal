@@ -60,6 +60,21 @@ const (
 	KeyRSSMaxRedirects      = "RSS_MAX_REDIRECTS"
 	KeyRSSSummaryMaxChars   = "RSS_SUMMARY_MAX_CHARS"
 	KeyRSSAllowInsecureHTTP = "RSS_ALLOW_INSECURE_HTTP"
+
+	KeyIMAPEnabled          = "IMAP_ENABLED"
+	KeyIMAPHost             = "IMAP_HOST"
+	KeyIMAPPort             = "IMAP_PORT"
+	KeyIMAPTLSMode          = "IMAP_TLS_MODE"
+	KeyIMAPUsername         = "IMAP_USERNAME"
+	KeyIMAPPassword         = "IMAP_PASSWORD"
+	KeyIMAPMailbox          = "IMAP_MAILBOX"
+	KeyIMAPPollInterval     = "IMAP_POLL_INTERVAL"
+	KeyIMAPFetchTimeout     = "IMAP_FETCH_TIMEOUT"
+	KeyIMAPMaxMessageBytes  = "IMAP_MAX_MESSAGE_BYTES"
+	KeyIMAPSnippetMaxChars  = "IMAP_SNIPPET_MAX_CHARS"
+	KeyIMAPStoreFullBody    = "IMAP_STORE_FULL_BODY"
+	KeyIMAPFullBodyMaxChars = "IMAP_FULL_BODY_MAX_CHARS"
+	KeyIMAPMailfetchSocket  = "IMAP_MAILFETCH_SOCKET"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -114,6 +129,20 @@ var knownKeyOrder = []string{
 	KeyRSSMaxRedirects,
 	KeyRSSSummaryMaxChars,
 	KeyRSSAllowInsecureHTTP,
+	KeyIMAPEnabled,
+	KeyIMAPHost,
+	KeyIMAPPort,
+	KeyIMAPTLSMode,
+	KeyIMAPUsername,
+	KeyIMAPPassword,
+	KeyIMAPMailbox,
+	KeyIMAPPollInterval,
+	KeyIMAPFetchTimeout,
+	KeyIMAPMaxMessageBytes,
+	KeyIMAPSnippetMaxChars,
+	KeyIMAPStoreFullBody,
+	KeyIMAPFullBodyMaxChars,
+	KeyIMAPMailfetchSocket,
 }
 
 func isKnownKey(key string) bool {
