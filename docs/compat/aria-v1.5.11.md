@@ -47,7 +47,9 @@ The contract covers these concrete Aria paths:
 3. Create a note or a reply and receive the created note.
 4. Open a note, load its ancestor conversation, and load direct children.
 5. Optionally use the access-token login fallback exposed by the login page.
-6. (Issue #23) Edit the owner's display name from Settings → Profile.
+6. (Issue #23 PR1) Edit the owner's display name from Settings → Profile.
+7. (Issue #23 PR2) Open the server-info page for this instance, which
+   loads server-wide stats.
 
 The source locations used for the trace are:
 
@@ -84,6 +86,15 @@ redacted.
 | `POST /api/i/update` (`username` field) | **不要** | No traced Aria/misskey_dart source ever sends or exposes a `username` field on this endpoint | N/A — never implement without a new observed source |
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
 | WebSocket `/streaming` timeline channel | **不要** for MVP; **minimal stub since Issue #41** | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
+| `POST /api/stats` | **必要** for Issue #23 PR2 (implemented) | Server-info page, always reachable via `/{acct}/servers/{host}` | Anonymous; the traced call site always builds a tokenless guest account, so no `i` field is ever sent |
+| `POST /api/notes/delete` | **必要** for Issue #23 (not yet implemented — PR3) | Note footer/sheet delete action, and the post-edit dialog's delete option | `i` token; `write:notes` (already granted — no new scope) |
+| `POST /api/notes/renote` | **不要** | No traced Aria/misskey_dart source ever sends a dedicated renote-creation request to this path; renoting is `notes/create` with `renoteId` set (already rejected as `UNSUPPORTED_FEATURE`) | N/A — never implement without a new observed source |
+| `POST /api/notes/reactions/create` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's reaction button/picker | `i` token; new `write:reactions` scope (already in Aria's requested permission list, not yet granted by this service) |
+| `POST /api/notes/reactions/delete` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's un-react / change-reaction actions | `i` token; new `write:reactions` scope |
+| `POST /api/notes/reactions` | **必要** for Issue #23 (not yet implemented — PR4) | "Who reacted" sheet's paginated reaction list | `i` token; new `read:reactions` scope. **Not** `/api/notes/reactions/list` — see this document's "POST /api/notes/reactions" section for why plan-issue-23's assumed path is corrected here |
+| `POST /api/notes/mentions` | **必要** for Issue #23 (not yet implemented — PR5) | Optional user-added "Mention"/"Direct" home-timeline tabs | `i` token; `read:notes` (already granted — no new scope, per trace; see below) |
+| `POST /api/i/notifications` | **必要** for Issue #23 (not yet implemented — PR6) | The Notifications tab, always present in Aria's navigation | `i` token; new `read:notifications` scope |
+| `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -501,6 +512,297 @@ optional `untilId`. The response is a JSON array of `Note` objects. Aria
 requests another page when the result is short and stops on an empty result;
 server default limits, ordering, and visibility errors are **要実機確認**.
 
+### `POST /api/stats` (Issue #23 PR2)
+
+Traced from [`lib/src/misskey_dart_base.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/misskey_dart_base.dart)'s
+`stats()` method and Aria's only call site,
+[`lib/provider/api/stats_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/stats_provider.dart),
+invoked from
+[`lib/view/page/server/server_overview.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/view/page/server/server_overview.dart)
+(mounted at the `/{acct}/servers/{host}` route,
+[`lib/router/router.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/router/router.dart)).
+
+```json
+{}
+```
+
+This call is anonymous by construction, not merely by observed habit:
+`server_overview.dart` builds `Account(host: host)` — a guest account
+(`username: null`) — regardless of whether the viewer is actually logged
+into that host, `token_provider.dart` resolves a guest account's token
+as always `null`, and the pinned `ApiService.post` (`lib/src/services/
+api_service.dart`) unconditionally adds `i: token` to every request body
+and then strips any null-valued field before sending. So Aria never
+attaches an API token to this call, matching real Misskey's own
+unauthenticated `/api/stats`. This handler must not require a scope or
+reject a request with no `i` field.
+
+The pinned `StatsResponse` parser treats every field as optional:
+
+| Field | Type | This service's value |
+| --- | --- | --- |
+| `notesCount` | int | Total entries ever stored, every author, including archived/hidden (`EntryRepository.CountAll`) |
+| `originalNotesCount` | int | Same as `notesCount` — no federation, so every note is "original" |
+| `usersCount` | int | Always `1` — the single owner is this deployment's only registered user |
+| `originalUsersCount` | int | Always `1`, for the same reason |
+| `reactionsCount` | int | Always `0` until Issue #23 PR4 persists reactions |
+| `instances` | int | Always `0` — no federation |
+| `driveUsageLocal` / `driveUsageRemote` | int | Always `0` — no drive |
+
+### `POST /api/notes/delete` (Issue #23, not yet implemented — PR3)
+
+Traced from
+[`lib/provider/notes_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/notes_notifier_provider.dart)'s
+`delete(noteId)`, reachable from the note footer, the note action sheet,
+and the post-edit dialog's delete option, plus the pinned `misskey_dart`
+request model
+[`lib/src/data/notes/notes_delete_request.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/data/notes/notes_delete_request.dart).
+
+```json
+{
+  "noteId": "note-id",
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+`noteId` is a required opaque string; there is no other field. The pinned
+client sends this through `_apiService.post<void>`, so any 2xx JSON body
+(including `{}`) is accepted — Aria never decodes a typed response here
+and instead removes the note from its local cache client-side after the
+call succeeds. This reuses the already-granted `write:notes` scope; no
+new scope is needed. `plan-issue-23`'s confirmed direction (mapping
+delete onto `timeline.Service.SetHidden`, restricted to the owner's own
+`user_post` entries) is unaffected by this trace and remains PR3's basis.
+
+### `POST /api/notes/renote` (不要 — confirmed no dedicated wire path)
+
+Exhaustively searched: the pinned `misskey_dart`'s `MisskeyNotes` class
+([`lib/src/misskey_note.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/misskey_note.dart))
+has no `renote()` method and no `NotesRenoteCreateRequest`-shaped type
+exists anywhere in the pinned dependency. Every renote-creation call site
+in the pinned Aria commit (`lib/view/widget/renote_sheet.dart`,
+`lib/provider/post_notifier_provider.dart`) constructs a
+`NotesCreateRequest(renoteId: note.id)` and posts it through the already-
+implemented `notes/create` path — which already rejects a non-null
+`renoteId` with `UNSUPPORTED_FEATURE` (see this document's `POST
+/api/notes/create` section). Per Issue #23's own Non-goals ("`/api/notes/
+renote` は、ソーストレースの結果 Aria が実際に呼ばないと判明した場合、
+この issue のスコープから除外する"), this item is dropped from scope
+entirely, the same way `/api/notes/update` was: no `/api/notes/renote`
+route will ever be added.
+
+Two related-but-distinct endpoints do exist and are genuinely called by
+Aria — `notes/renotes` (list who renoted a note,
+`lib/provider/api/renotes_notifier_provider.dart`) and `notes/unrenote`
+(undo a renote, `lib/view/widget/note_footer.dart:312`) — but neither was
+part of Issue #23's explicit scope list, so this trace records their
+existence without adding them to scope. Both remain **不要** for this
+issue; a future issue would need to add them explicitly, including the
+question of what "renote" even means in a single-owner, no-federation
+deployment (Issue #23's own text floats a "resurface my own past post"
+use case as the only plausible one).
+
+### `POST /api/notes/reactions/create`, `/delete`, and `POST /api/notes/reactions` (Issue #23, not yet implemented — PR4)
+
+Traced from
+[`lib/provider/notes_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/notes_notifier_provider.dart)'s
+`react`/`unreact`/`changeReaction` (reachable from the note footer's
+reaction button and long-press picker, with no client-side restriction
+on reacting to your own note or an assistant/system-authored note — see
+[`lib/view/widget/note_footer.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/view/widget/note_footer.dart)),
+[`lib/provider/api/reactions_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/reactions_notifier_provider.dart)
+(the paginated "who reacted" sheet), and the pinned `misskey_dart`
+[`MisskeyNotesReactions`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/misskey_note.dart)
+class.
+
+**Correction to `plan-issue-23`**: the list endpoint's wire path is
+`notes/reactions`, not `notes/reactions/list` as the plan assumed. This
+is a path correction only — the endpoint's purpose, request shape, and
+PR4 scope are otherwise unaffected.
+
+Create:
+
+```json
+{
+  "noteId": "note-id",
+  "reaction": "👍",
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+Delete (no `reaction` field — a Misskey account has at most one reaction
+per note, so the note ID alone identifies which one to remove; `notes/
+reactions/delete` is also how `changeReaction` clears the old reaction
+before creating the new one):
+
+```json
+{
+  "noteId": "note-id",
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+Both are sent through `_apiService.post<void>`, so any 2xx body is
+accepted; Aria updates its note cache optimistically and then re-fetches
+via `notes/show`.
+
+List (`notes/reactions`):
+
+```json
+{
+  "noteId": "note-id",
+  "type": "👍",
+  "limit": 20,
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+`type`, `limit`, `offset`, `sinceId`, `untilId`, `sinceDate`, and
+`untilDate` are all optional in the generated model; the traced call
+site always sends `noteId`, `type` (the specific reaction being
+paginated — Aria's "who reacted" sheet is per-reaction-emoji, not a
+single combined list), and `limit: 20`, paginating with `untilId`. The
+response is a JSON array of:
+
+| Field | Type | Null / omission behavior |
+| --- | --- | --- |
+| `id` | string | Required and opaque |
+| `createdAt` | ISO-8601 string | Required |
+| `user` | object | Required; decoded as `UserLite` |
+| `type` | string | Nullable |
+
+Reaction emoji scope: Aria's picker can produce either a plain Unicode
+emoji or a `:name:`/`:name@host:` custom-emoji shortcode. Per
+`plan-issue-23`'s already-confirmed direction (and this issue's Non-
+goals excluding custom emoji/drive), PR4 must accept only a plain
+Unicode emoji in `reaction` and reject a `:`-delimited shortcode with
+`UNSUPPORTED_FEATURE`, the same way `/api/notes/create` rejects fields
+it does not support. This trace found no new information changing that
+direction.
+
+Scopes: Aria's fixed permission list already includes
+`read:reactions`/`write:reactions` (see this document's `GET /miauth/
+{session}` section), so no Aria-side change is needed once PR4 adds
+these scopes to `internal/miauth/scope.go`'s `grantableScopes` — but
+every API token issued before that PR ships will not carry them (see
+Issue #23 §3 "既存 API token への新規 scope 反映", still open).
+
+### `POST /api/notes/mentions` (Issue #23, not yet implemented — PR5)
+
+**Finding that revises `plan-issue-23`'s premise**: the plan and Issue
+#23 body both treat this as a "縁辺のユースケース" that might warrant
+only a minimal empty-array implementation. The trace shows it is a real,
+reachable Aria call, not dead code — Aria's home-timeline tab system
+calls it whenever the owner adds a "Mention" or "Direct" tab:
+
+```dart
+// lib/provider/api/timeline_notes_notifier_provider.dart
+TabType.mention => _misskey.notes.mentions(
+  NotesMentionsRequest(untilId: untilId, sinceDate: sinceDate, untilDate: untilDate, limit: limit),
+),
+TabType.direct => _misskey.notes.mentions(
+  NotesMentionsRequest(untilId: untilId, sinceDate: sinceDate, untilDate: untilDate, limit: limit,
+    visibility: NoteVisibility.specified),
+),
+```
+
+(also duplicated in
+[`lib/provider/api/timeline_notes_after_note_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/timeline_notes_after_note_notifier_provider.dart)
+for the "load around a note" path). Both tab types are optional — the
+owner must explicitly add one to their timeline configuration — so this
+is reachable-but-not-default, the same tier as `/api/endpoints`'s edit
+probe, not one of this document's core always-exercised journeys.
+
+The pinned `misskey_dart` request model
+([`lib/src/data/notes/notes_mentions_request.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/data/notes/notes_mentions_request.dart))
+also declares `following` and `sinceId`, but Aria's call sites never set
+them. The `direct` tab adds `visibility: NoteVisibility.specified` —
+since this service has no visibility concept beyond "public" (every note
+this service ever creates is `"public"`, see the Minimum Note contract),
+that tab variant will always resolve to an empty result here; only the
+plain `mention` tab variant can ever return anything. The response is a
+JSON array of `Note` — the existing wire `note` type, no new shape.
+
+This does not change PR5's scope decision by itself (still recorded as
+"要検討" between real `@username` extraction and a minimal empty
+response in `plan-issue-23`), but it does mean option (B) (minimal empty
+array) is a deliberate simplification of a real, owner-reachable
+feature, not a no-op for dead code — worth weighing accordingly when PR5
+is scoped. No new scope is needed either way: `read:notes` already
+covers it.
+
+### `POST /api/i/notifications` (Issue #23, not yet implemented — PR6)
+
+Traced from
+[`lib/provider/api/notifications_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/notifications_notifier_provider.dart)
+(backing the Notifications tab, a permanent part of Aria's navigation —
+unlike `notes/mentions`'s optional tabs, this one is always reachable)
+and
+[`lib/view/widget/notification_widget.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/view/widget/notification_widget.dart)'s
+per-`type` rendering, plus the pinned `misskey_dart`
+[`INotificationsRequest`/`INotificationsResponse`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/data/i/)
+models.
+
+Aria first probes `POST /api/endpoints` for `"i/notifications-grouped"`
+to decide whether to call the grouped variant instead; since this
+service's `implementedEndpoints` does not (and will not) advertise it,
+Aria's grouped-notifications setting has no effect here and it always
+falls back to the plain call:
+
+```json
+{
+  "untilId": "older-notification-id",
+  "limit": 20,
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+`sinceId`, `sinceDate`, `untilDate`, `following`, `unreadOnly`,
+`markAsRead`, `includeTypes`, and `excludeTypes` all exist in the
+generated request model, but this call site never sets any of them.
+
+**Type-decode risk from `plan-issue-23` §3.5 is resolved**: the response
+model's `type` field is annotated
+`@JsonKey(unknownEnumValue: JsonKey.nullForUndefinedEnumValue)` — an
+unrecognized `type` string decodes to `null` rather than throwing. This
+means a locally-chosen `type` value the pinned `NotificationType` enum
+does not declare would not break decoding; it would just render as an
+untyped/unhandled notification. In practice this is moot: `NotificationType`
+already declares `reply` and `app` (`lib/src/enums/notification_type.dart`),
+so `plan-issue-23`'s recommended mapping (llm_reply/llm_follow_up →
+`"reply"`, news/mail → `"app"`) uses only pre-existing enum values.
+`notification_widget.dart` confirms the exact fields each rendering path
+needs:
+
+- `reply` (and `quote`) requires a non-null `note` and renders the full
+  note via `NoteWidget(noteId: note.id)` — matching `plan-issue-23`'s
+  plan to reuse `newNote()` for this type.
+- `app` uses only optional `icon`/`header`/`body` (all nullable — a
+  header-only or even fully-empty `app` notification still renders
+  without error), confirming the "free-text third-party notification"
+  shape `plan-issue-23` guessed for news/mail is correct and low-risk.
+
+### `POST /api/notifications/mark-all-as-read` (不要 — confirmed no wire path exists at all)
+
+**Finding that revises `plan-issue-23`'s and Issue #23's premise**: this
+sub-endpoint is not merely unused by Aria — it does not exist anywhere
+in the pinned `misskey_dart` dependency. `lib/src/misskey_i.dart` (the
+class wrapping every `i/*`-family call, including `i/notifications`)
+declares no method for it, and an exhaustive search of both the pinned
+Aria commit and the pinned `misskey_dart` commit for `mark-all-as-read`/
+`markAllAsRead` returns zero results. `INotificationsRequest` does
+declare a `markAsRead: bool?` field — real Misskey's actual alternate
+mechanism for this, folded into `i/notifications` itself rather than a
+separate endpoint — but Aria's own call site never sets it either.
+
+Per Issue #23's own common acceptance criteria ("トレースの結果 Aria が
+実際には呼ばない...と判明した項目は...「不要」として明示的に記録し、
+実装しない"), this is exactly the documented fallback, not a scope
+conflict requiring a new owner decision the way PR1's `username` finding
+was — but it is a large enough surprise relative to Issue #23's explicit
+Scope/Acceptance-criteria text (which lists this sub-endpoint by name)
+that PR6 should not assume it needs to add this route at all.
+
 ## Minimum Note contract
 
 The pinned generated `Note` parser requires only the following top-level
@@ -845,7 +1147,7 @@ rather than replacing it.
   and this document's non-goals below cover what remains permanently
   out of scope rather than merely deferred.
 
-## Issue #23 implementation notes
+## Issue #23 PR1 implementation notes
 
 Issue #23's PR1 (`/api/i/update`, owner profile self-edit) traced Aria's
 Settings → Profile screen and the pinned `misskey_dart` request model before
@@ -883,6 +1185,55 @@ rather than resolved unilaterally:
   source of truth). PR1 is implemented on that basis: migration
   `0012_actor_profile.sql` adds `actors.display_name` only (no `username`
   column), and `POST /api/i/update` accepts only the `name` field.
+
+## Issue #23 PR2 implementation notes
+
+Issue #23's PR2 is a source-trace-and-record pass over the remaining five
+endpoints from Issue #23's scope expansion (`/api/notes/delete`,
+`/api/notes/renote`, `/api/notes/reactions/*`, `/api/notes/mentions`,
+`/api/i/notifications` + `/api/notifications/mark-all-as-read`), plus
+`/api/stats`, which this PR both traces and implements (see this
+document's per-endpoint sections above for the full trace of each). No
+endpoint from the first group is implemented in this PR: PR3/PR4/PR5/PR6
+own that work and can build directly on the contracts recorded here
+without re-tracing.
+
+Three findings revise `plan-issue-23`'s assumptions and are called out
+here so they are not missed by whichever PR consumes them:
+
+- **`/api/notes/reactions/list` does not exist** — the pinned
+  `misskey_dart`'s list-who-reacted call is wire path `notes/reactions`,
+  not `notes/reactions/list`. A path correction only; PR4's scope is
+  unaffected.
+- **`/api/notes/mentions` is real, reachable Aria traffic**, not the
+  edge case `plan-issue-23`/Issue #23 treat it as — it fires whenever the
+  owner adds an optional "Mention" or "Direct" home-timeline tab. This
+  does not by itself force PR5 to pick the full-implementation option
+  over the minimal-empty-array option, but that choice is now known to
+  affect a real, owner-reachable tab rather than dead code.
+- **`/api/notifications/mark-all-as-read` has no wire path at all** —
+  not merely unused by Aria, but structurally absent from the pinned
+  `misskey_dart` dependency (`lib/src/misskey_i.dart` defines no method
+  for it). Issue #23's own common acceptance criteria already cover this
+  outcome (record as 不要, do not implement), so this needed no owner
+  escalation the way PR1's `username` finding did — but PR6 should not
+  budget for adding this route, contrary to `plan-issue-23`'s and Issue
+  #23's explicit mention of it in scope text.
+
+`/api/notes/renote`'s absence (confirmed: no dedicated wire path; renote
+is `notes/create` + `renoteId`) matches what `plan-issue-23` and Issue
+#23's Non-goals already anticipated as the likely outcome, so it is a
+confirmation rather than a new finding.
+
+`/api/stats` is implemented in this PR: `EntryRepository.CountAll` (a
+new, narrow addition alongside the existing `CountByAuthor`) backs
+`notesCount`/`originalNotesCount`; every other field this service has no
+concept for (federation, drive, reactions not yet persisted) is a fixed
+default, matching `note.go`'s existing always-present-default
+convention for the same kind of field. The handler is registered
+alongside `/api/meta`/`/api/endpoints` — anonymous, no `RequireScope`
+wrapper — because the trace showed Aria's only call site never attaches
+an API token.
 
 ## Non-goals and implementation boundary
 

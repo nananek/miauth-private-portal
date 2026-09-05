@@ -61,7 +61,8 @@ type Server struct {
 // Aria/Misskey-compatible note routes (POST /api/meta, /api/i,
 // /api/endpoints, /api/notes/create, /api/notes/timeline,
 // /api/notes/show, /api/notes/conversation, /api/notes/children), plus
-// Issue #23 PR1's POST /api/i/update. They register only when both
+// Issue #23 PR1's POST /api/i/update and PR2's anonymous POST
+// /api/stats. They register only when both
 // opts.MiAuthService and opts.TimelineService are non-nil: every
 // protected note route authenticates through RequireScope (which needs
 // the MiAuth service), and there is no meaningful note API without a
@@ -104,6 +105,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	if opts.MiAuthService != nil && opts.TimelineService != nil {
 		s.Handle("POST /api/meta", http.HandlerFunc(s.handleMeta))
 		s.Handle("POST /api/endpoints", http.HandlerFunc(s.handleEndpoints))
+		s.Handle("POST /api/stats", http.HandlerFunc(s.handleStats))
 		s.Handle("POST /api/i", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleAPII)))
 		s.Handle("POST /api/i/update", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleAPIIUpdate)))
 		s.Handle("POST /api/notes/create", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesCreate)))

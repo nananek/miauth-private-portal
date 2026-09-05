@@ -114,6 +114,16 @@ func (r *entryRepository) CountByAuthor(ctx context.Context, actorID string) (in
 	return count, nil
 }
 
+func (r *entryRepository) CountAll(ctx context.Context) (int, error) {
+	var count int
+	if err := r.q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM entries`,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count all entries: %w", err)
+	}
+	return count, nil
+}
+
 func (r *entryRepository) UpdateBody(ctx context.Context, id, body string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE entries SET body = ?, updated_at = ? WHERE id = ?`, body, formatTime(at), id)

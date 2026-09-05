@@ -361,6 +361,35 @@ func TestEntryRepository_CountByAuthor(t *testing.T) {
 	}
 }
 
+func TestEntryRepository_CountAll(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateActor(t, db)
+	assistant, err := db.Actors.GetByType(t.Context(), domain.ActorAssistant)
+	if err != nil {
+		t.Fatalf("get assistant actor: %v", err)
+	}
+	now := time.Now()
+
+	if n, err := db.Entries.CountAll(t.Context()); err != nil || n != 0 {
+		t.Fatalf("CountAll(no entries) = (%d, %v), want (0, nil)", n, err)
+	}
+
+	root := mustCreateThreadAndRoot(t, db, actorID, now)
+	if err := db.Entries.SetHidden(t.Context(), root.ID, true, now); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Minute))
+	mustCreateThreadAndRoot(t, db, assistant.ID, now.Add(2*time.Minute))
+
+	n, err := db.Entries.CountAll(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("CountAll = %d, want 3 (every author counts, hidden entries still count)", n)
+	}
+}
+
 func TestEntryRepository_SetProcessingStatus(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)

@@ -395,6 +395,13 @@ func (s *Service) CountByAuthor(ctx context.Context, actorID string) (int, error
 	return s.repos.Entries.CountByAuthor(ctx, actorID)
 }
 
+// CountAll returns the total entry count across every author, including
+// archived and hidden entries (see EntryRepository.CountAll). It backs
+// POST /api/stats' server-wide notesCount (Issue #23 PR2).
+func (s *Service) CountAll(ctx context.Context) (int, error) {
+	return s.repos.Entries.CountAll(ctx)
+}
+
 // ResolveAuthor returns the Actor an entry's AuthorActorID names, so
 // callers projecting an Entry onto a Misskey-compatible wire type (Note.
 // user) can determine whether it is the owner or one of the reserved
