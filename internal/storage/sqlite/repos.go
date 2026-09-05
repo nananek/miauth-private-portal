@@ -31,5 +31,6 @@ func newRepos(q querier) domain.Repos {
 		Jobs:            &jobRepository{q: q},
 		ExternalSources: &externalSourceRepository{q: q},
 		ExternalItems:   &externalItemRepository{q: q},
+		Reactions:       &reactionRepository{q: q},
 	}
 }

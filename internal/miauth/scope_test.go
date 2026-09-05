@@ -22,14 +22,15 @@ const ariaPermissionList = "read:account,write:account,read:blocks,write:blocks,
 
 func TestEffectiveScopes_AriaPermissionList(t *testing.T) {
 	// docs/compat/aria-v1.5.11.md fixes the effective local scope set as
-	// exactly read:account, read:notes, write:notes, and (since Issue #23
-	// PR1) write:account for Aria's real request — this is the compat
-	// doc's literal contract, not derived from the request by pure
-	// intersection (see effectiveScopes' doc comment for why read:notes
-	// is unconditional; write:account, unlike read:notes, is granted via
-	// the normal intersection since ariaPermissionList does request it).
+	// exactly read:account, read:notes, write:notes, (since Issue #23
+	// PR1) write:account, and (since Issue #23 PR4) read:reactions/
+	// write:reactions for Aria's real request — this is the compat doc's
+	// literal contract, not derived from the request by pure intersection
+	// (see effectiveScopes' doc comment for why read:notes is
+	// unconditional; the other four, unlike read:notes, are granted via
+	// the normal intersection since ariaPermissionList does request them).
 	got := effectiveScopes(ariaPermissionList)
-	want := []string{ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount}
+	want := []string{ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount, ScopeReadReactions, ScopeWriteReactions}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("effectiveScopes(ariaPermissionList) = %v, want %v", got, want)
 	}

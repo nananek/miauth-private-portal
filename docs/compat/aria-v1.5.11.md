@@ -89,9 +89,9 @@ redacted.
 | `POST /api/stats` | **必要** for Issue #23 PR2 (implemented) | Server-info page, always reachable via `/{acct}/servers/{host}` | Anonymous; the traced call site always builds a tokenless guest account, so no `i` field is ever sent |
 | `POST /api/notes/delete` | **必要** for Issue #23 PR3 (implemented) | Note footer/sheet delete action, and the post-edit dialog's delete option | `i` token; `write:notes` (already granted — no new scope) |
 | `POST /api/notes/renote` | **不要** | No traced Aria/misskey_dart source ever sends a dedicated renote-creation request to this path; renoting is `notes/create` with `renoteId` set (already rejected as `UNSUPPORTED_FEATURE`) | N/A — never implement without a new observed source |
-| `POST /api/notes/reactions/create` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's reaction button/picker | `i` token; new `write:reactions` scope (already in Aria's requested permission list, not yet granted by this service) |
-| `POST /api/notes/reactions/delete` | **必要** for Issue #23 (not yet implemented — PR4) | Note footer's un-react / change-reaction actions | `i` token; new `write:reactions` scope |
-| `POST /api/notes/reactions` | **必要** for Issue #23 (not yet implemented — PR4) | "Who reacted" sheet's paginated reaction list | `i` token; new `read:reactions` scope. **Not** `/api/notes/reactions/list` — see this document's "POST /api/notes/reactions" section for why plan-issue-23's assumed path is corrected here |
+| `POST /api/notes/reactions/create` | **必要** for Issue #23 PR4 (implemented) | Note footer's reaction button/picker | `i` token; `write:reactions` scope (newly granted by this PR) |
+| `POST /api/notes/reactions/delete` | **必要** for Issue #23 PR4 (implemented) | Note footer's un-react / change-reaction actions | `i` token; `write:reactions` scope |
+| `POST /api/notes/reactions` | **必要** for Issue #23 PR4 (implemented) | "Who reacted" sheet's paginated reaction list | `i` token; `read:reactions` scope. **Not** `/api/notes/reactions/list` — see this document's "POST /api/notes/reactions" section for why plan-issue-23's assumed path is corrected here |
 | `POST /api/notes/mentions` | **必要** for Issue #23 (not yet implemented — PR5) | Optional user-added "Mention"/"Direct" home-timeline tabs | `i` token; `read:notes` (already granted — no new scope, per trace; see below) |
 | `POST /api/i/notifications` | **必要** for Issue #23 (not yet implemented — PR6) | The Notifications tab, always present in Aria's navigation | `i` token; new `read:notifications` scope |
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
@@ -102,8 +102,9 @@ but create/reply/reload/thread journeys do not depend on it. The local server
 must not claim edit support until the later endpoint decision is made.
 
 For this contract, the exact effective local API scope set is
-`read:account`, `read:notes`, `write:notes`, and (since Issue #23 PR1)
-`write:account`. The broad `permission` query from Aria is recorded for
+`read:account`, `read:notes`, `write:notes`, (since Issue #23 PR1)
+`write:account`, and (since Issue #23 PR4) `read:reactions`/
+`write:reactions`. The broad `permission` query from Aria is recorded for
 compatibility but does not grant any additional scope. `meta`, `endpoints`,
 the MiAuth page, and the MiAuth check use their documented browser or
 anonymous/session capability and do not consume a local API token. `/api/i`,
@@ -545,7 +546,7 @@ The pinned `StatsResponse` parser treats every field as optional:
 | `originalNotesCount` | int | Same as `notesCount` — no federation, so every note is "original" |
 | `usersCount` | int | Always `1` — the single owner is this deployment's only registered user |
 | `originalUsersCount` | int | Always `1`, for the same reason |
-| `reactionsCount` | int | Always `0` until Issue #23 PR4 persists reactions |
+| `reactionsCount` | int | Total reactions ever stored, across every entry (`ReactionRepository.CountAll`, added by Issue #23 PR4; a fixed `0` before that PR) |
 | `instances` | int | Always `0` — no federation |
 | `driveUsageLocal` / `driveUsageRemote` | int | Always `0` — no drive |
 
@@ -621,7 +622,7 @@ question of what "renote" even means in a single-owner, no-federation
 deployment (Issue #23's own text floats a "resurface my own past post"
 use case as the only plausible one).
 
-### `POST /api/notes/reactions/create`, `/delete`, and `POST /api/notes/reactions` (Issue #23, not yet implemented — PR4)
+### `POST /api/notes/reactions/create`, `/delete`, and `POST /api/notes/reactions` (Issue #23 PR4, implemented)
 
 Traced from
 [`lib/provider/notes_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/notes_notifier_provider.dart)'s
@@ -693,18 +694,45 @@ response is a JSON array of:
 Reaction emoji scope: Aria's picker can produce either a plain Unicode
 emoji or a `:name:`/`:name@host:` custom-emoji shortcode. Per
 `plan-issue-23`'s already-confirmed direction (and this issue's Non-
-goals excluding custom emoji/drive), PR4 must accept only a plain
-Unicode emoji in `reaction` and reject a `:`-delimited shortcode with
-`UNSUPPORTED_FEATURE`, the same way `/api/notes/create` rejects fields
-it does not support. This trace found no new information changing that
-direction.
+goals excluding custom emoji/drive), PR4 accepts only a plain Unicode
+emoji in `reaction` and rejects a `:`-delimited shortcode with
+`UNSUPPORTED_FEATURE` (`isCustomEmojiShortcode`,
+`internal/httpserver/reactions_handlers.go`), the same way
+`/api/notes/create` rejects fields it does not support.
 
 Scopes: Aria's fixed permission list already includes
 `read:reactions`/`write:reactions` (see this document's `GET /miauth/
-{session}` section), so no Aria-side change is needed once PR4 adds
-these scopes to `internal/miauth/scope.go`'s `grantableScopes` — but
-every API token issued before that PR ships will not carry them (see
-Issue #23 §3 "既存 API token への新規 scope 反映", still open).
+{session}` section); PR4 adds both to
+`internal/miauth/scope.go`'s `grantableScopes` — but every API token
+issued before this PR shipped does not carry them (see Issue #23 §3
+"既存 API token への新規 scope 反映", still open; re-approving through
+`miauthctl` is the operational workaround).
+
+**Implementation (2026-09-06)**: `domain.Reaction`/`ReactionRepository`
+(`internal/domain/reaction.go`) and migration `0013_reactions.sql` back a
+new `reactions` table (`entry_id`, `reactor_actor_id`, `emoji`,
+`created_at`, `UNIQUE(entry_id, reactor_actor_id)`).
+`ReactionRepository.Create` is an upsert — a second call for the same
+(entry, actor) pair overwrites the emoji rather than conflicting — so
+either Aria's own delete-then-create `changeReaction` sequence or a
+direct repeat `create` call lands on the same single-row-per-pair state;
+`Delete` is idempotent for the same reason removing an absent reaction is
+not observed to be an error. `timeline.Service` exposes
+`SetReaction`/`RemoveReaction`/`ReactionCounts`/`MyReaction`/
+`ListReactions`/`GetReaction`/`CountAllReactions` as thin wrappers, mirroring
+`SetHidden`/`SetArchived`'s existing style rather than needing a
+`UnitOfWork` transaction (each is a single-table write). The target note
+is not restricted to the owner's own `user_post` entries (unlike
+`/api/notes/delete`): only `entryVisible` gates it, matching the
+recommended policy above and Aria's own lack of an `isMe`-style guard.
+`note.Reactions`/`note.myReaction` (`internal/httpserver/noteapi_wire.go`)
+are now populated with real data on every note-returning endpoint (not
+only the three reactions endpoints themselves) via a new
+`(*Server).projectNote` wrapper around `newNote`, since Aria's note
+footer needs this on every rendered note, not just the ones a "who
+reacted" call happens to touch. `POST /api/stats`' `reactionsCount` is
+likewise no longer a fixed `0` (see this document's `POST /api/stats`
+section).
 
 ### `POST /api/notes/mentions` (Issue #23, not yet implemented — PR5)
 
@@ -1292,6 +1320,52 @@ and this PR is what gives it its first concrete product meaning.
   separate method and keeps counting every entry regardless of
   archived/hidden state — this PR does not touch it.
 - No new scope: `write:notes` was already granted for `/api/notes/create`.
+
+## Issue #23 PR4 implementation notes
+
+PR4 implements `POST /api/notes/reactions/create`, `/delete`, and the
+"who reacted" list `POST /api/notes/reactions` (see this document's
+per-endpoint section above for the full trace and design). Summary of
+what shipped:
+
+- New `reactions` table (migration `0013_reactions.sql`) and
+  `domain.ReactionRepository` (`internal/storage/sqlite/reaction_repository.go`).
+  `Create` is an upsert (`INSERT ... ON CONFLICT (entry_id,
+  reactor_actor_id) DO UPDATE`), so it never conflicts on the table's
+  `UNIQUE(entry_id, reactor_actor_id)` constraint regardless of whether a
+  caller reaches it via Aria's own delete-then-create `changeReaction`
+  flow or a direct repeat call; `Delete` is unconditional (no
+  `requireRowAffected`), so removing an absent reaction is not an error.
+- New `internal/miauth` scopes `read:reactions`/`write:reactions`, added
+  to `grantableScopes` so Aria's already-requested permission list
+  (`docs/compat/aria-v1.5.11.md`'s `GET /miauth/{session}` section) grants
+  them on a fresh MiAuth approval. A token issued before this PR does not
+  carry them; re-approving through `miauthctl` is the only way to add
+  them retroactively (Issue #23 §3 "既存 API token への新規 scope 反映",
+  still open as an operational question, not a blocker for this PR).
+- Reaction target is not restricted to the owner's own `user_post`
+  entries the way `/api/notes/delete` is: only `entryVisible` gates a
+  reaction target, so an assistant-authored `llm_reply` or a
+  system-authored `news`/`mail` entry can be reacted to, matching
+  plan-issue-23 §1 PR4's recommendation and the PR2 trace finding that
+  Aria's `note_footer.dart` places no `isMe`-style guard on this.
+- `note.Reactions`/`note.myReaction` are populated with real data (via
+  `ReactionRepository.CountsByEmoji`/`GetByActor`, wrapped by
+  `timeline.Service.ReactionCounts`/`MyReaction`) on every note-returning
+  endpoint — `/api/notes/create`, `/timeline`, `/show`, `/conversation`,
+  and `/children` — not only within the three reactions endpoints
+  themselves, since Aria's note footer needs this data whenever it
+  renders any note. This is done through a new `(*Server).projectNote`
+  wrapper (`internal/httpserver/noteapi_wire.go`) rather than folding it
+  into `newNote` itself, keeping `newNote` a pure, repository-free
+  conversion function.
+- `reaction` accepts only a plain Unicode emoji;
+  `isCustomEmojiShortcode` rejects a `:name:`/`:name@host:` shortcode
+  with `UNSUPPORTED_FEATURE` (custom emoji/drive remain this issue's
+  Non-goals).
+- `POST /api/stats`' `reactionsCount` is no longer a fixed `0`: a new
+  `ReactionRepository.CountAll` backs it (see this document's `POST
+  /api/stats` section).
 
 ## Non-goals and implementation boundary
 

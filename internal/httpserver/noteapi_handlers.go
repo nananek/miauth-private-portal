@@ -90,6 +90,9 @@ var implementedEndpoints = []string{
 	"notes/conversation",
 	"notes/children",
 	"notes/delete",
+	"notes/reactions/create",
+	"notes/reactions/delete",
+	"notes/reactions",
 	"stats",
 }
 
@@ -97,12 +100,13 @@ func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, implementedEndpoints)
 }
 
-// handleStats handles POST /api/stats (Issue #23 PR2). It is anonymous
-// and body-independent like handleMeta/handleEndpoints: the pinned
-// Aria/misskey_dart source trace (docs/compat/aria-v1.5.11.md) shows
-// Aria's only call site (the server-info page) always builds a
-// guest/tokenless account for this call, so it never sends an "i"
-// field — this handler must not require one.
+// handleStats handles POST /api/stats (Issue #23 PR2, with reactionsCount
+// added by PR4). It is anonymous and body-independent like
+// handleMeta/handleEndpoints: the pinned Aria/misskey_dart source trace
+// (docs/compat/aria-v1.5.11.md) shows Aria's only call site (the
+// server-info page) always builds a guest/tokenless account for this
+// call, so it never sends an "i" field — this handler must not require
+// one.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	notesCount, err := s.timeline.CountAll(r.Context())
 	if err != nil {
@@ -110,7 +114,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, newStatsResponse(notesCount))
+	reactionsCount, err := s.timeline.CountAllReactions(r.Context())
+	if err != nil {
+		s.logger.Error("count all reactions failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newStatsResponse(notesCount, reactionsCount))
 }
 
 // handleAPII handles POST /api/i. See meDetailed's doc comment for why
@@ -297,7 +307,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: newNote(entry, newUserLiteFromOwner(owner))})
+	createdNote, err := s.projectNote(r.Context(), entry, newUserLiteFromOwner(owner), owner.ActorID)
+	if err != nil {
+		s.logger.Error("project created note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: createdNote})
 }
 
 // llmReplyJob decides whether posting body should enqueue an
@@ -446,7 +462,13 @@ func (s *Server) handleNotesTimeline(w http.ResponseWriter, r *http.Request) {
 
 	notes := make([]note, 0, len(entries))
 	for _, e := range entries {
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project timeline note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }
@@ -486,7 +508,13 @@ func (s *Server) handleNotesShow(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, newNote(entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner)))
+	n, err := s.projectNote(r.Context(), entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner), owner.ActorID)
+	if err != nil {
+		s.logger.Error("project shown note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
 }
 
 type notesDeleteRequest struct {
@@ -609,7 +637,13 @@ func (s *Server) handleNotesConversation(w http.ResponseWriter, r *http.Request)
 		if !entryVisible(e) {
 			continue
 		}
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project conversation note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }
@@ -673,7 +707,13 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 
 	notes := make([]note, 0, len(page))
 	for _, e := range page {
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project children note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }

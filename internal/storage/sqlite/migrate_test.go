@@ -13,7 +13,7 @@ import (
 var expectedTables = []string{
 	"actors", "miauth_local_sessions", "api_tokens", "threads", "entries", "user_tags", "llm_classifications",
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
-	"external_sources", "external_items",
+	"external_sources", "external_items", "reactions",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {
@@ -310,6 +310,81 @@ func TestMigrate_UpgradeAppliesActorDisplayNameColumn(t *testing.T) {
 	}
 	if displayName.Valid {
 		t.Errorf("upgraded row has non-NULL display_name: %v", displayName)
+	}
+}
+
+// TestMigrate_UpgradeAppliesReactionsTable backs migration 0013 (Issue
+// #23 PR4): unlike 0012's ALTER TABLE, this is a brand-new table with no
+// pre-existing rows to preserve, so the upgrade test's job is only to
+// confirm the table and its UNIQUE(entry_id, reactor_actor_id) constraint
+// exist and work after upgrading from a pre-0013 database, mirroring
+// TestMigrate_UpgradeAppliesExternalSourceCursorColumns' structure.
+func TestMigrate_UpgradeAppliesReactionsTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 12 {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+
+	const ownerID = "pre-existing-owner"
+	const entryID = "pre-existing-entry"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO threads (id, created_at, updated_at) VALUES (?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, entryID,
+	); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES (?, ?, 'user_post', ?, 'body', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`,
+		entryID, entryID, ownerID,
+	); err != nil {
+		t.Fatalf("seed entry: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO reactions (id, entry_id, reactor_actor_id, emoji, created_at) VALUES ('r1', ?, ?, '👍', '2024-01-01T00:00:00Z')`,
+		entryID, ownerID,
+	); err != nil {
+		t.Fatalf("insert reaction after upgrade: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO reactions (id, entry_id, reactor_actor_id, emoji, created_at) VALUES ('r2', ?, ?, '❤️', '2024-01-01T00:00:01Z')`,
+		entryID, ownerID,
+	); err == nil {
+		t.Error("second reaction from the same actor on the same entry should violate UNIQUE(entry_id, reactor_actor_id)")
 	}
 }
 
