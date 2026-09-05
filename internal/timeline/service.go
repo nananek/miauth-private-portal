@@ -118,6 +118,24 @@ func (s *Service) recordSelfMentionIfAny(ctx context.Context, repos domain.Repos
 	})
 }
 
+// recordNotification persists an Issue #23 PR6 notification of notifType
+// for relatedEntryID at createdAt. Callers must run this inside the same
+// transaction as the entry create it follows, so a notification never
+// outlives (or is missing for) the entry it names. Unlike
+// recordSelfMentionIfAny, there is no disabling condition or kind check
+// here: every call site below already restricts itself to exactly the
+// two creation paths plan-issue-23's PR6 section designates (a generated
+// reply/follow-up, or a genuinely new external item), so this is an
+// unconditional insert.
+func recordNotification(ctx context.Context, repos domain.Repos, notifType domain.NotificationType, relatedEntryID string, createdAt time.Time) error {
+	return repos.Notifications.Create(ctx, domain.Notification{
+		ID:             domain.NewID(),
+		Type:           notifType,
+		RelatedEntryID: relatedEntryID,
+		CreatedAt:      createdAt,
+	})
+}
+
 // CreateRoot creates a thread and its root entry atomically. User posts
 // and ingestion/system entries may be roots; LLM replies and follow-up
 // questions must attach to an existing entry through CreateReply.
@@ -195,9 +213,10 @@ func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind do
 }
 
 // CreateGeneratedReply atomically creates a new llm_reply/llm_follow_up
-// entry replying to targetEntryID and marks generationID's pending
-// LLMGeneration complete, linked to the new entry, in one transaction —
-// the same atomicity AGENTS.md's "Commit the post and durable job intent
+// entry replying to targetEntryID, records an Issue #23 PR6 "reply"
+// notification for it, and marks generationID's pending LLMGeneration
+// complete, linked to the new entry, in one transaction — the same
+// atomicity AGENTS.md's "Commit the post and durable job intent
 // atomically" requires of CreateReply's job intent, applied here to the
 // generation record a retried job must not be able to duplicate. Callers
 // (internal/llmreply's job handler) call this only after a provider call
@@ -219,6 +238,9 @@ func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string
 			return err
 		}
 		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
+			return err
+		}
+		if err := recordNotification(ctx, repos, domain.NotificationReply, entry.ID, now); err != nil {
 			return err
 		}
 		return repos.Generations.Complete(ctx, generationID, entry.ID, body, promptTokens, completionTokens, now)
@@ -282,6 +304,9 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 				return err
 			}
 			if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
+				return err
+			}
+			if err := recordNotification(ctx, repos, domain.NotificationApp, entry.ID, now); err != nil {
 				return err
 			}
 			return repos.ExternalItems.Promote(ctx, item.ID, entry.ID)
@@ -539,6 +564,21 @@ func (s *Service) GetReaction(ctx context.Context, id string) (domain.Reaction, 
 // recent page, otherwise entries strictly older than before.
 func (s *Service) ListMentions(ctx context.Context, actorID string, before *domain.Cursor, limit int) ([]domain.Entry, error) {
 	return s.repos.Mentions.ListEntriesByMentionedActor(ctx, actorID, before, limit)
+}
+
+// ListNotifications returns newest-first, paginated notifications (Issue
+// #23 PR6's POST /api/i/notifications) — the same paging contract as
+// GetTimelineDesc/ListMentions: before nil returns the most recent page,
+// otherwise notifications strictly older than before.
+func (s *Service) ListNotifications(ctx context.Context, before *domain.Cursor, limit int) ([]domain.Notification, error) {
+	return s.repos.Notifications.ListDesc(ctx, before, limit)
+}
+
+// GetNotification returns one notification by its opaque ID (Issue #23
+// PR6), used only to resolve ListNotifications' untilId pagination
+// anchor.
+func (s *Service) GetNotification(ctx context.Context, id string) (domain.Notification, error) {
+	return s.repos.Notifications.Get(ctx, id)
 }
 
 // ResolveAuthor returns the Actor an entry's AuthorActorID names, so

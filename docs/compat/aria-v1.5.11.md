@@ -93,7 +93,7 @@ redacted.
 | `POST /api/notes/reactions/delete` | **必要** for Issue #23 PR4 (implemented) | Note footer's un-react / change-reaction actions | `i` token; `write:reactions` scope |
 | `POST /api/notes/reactions` | **必要** for Issue #23 PR4 (implemented) | "Who reacted" sheet's paginated reaction list | `i` token; `read:reactions` scope. **Not** `/api/notes/reactions/list` — see this document's "POST /api/notes/reactions" section for why plan-issue-23's assumed path is corrected here |
 | `POST /api/notes/mentions` | **必要** for Issue #23 (not yet implemented — PR5) | Optional user-added "Mention"/"Direct" home-timeline tabs | `i` token; `read:notes` (already granted — no new scope, per trace; see below) |
-| `POST /api/i/notifications` | **必要** for Issue #23 (not yet implemented — PR6) | The Notifications tab, always present in Aria's navigation | `i` token; new `read:notifications` scope |
+| `POST /api/i/notifications` | **必要** for Issue #23 PR6 (implemented) | The Notifications tab, always present in Aria's navigation | `i` token; new `read:notifications` scope |
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
@@ -103,8 +103,9 @@ must not claim edit support until the later endpoint decision is made.
 
 For this contract, the exact effective local API scope set is
 `read:account`, `read:notes`, `write:notes`, (since Issue #23 PR1)
-`write:account`, and (since Issue #23 PR4) `read:reactions`/
-`write:reactions`. The broad `permission` query from Aria is recorded for
+`write:account`, (since Issue #23 PR4) `read:reactions`/
+`write:reactions`, and (since Issue #23 PR6) `read:notifications`. The
+broad `permission` query from Aria is recorded for
 compatibility but does not grant any additional scope. `meta`, `endpoints`,
 the MiAuth page, and the MiAuth check use their documented browser or
 anonymous/session capability and do not consume a local API token. `/api/i`,
@@ -809,7 +810,7 @@ scanned or backfilled (owner-confirmed, 2026-09-06). The persisted
 .ListEntriesByMentionedActor`), so no new `Note` field beyond the
 already-static `mentions` array's own JSON shape is needed.
 
-### `POST /api/i/notifications` (Issue #23, not yet implemented — PR6)
+### `POST /api/i/notifications` (Issue #23 PR6, implemented)
 
 Traced from
 [`lib/provider/api/notifications_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/notifications_notifier_provider.dart)
@@ -859,6 +860,50 @@ needs:
   header-only or even fully-empty `app` notification still renders
   without error), confirming the "free-text third-party notification"
   shape `plan-issue-23` guessed for news/mail is correct and low-risk.
+
+**Implemented as** `Server.handleAPINotifications`
+(`internal/httpserver/notifications_handlers.go`), registered with the
+new `read:notifications` scope. Pagination mirrors `handleNotesReactions`:
+`limit` defaults to 20 and clamps to `maxTimelineLimit` (100), and
+`untilId` resolves through the notification's own `(created_at, id)` via
+`timeline.Service.GetNotification` (an unknown/stale `untilId` yields an
+empty page, the same pagination-loop-safe treatment every other
+`untilId`-paginated endpoint in this document gives it) rather than
+through the related note's — a notification and its related entry are
+different rows with independent, only-coincidentally-correlated
+timestamps once more than one notification type exists.
+
+Delivery itself lives in `timeline.Service`
+(`internal/timeline/service.go`): `CreateGeneratedReply` records a
+`"reply"` notification for the llm_reply/llm_follow_up entry it just
+created, and `CreateExternalEntry` records an `"app"` notification for a
+news/mail entry, but only inside the `created == true` branch — a
+redelivered duplicate (same `DedupeKey`) never notifies twice. Both calls
+run in the same transaction as the entry create, via the new
+`domain.NotificationRepository` (`notifications` table, migration
+`0015_notifications.sql`), so a notification can never be missing for, or
+outlive, the entry it names. A plain `user_post` creation (`CreateRoot`/
+`CreateReply`) never notifies.
+
+Only the fields each type actually needs are sent — `id`/`createdAt`/
+`type` always, `note` for `"reply"` (the full wire `Note` for the
+generated reply/follow-up entry itself, reusing `newNote()`/
+`(*Server).projectNote` exactly as `plan-issue-23` planned), `body` for
+`"app"` (the related news/mail entry's `Body` verbatim, which already
+carries `internal/ingest.Service.composeExternalBody`'s own
+kind/title/provenance-URL header — see this document's "Note.text
+provenance markers" section — so no separate `header` value is
+synthesized). Every other `INotificationsResponse` field
+(`reaction`, `achievement`, `role`, `users`, ...) belongs to notification
+types this deployment never emits and is omitted rather than sent as
+always-null padding, matching how real Misskey's own notification wire
+format already varies fields by type. There is no read/unread field on
+the wire response and no persisted read state either: PR2's trace found
+no Aria/misskey_dart wire path for `mark-all-as-read` or any other
+read-management call (see below), so this PR implements listing only —
+`plan-issue-23`'s original `domain.Notification` sketch's `ReadAt` field
+and `NotificationRepository.MarkAllRead` method were dropped accordingly
+rather than added as unreachable code.
 
 ### `POST /api/notifications/mark-all-as-read` (不要 — confirmed no wire path exists at all)
 
