@@ -46,7 +46,14 @@ type ExternalItem struct {
 type ExternalSourceRepository interface {
 	Create(ctx context.Context, s ExternalSource) error
 	Get(ctx context.Context, id string) (ExternalSource, error)
-	List(ctx context.Context) ([]ExternalSource, error)
+	// List returns every configured source of kind, in creation order. A
+	// caller (ingest.Scheduler) always scopes to its own kind: without
+	// this filter, two Scheduler instances configured with different
+	// per-kind poll intervals (RSS's default 15 minutes vs. an IMAP
+	// mailbox's own interval) would each enqueue a job for every source
+	// regardless of kind, double-enqueueing "external_source_poll" jobs
+	// for the same source on every tick where their intervals overlap.
+	List(ctx context.Context, kind string) ([]ExternalSource, error)
 	// RecordFetchSuccess updates last_fetched_at, clears last_error, and
 	// resets consecutive_failures to 0. When cursor is non-nil it also
 	// advances the stored fetch cursor; a nil cursor leaves the existing

@@ -28,8 +28,8 @@ func (r *externalSourceRepository) Get(ctx context.Context, id string) (domain.E
 	return scanExternalSource(row)
 }
 
-func (r *externalSourceRepository) List(ctx context.Context) ([]domain.ExternalSource, error) {
-	rows, err := r.q.QueryContext(ctx, externalSourceSelectColumns+` ORDER BY created_at, id`)
+func (r *externalSourceRepository) List(ctx context.Context, kind string) ([]domain.ExternalSource, error) {
+	rows, err := r.q.QueryContext(ctx, externalSourceSelectColumns+` WHERE kind = ? ORDER BY created_at, id`, kind)
 	if err != nil {
 		return nil, fmt.Errorf("list external sources: %w", err)
 	}

@@ -84,8 +84,29 @@ docker run --rm -it -v "$(pwd)/data:/data" --entrypoint /miauthctl \
 ```
 
 `make build` produces `bin/server`, the sign-in/token operator tool
-`bin/miauthctl`, and the host-local durable-job inspection/retry tool
-`bin/jobsctl`.
+`bin/miauthctl`, the host-local durable-job inspection/retry tool
+`bin/jobsctl`, and `bin/mailfetch` (Issue #12's IMAP ingestion sidecar;
+see below).
+
+### IMAP ingestion (`docker-compose.yml`)
+
+Issue #12's IMAP mail ingestion runs its untrusted IMAP/MIME parsing in a
+separate process, `cmd/mailfetch`, never in the main server (see
+[docs/decisions/0003-imap-mailfetch-isolation.md](docs/decisions/0003-imap-mailfetch-isolation.md)).
+For a container deployment with `IMAP_ENABLED=true`, use this
+repository's `docker-compose.yml` instead of a bare `docker run`:
+
+```sh
+cp .env.example .env   # then set IMAP_* keys; see docs/operations/configuration.md
+docker compose --profile imap up -d --build
+```
+
+Leaving `IMAP_ENABLED=false` (the default) and running `docker compose up -d`
+without the `--profile imap` flag starts only `server`; `cmd/mailfetch`
+never needs to run at all. A bare-host deployment instead runs
+`bin/mailfetch` as a second process/systemd unit — see
+[docs/operations/configuration.md](docs/operations/configuration.md)'s
+"Deploying `cmd/mailfetch`" section.
 
 ## Approving Aria sign-ins
 

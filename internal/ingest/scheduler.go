@@ -10,19 +10,28 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
 
-// SchedulerConfig bounds Scheduler's polling interval.
+// SchedulerConfig bounds Scheduler's polling interval and scopes it to one
+// domain.ExternalSource.Kind.
 type SchedulerConfig struct {
+	// Kind is the domain.ExternalSource.Kind this Scheduler instance
+	// polls (for example "rss" or "imap"). A Scheduler only ever lists
+	// and enqueues jobs for sources of this kind: cmd/server runs one
+	// Scheduler instance per enabled kind, each with its own
+	// PollInterval, and this field is what keeps them from
+	// double-enqueueing each other's sources (see
+	// domain.ExternalSourceRepository.List's doc comment).
+	Kind string
 	// PollInterval is how often Scheduler re-lists configured sources
-	// and enqueues one poll job per source.
+	// of Kind and enqueues one poll job per source.
 	PollInterval time.Duration
 }
 
 // Scheduler periodically enqueues one JobType job per configured
-// domain.ExternalSource. internal/jobs.Manager itself has no periodic-
-// scheduling primitive (every other job producer enqueues in reaction to
-// a user action), so this package adds the small amount of ticking logic
-// Issue #11's "poll a feed every N minutes" requirement needs, without
-// changing internal/jobs.
+// domain.ExternalSource of its configured Kind. internal/jobs.Manager
+// itself has no periodic-scheduling primitive (every other job producer
+// enqueues in reaction to a user action), so this package adds the small
+// amount of ticking logic Issue #11's "poll a feed every N minutes"
+// requirement needs, without changing internal/jobs.
 type Scheduler struct {
 	sources  domain.ExternalSourceRepository
 	jobsRepo domain.JobRepository
@@ -67,7 +76,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
-	sources, err := s.sources.List(ctx)
+	sources, err := s.sources.List(ctx, s.cfg.Kind)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Warn("ingest scheduler: list sources failed", "error_category", "storage_error")

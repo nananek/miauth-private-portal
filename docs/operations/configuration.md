@@ -5,12 +5,16 @@ Issue #3, the SQLite persistence layer added by Issue #4, the local MiAuth
 authentication flow added by Issues #5 and #28, the Aria/Misskey-compatible
 note API added by Issue #7, the durable job worker added by Issue #8, the
 LLM reply/follow-up generation added by Issue #9, the LLM post
-classification added by Issue #10, and the RSS/Atom ingestion framework
-added by Issue #11. The normative design for MiAuth is
+classification added by Issue #10, the RSS/Atom ingestion framework
+added by Issue #11, and the read-only IMAP mail ingestion added by
+Issue #12. The normative design for MiAuth is
 [`docs/decisions/0002-ssh-cli-auth.md`](../decisions/0002-ssh-cli-auth.md)
-(ADR-0002) and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md);
-this document covers only the operational surface (config keys, routes,
-the operator tool), not the protocol design itself.
+(ADR-0002), for IMAP/mailfetch process isolation is
+[`docs/decisions/0003-imap-mailfetch-isolation.md`](../decisions/0003-imap-mailfetch-isolation.md)
+(ADR-0003), and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md)
+documents Aria's wire contract; this document covers only the
+operational surface (config keys, routes, the operator tool), not the
+protocol design itself.
 
 ## Loading order
 
@@ -99,6 +103,20 @@ catch that class of mistake during local development.
 | `RSS_MAX_REDIRECTS` | no | `3` | 0-20. Maximum redirect hops a feed fetch follows; 0 disallows any redirect. |
 | `RSS_SUMMARY_MAX_CHARS` | no | `4000` | 1-100000. Bounds each ingested item's normalized title/body length after HTML tags are stripped. |
 | `RSS_ALLOW_INSECURE_HTTP` | no | `false` | When `false` (the default), any `http://` entry in `RSS_FEED_URLS` fails config validation — mirroring `LOCAL_ORIGIN`'s production `https` enforcement. Set `true` only for a trusted internal/test feed. |
+| `IMAP_ENABLED` | no | `false` | Gates Issue #12's IMAP mail ingestion entirely. While `false`, no `domain.ExternalSource` row is ever seeded, no adapter/scheduler is constructed, and `cmd/mailfetch`'s socket is never dialed. |
+| `IMAP_HOST` | required if `IMAP_ENABLED=true` | `""` | The IMAP server's hostname. |
+| `IMAP_PORT` | no | `993` | 1-65535. `993` is the conventional implicit-TLS port; `143` is conventional for `IMAP_TLS_MODE=starttls`. |
+| `IMAP_TLS_MODE` | no (validated only if `IMAP_ENABLED=true`) | `implicit` | `implicit` (TLS from the first byte) or `starttls` (plaintext `CAPABILITY`/`STARTTLS` negotiation before `LOGIN`). There is deliberately no plaintext option: IMAP credentials must never cross the network unencrypted. |
+| `IMAP_USERNAME` | required if `IMAP_ENABLED=true` | `""` | IMAP login username. Never logged; `Config.Redacted()` shows only whether it is set (it can be a personal email address). |
+| `IMAP_PASSWORD` | required if `IMAP_ENABLED=true` | `""` | IMAP login password/app-password. Never logged; sent only in the per-request payload to `cmd/mailfetch` over `IMAP_MAILFETCH_SOCKET`, never as a command-line argument or `cmd/mailfetch`'s own environment variable (see ADR-0003). |
+| `IMAP_MAILBOX` | no | `INBOX` | The mailbox `cmd/mailfetch` `EXAMINE`s (never `SELECT`s: this service never marks, moves, or deletes mail). |
+| `IMAP_POLL_INTERVAL` | no | `5m` | How often the mailbox is re-fetched. Positive duration, must exceed `IMAP_FETCH_TIMEOUT`. |
+| `IMAP_FETCH_TIMEOUT` | no | `30s` | Bounds a single fetch's IMAP round trip (connect through `LOGOUT`). Positive duration, must be less than `IMAP_POLL_INTERVAL`. |
+| `IMAP_MAX_MESSAGE_BYTES` | no | `1048576` (1 MiB) | Integer of at least 1. Bounds how many octets of a single message's text body `cmd/mailfetch` reads (the `BODY.PEEK<0,N>` upper bound); a larger body is truncated at this limit, not rejected. |
+| `IMAP_SNIPPET_MAX_CHARS` | no | `2000` | 1-100000. Bounds the plain-text snippet stored per message after HTML sanitization, unless `IMAP_STORE_FULL_BODY=true` raises the bound to `IMAP_FULL_BODY_MAX_CHARS`. |
+| `IMAP_STORE_FULL_BODY` | no | `false` | When `false` (the default), only a bounded snippet (`IMAP_SNIPPET_MAX_CHARS`) is stored per message, not the full body. |
+| `IMAP_FULL_BODY_MAX_CHARS` | no | `20000` | 1-1000000. Upper bound on a stored body's length when `IMAP_STORE_FULL_BODY=true`; ignored otherwise. |
+| `IMAP_MAILFETCH_SOCKET` | no | `/run/mailfetch/mailfetch.sock` | Unix domain socket path `internal/ingest/imap` dials and `cmd/mailfetch` listens on (`MAILFETCH_SOCKET_PATH`, `cmd/mailfetch`'s own, separate environment variable — see below). Both default to the same path so a deployment that overrides neither still lines up. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -640,16 +658,144 @@ document, source configuration is env/config-file only.
 ### Untrusted external content
 
 Ingested item bodies are HTML-stripped to plain text before ever reaching
-`Entry.Body` (`internal/ingest/rss`'s `stripHTML`: tags and `<script>`/
-`<style>` element content are discarded, entities are decoded via the
-standard library's `html` package, matching AGENTS.md's "treat feeds...as
-untrusted data" and "never execute...embedded instructions"). An ingested
-entry is never fed into an LLM prompt by this framework: `EntryNews`/
-`EntryMail` entries are a distinct generation source from `notes/create`'s
-`user_post` entries, and neither `llm_generation` nor `llm_classification`
-jobs are ever enqueued for them — the same "explicit configuration
-required" rule AGENTS.md requires before external content reaches a
-prompt.
+`Entry.Body` (`internal/textsanitize.StripHTML`, shared with Issue #12's
+IMAP adapter below: tags and `<script>`/`<style>` element content are
+discarded, entities are decoded via the standard library's `html`
+package, matching AGENTS.md's "treat feeds...as untrusted data" and
+"never execute...embedded instructions"). An ingested entry is never fed
+into an LLM prompt by this framework: `EntryNews`/`EntryMail` entries are
+a distinct generation source from `notes/create`'s `user_post` entries,
+and neither `llm_generation` nor `llm_classification` jobs are ever
+enqueued for them — the same "explicit configuration required" rule
+AGENTS.md requires before external content reaches a prompt.
+
+## IMAP mail ingestion
+
+Issue #12 adds `internal/ingest/imap`, the second `internal/ingest.Adapter`
+(kind `"imap"`), turning read-only IMAP mailbox polling into `EntryMail`
+timeline root entries through the same framework RSS uses (see "RSS/Atom
+ingestion" above): the same job type, the same
+`internal/timeline.Service.CreateExternalEntry` dedupe/promotion, and the
+same "a source outage only affects its own durable jobs, never
+`notes/create`" isolation.
+
+### Process isolation
+
+Unlike RSS (plain XML over `encoding/xml`), parsing IMAP's `ENVELOPE`/
+`BODYSTRUCTURE` responses and MIME bodies from an untrusted mail server is
+a larger, more attacker-influenced surface. Per
+[`docs/decisions/0003-imap-mailfetch-isolation.md`](../decisions/0003-imap-mailfetch-isolation.md)
+(ADR-0003), that entire surface is isolated in a separate process,
+`cmd/mailfetch`, never in `cmd/server`:
+
+- `internal/ingest/imap.Adapter` (running inside `cmd/server`) is a thin
+  RPC client: it builds a request from `IMAPConfig` plus the polled
+  source's ID and cursor, sends it to `cmd/mailfetch` over
+  `IMAP_MAILFETCH_SOCKET` (a Unix domain socket, one newline-delimited
+  JSON request/response pair per fetch — see `internal/mailfetch/rpc`),
+  and turns the response into `ingest.FetchedItem`s. It imports neither an
+  IMAP nor a MIME library.
+- `cmd/mailfetch` (built from `internal/mailfetch`) owns the actual IMAP
+  connection and MIME parsing, using `github.com/emersion/go-imap` and
+  `github.com/emersion/go-message`. It is a single, stateless process:
+  IMAP credentials travel only in each request's payload over the socket,
+  never as `cmd/mailfetch`'s own command-line argument or environment
+  variable, so a process listing or `/proc` inspection on the mailfetch
+  side never reveals them. Its only configuration is
+  `MAILFETCH_SOCKET_PATH` (default `/run/mailfetch/mailfetch.sock`,
+  matching `IMAP_MAILFETCH_SOCKET`'s own default) and, for logging,
+  `MAILFETCH_LOG_LEVEL`/`MAILFETCH_LOG_FORMAT`.
+- `cmd/mailfetch` unreachable (not started, socket missing, connection
+  refused) classifies as a retryable transport failure on the
+  `cmd/server` side, handled by the same job retry/backoff as a
+  transient IMAP server outage; it never affects `notes/create`, RSS
+  ingestion, or the durable job worker.
+
+### Read-only guarantees
+
+`cmd/mailfetch` `EXAMINE`s `IMAP_MAILBOX` (never `SELECT`s it), fetches
+message bodies with `BODY.PEEK[...]<0,N>` (never `BODY[...]`, which would
+implicitly mark a message `\Seen`), and never issues `STORE`, `UID
+STORE`, `COPY`, `MOVE`, `EXPUNGE`, or `APPEND` — AGENTS.md's "IMAP is
+read-only by default and must not mark, move, or delete mail" is
+mechanical here, not just a convention: those command paths simply do not
+exist in `internal/mailfetch`'s code. `IMAP_TLS_MODE` never accepts a
+plaintext option either, for the same "credentials never cross the
+network unencrypted" reason.
+
+### Cursor and dedupe
+
+The stored cursor (`domain.ExternalSource.Cursor`, opaque outside this
+adapter) carries `{uidValidity, lastUid}`. A UID greater than `lastUid`
+is fetched; if the mailbox's current `UIDVALIDITY` no longer matches the
+cursor's (the mailbox was recreated or renumbered), fetching restarts
+from UID 1. This does not create duplicate timeline entries: each
+message's `ExternalID`/dedupe key is derived from its `Message-ID` header
+(RFC 5322), which is unaffected by a `UIDVALIDITY` reset, so
+`CreateExternalEntry`'s existing dedupe recognizes a re-fetched message as
+the same item. A message with no `Message-ID` (rare, but permitted) falls
+back to a hash of `UIDVALIDITY`+UID, which is only stable until the next
+`UIDVALIDITY` change — a narrow, documented limitation for that case. A
+single fetch call processes at most 200 messages, oldest first (a fixed
+internal bound, not configurable): a mailbox with a large pre-existing
+backlog drains gradually across successive polls rather than in one
+unbounded batch.
+
+### Body content and privacy
+
+Each stored `Entry.Body` begins with a plain-text `From`/`Subject`/`Date`
+header block, followed by a sanitized snippet of the message's text
+body (`text/plain` preferred; `text/html` sanitized the same way RSS
+bodies are, via `internal/textsanitize.StripHTML`, when no `text/plain`
+part exists). This header-in-body placement is deliberate:
+`internal/ingest.FetchedItem.Title` is written by the RSS adapter but
+never actually read by `internal/ingest.Service.Handle` (only `Body`
+reaches `CreateExternalEntry`), so folding sender/subject/date into
+`Body` itself is the only way they are actually preserved.
+
+- `IMAP_STORE_FULL_BODY=false` (the default) stores only a bounded
+  snippet (`IMAP_SNIPPET_MAX_CHARS`); `true` raises the bound to
+  `IMAP_FULL_BODY_MAX_CHARS`, still a bounded length, never truly
+  unlimited.
+- Attachments and non-text MIME parts are never fetched at all: BODYSTRUCTURE
+  identifies the message's text part before any body octet is
+  requested, and only that part is ever fetched.
+- Message text (subject, body, any instruction-like text a sender wrote)
+  is stored and displayed as inert data, matching AGENTS.md's "treat
+  ...mail...as untrusted data" — it is never executed, and (like RSS's
+  `EntryNews` entries) never automatically reaches an LLM prompt.
+- There is currently no automatic retention/expiry for ingested mail
+  entries (the same "no automatic deletion mechanism exists yet" state
+  RSS's `EntryNews` entries are already in): retention is indefinite by
+  default. An operator who needs to remove specific entries today does so
+  directly against `DB_PATH`'s SQLite database; a dedicated retention
+  policy would be its own future issue.
+- `IMAP_PASSWORD` (and, effectively, `IMAP_USERNAME`, which can be a
+  personal email address) are configuration-only secrets: `Config.Redacted()`
+  shows only whether each is set, matching `LLM_API_KEY`'s treatment.
+  Rotate them the same way as any other config-file/environment secret;
+  Issue #13's release-gate secret-rotation runbook is expected to note
+  this alongside the LLM/other credentials it already covers.
+
+### Deploying `cmd/mailfetch`
+
+- **Container**: `docker-compose.yml` (this repository's first) defines a
+  `mailfetch` service, gated behind the `imap` Compose profile:
+
+  ```sh
+  docker compose --profile imap up -d --build
+  ```
+
+  A plain `docker compose up -d` (no profile) starts only `server`,
+  matching `IMAP_ENABLED=false`'s default of never needing `cmd/mailfetch`
+  running at all. `mailfetch` publishes no port, runs with a read-only
+  root filesystem, and drops every Linux capability — it is reachable only
+  through the `mailfetch-socket` volume it shares with `server`.
+- **Bare host**: `make build` also produces `bin/mailfetch`. Run it as a
+  second, independent process/systemd unit alongside `bin/server`,
+  ideally under its own low-privilege OS user, with
+  `MAILFETCH_SOCKET_PATH` pointing at a directory both it and `bin/server`
+  (via `IMAP_MAILFETCH_SOCKET`) can reach.
 
 ## Health and readiness
 

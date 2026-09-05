@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/ingest"
+	"github.com/nananek/miauth-private-portal/internal/textsanitize"
 )
 
 // rssRootXML and atomRootXML deliberately omit an XMLName field: Go's
@@ -138,8 +139,8 @@ func normalizeRSSItems(items []rssItemXML, sourceID string, cfg Config) []ingest
 			DedupeKey:     key,
 			ProvenanceURL: provenanceURL,
 			PublishedAt:   parseFlexibleDate(item.PubDate, rssDateLayouts),
-			Title:         stripHTML(item.Title, cfg.SummaryMaxChars),
-			Body:          stripHTML(item.Description, cfg.SummaryMaxChars),
+			Title:         textsanitize.StripHTML(item.Title, cfg.SummaryMaxChars),
+			Body:          textsanitize.StripHTML(item.Description, cfg.SummaryMaxChars),
 		})
 	}
 	return out
@@ -178,8 +179,8 @@ func normalizeAtomEntries(entries []atomEntryXML, sourceID string, cfg Config) [
 			DedupeKey:     key,
 			ProvenanceURL: provenanceURL,
 			PublishedAt:   publishedAt,
-			Title:         stripHTML(entry.Title, cfg.SummaryMaxChars),
-			Body:          stripHTML(body, cfg.SummaryMaxChars),
+			Title:         textsanitize.StripHTML(entry.Title, cfg.SummaryMaxChars),
+			Body:          textsanitize.StripHTML(body, cfg.SummaryMaxChars),
 		})
 	}
 	return out
