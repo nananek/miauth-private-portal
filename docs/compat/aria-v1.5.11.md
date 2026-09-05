@@ -877,6 +877,12 @@ rather than resolved unilaterally:
   for username changes, such as remaining `OWNER_USERNAME`-config-only via
   SSH/CLI). No `actors` schema change, repository method, or HTTP handler for
   `/api/i/update` has been written yet.
+- **Resolution (2026-09-06, owner confirmed)**: Issue #23's Scope and
+  Acceptance criteria were narrowed to display_name-only, and `username`
+  recorded as a permanent Non-goal (`OWNER_USERNAME` config remains its
+  source of truth). PR1 is implemented on that basis: migration
+  `0012_actor_profile.sql` adds `actors.display_name` only (no `username`
+  column), and `POST /api/i/update` accepts only the `name` field.
 
 ## Non-goals and implementation boundary
 

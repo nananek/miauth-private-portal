@@ -290,3 +290,72 @@ func TestUpdateOwnerDisplayName_RejectsNonOwnerActor(t *testing.T) {
 		t.Fatalf("assistant actor DisplayName = %v, want unchanged nil", after.DisplayName)
 	}
 }
+
+// TestBackfillOwnerDisplayName_SeedsNilDisplayName covers the pre-Issue-#23
+// PR1 owner row case: an Owner actor created before migration 0012 added
+// display_name (or by a caller whose Config left OwnerDisplayName unset)
+// has display_name = NULL, and DescribeOwner must not keep reporting ""
+// forever once cfg.OwnerDisplayName ("Test Owner", from newTestService)
+// is available to backfill it from.
+func TestBackfillOwnerDisplayName_SeedsNilDisplayName(t *testing.T) {
+	ts := newTestService(t)
+	owner := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: ts.clock.Now()}
+	if err := ts.db.Actors.Create(t.Context(), owner); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName: %v", err)
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.DisplayName != "Test Owner" {
+		t.Errorf("DescribeOwner.DisplayName after backfill = %q, want %q", profile.DisplayName, "Test Owner")
+	}
+}
+
+// TestBackfillOwnerDisplayName_LeavesExplicitValueAlone ensures the
+// backfill never overwrites a display name that was already explicitly
+// set, including an explicit "" from UpdateOwnerDisplayName clearing it
+// — that must stay distinct from "never set" (see SetDisplayName's doc
+// comment) and must never revert to the config value.
+func TestBackfillOwnerDisplayName_LeavesExplicitValueAlone(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ts.Check(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.UpdateOwnerDisplayName(t.Context(), result.OwnerActorID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName: %v", err)
+	}
+
+	profile, err := ts.DescribeOwner(t.Context(), result.OwnerActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.DisplayName != "" {
+		t.Errorf("DescribeOwner.DisplayName after backfill = %q, want unchanged empty string", profile.DisplayName)
+	}
+}
+
+// TestBackfillOwnerDisplayName_NoOwnerYet must be a no-op, not an error,
+// when no MiAuth session has ever been approved yet.
+func TestBackfillOwnerDisplayName_NoOwnerYet(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName with no owner yet: %v", err)
+	}
+}

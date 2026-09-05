@@ -308,6 +308,32 @@ func (s *Service) UpdateOwnerDisplayName(ctx context.Context, actorID, displayNa
 	}, nil
 }
 
+// BackfillOwnerDisplayName seeds the Owner actor's display_name from
+// cfg.OwnerDisplayName when the Owner already exists but has never had
+// display_name explicitly set (sql NULL, not ""). Two real paths reach
+// that state: an Owner row bound before Issue #23 PR1's migration 0012
+// added the column, and an Owner row bound by a caller whose Config left
+// OwnerDisplayName unset (cmd/miauthctl performs the actual owner-binding
+// ApproveSession call in production, so its Config must be wired for
+// this to have any effect there). It is a no-op, not an error, if the
+// Owner does not exist yet: ensureOwnerActor seeds it correctly at bind
+// time in that case, and if display_name is already non-nil (including
+// "" from an explicit clear via UpdateOwnerDisplayName), it is left
+// untouched rather than being overwritten back to the config value.
+func (s *Service) BackfillOwnerDisplayName(ctx context.Context) error {
+	owner, err := s.repos.Actors.GetByType(ctx, domain.ActorOwner)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if owner.DisplayName != nil {
+		return nil
+	}
+	return s.repos.Actors.SetDisplayName(ctx, owner.ID, s.cfg.OwnerDisplayName)
+}
+
 // displayNameOrEmpty adapts a domain.Actor.DisplayName (nil until
 // explicitly set) to OwnerProfile/CheckResult's plain-string convention,
 // where "" already means "no display name" to their wire projections
