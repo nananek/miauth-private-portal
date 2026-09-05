@@ -1,13 +1,84 @@
 package sqlite
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/nananek/miauth-private-portal/internal/domain"
 )
+
+// TestBackup_DestPathWithSingleQuoteIsBoundSafely pins the claim in this
+// package's commit history that VACUUM INTO's destination is passed as a
+// bound parameter (not concatenated into SQL text), so a path containing
+// a single quote — which would break naive string concatenation into
+// `VACUUM INTO '<path>'` — backs up and reads back cleanly.
+func TestBackup_DestPathWithSingleQuoteIsBoundSafely(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateActor(t, db)
+
+	dest := filepath.Join(t.TempDir(), "it's a backup.db")
+	if err := db.Backup(t.Context(), dest); err != nil {
+		t.Fatalf("Backup() to a single-quote path: %v", err)
+	}
+
+	backup, err := OpenReadOnly(t.Context(), dest)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() on a single-quote path: %v", err)
+	}
+	defer backup.Close()
+	if err := backup.VerifyMigrations(t.Context()); err != nil {
+		t.Errorf("VerifyMigrations() on single-quote-path backup = %v, want nil", err)
+	}
+}
+
+// TestBackup_SucceedsAlongsideConcurrentWrites exercises the doc
+// comment's claim that VACUUM INTO is safe to run against a live
+// database without stopping the server: it keeps a writer busy
+// inserting rows on the same *DB for the whole duration of Backup and
+// requires both the backup and every write to succeed.
+func TestBackup_SucceedsAlongsideConcurrentWrites(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateActor(t, db)
+
+	stop := make(chan struct{})
+	writeErrs := make(chan error, 1)
+	go func() {
+		defer close(writeErrs)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			now := time.Now()
+			j := domain.Job{
+				ID: domain.NewID(), JobType: "test", Payload: "{}", PayloadVersion: 1,
+				State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now,
+			}
+			if err := db.Jobs.Enqueue(context.Background(), j); err != nil {
+				writeErrs <- err
+				return
+			}
+		}
+	}()
+
+	dest := filepath.Join(t.TempDir(), "backup-concurrent.db")
+	backupErr := db.Backup(t.Context(), dest)
+	close(stop)
+	writeErr := <-writeErrs
+
+	if backupErr != nil {
+		t.Errorf("Backup() during concurrent writes = %v, want nil", backupErr)
+	}
+	if writeErr != nil {
+		t.Errorf("concurrent write during Backup() = %v, want nil", writeErr)
+	}
+}
 
 func TestBackup_SnapshotVerifiesAndMatchesSourceRowCounts(t *testing.T) {
 	db := newTestDB(t)
