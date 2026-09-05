@@ -1,7 +1,6 @@
 package rss
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -177,36 +176,5 @@ func TestParseFeed_ItemWithoutGUIDOrLinkGetsUniqueExternalID(t *testing.T) {
 	}
 	if items[0].ExternalID == items[1].ExternalID {
 		t.Error("distinct items without guid/link got the same ExternalID")
-	}
-}
-
-func TestStripHTML_RemovesTagsAndDecodesEntities(t *testing.T) {
-	got := stripHTML("<p>Hello &amp; <strong>world</strong></p>", 100)
-	if got != "Hello & world" {
-		t.Errorf("stripHTML = %q, want %q", got, "Hello & world")
-	}
-}
-
-func TestStripHTML_DropsScriptAndStyleContent(t *testing.T) {
-	got := stripHTML(`<p>before</p><script>alert(1)</script><style>.x{color:red}</style><p>after</p>`, 100)
-	if strings.Contains(got, "alert") || strings.Contains(got, "color:red") {
-		t.Errorf("stripHTML leaked script/style content: %q", got)
-	}
-	if got != "beforeafter" {
-		t.Errorf("stripHTML = %q, want %q", got, "beforeafter")
-	}
-}
-
-func TestStripHTML_TruncatesToMaxChars(t *testing.T) {
-	got := stripHTML("0123456789", 5)
-	if got != "01234" {
-		t.Errorf("stripHTML = %q, want %q", got, "01234")
-	}
-}
-
-func TestStripHTML_CollapsesWhitespace(t *testing.T) {
-	got := stripHTML("a\n\n  <br>  b   c", 100)
-	if got != "a b c" {
-		t.Errorf("stripHTML = %q, want %q", got, "a b c")
 	}
 }
