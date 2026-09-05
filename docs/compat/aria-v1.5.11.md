@@ -547,6 +547,43 @@ unchanged in substance. This is a wire-availability fix for the symptom
 above, not a promotion of streaming to a supported capability; do not treat
 a successful handshake as evidence that live timeline updates work.
 
+#### Traced `/streaming` message shapes
+
+Source-traced against the pinned `misskey_dart` streaming request enum
+([`streaming_request_type.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/enums/streaming_request_type.dart)),
+its [`StreamingService` implementation](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/services/streaming_service_impl.dart),
+and Aria's
+[`timeline_stream_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/streaming/timeline_stream_provider.dart) —
+not guessed from the sakurasato precedent alone (`plan-issue-41` §0 required
+this before implementation).
+
+Every client-to-server frame uses the envelope `{"type": ..., "body": ...}`.
+
+| `type` | `body` fields observed | Server reply |
+| --- | --- | --- |
+| `connect` | `channel`, `id`, `params` (Aria's home-timeline provider sends these three; `params` carries filters such as `withRenotes`/`withReplies`/`withFiles` that this stub reads nothing from, since no real event delivery exists yet to filter) | `{"type":"connected","body":{"id":...}}` |
+| `disconnect` | `id` | none |
+| `subNote` | `id`, `params` | none |
+| `unsubNote` | `id`, `params` | none |
+
+`misskey_dart`'s enum additionally declares abbreviated wire values `sn` and
+`un` as aliases for `subNote`/`unsubNote`; the pinned Aria commit's timeline
+provider does not call them (it only sends `connect`/`disconnect` for the
+home timeline), but the server implementation accepts all four spellings
+defensively.
+
+Aria never actually waits for or requires the `connected` ack:
+`StreamingService`'s incoming-message handler broadcasts every frame to its
+listeners without matching it against a pending request. Its response model
+(`StreamingResponse`, `@Freezed(unionKey: "type", fallbackUnion:
+"fallback")`) falls back to an opaque `StreamingChannelUnknownResponse` for
+any `type` it does not statically declare (`connected` is not one of its
+declared cases) rather than throwing — confirmed against the pinned
+`misskey_dart` commit, not assumed. So a malformed or absent `connected` ack
+would not have reproduced the class of error this issue fixes; it is sent
+because the sakurasato precedent and real Misskey servers do, not because
+Aria's pinned version depends on it.
+
 ## Requirement traceability
 
 The table maps Issue #1 requirements to roadmap children. Issue #2 freezes the
