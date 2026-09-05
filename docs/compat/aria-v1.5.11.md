@@ -547,6 +547,17 @@ unchanged in substance. This is a wire-availability fix for the symptom
 above, not a promotion of streaming to a supported capability; do not treat
 a successful handshake as evidence that live timeline updates work.
 
+As with Issues #7 and #13, **no real Aria/Misskey end-to-end verification
+has been performed for this issue**: `streaming_handlers_test.go` proves
+the handshake, auth gate, keepalive, and message handling against a real
+WebSocket connection, but the client on the other end is
+`gorilla/websocket`'s dialer, not a pinned `misskey_dart`/Aria build — it
+does not exercise `StreamingService`'s actual reconnect/error-surfacing
+path this issue exists to stop. The message shapes below were confirmed by
+reading the pinned client source, not by running it, so whether opening a
+real Aria timeline tab against this endpoint is actually silent (this
+issue's acceptance criterion) remains 要実機確認 until that run happens.
+
 #### Traced `/streaming` message shapes
 
 Source-traced against the pinned `misskey_dart` streaming request enum
