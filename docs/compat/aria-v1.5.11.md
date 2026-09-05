@@ -80,7 +80,7 @@ redacted.
 | `POST /api/notes/conversation` | **必要** | Loads the ancestor chain for a thread | `i` token required; local `read:notes` equivalent |
 | `POST /api/notes/children` | **必要** | Loads direct replies / quote-renotes for a thread | `i` token required; local `read:notes` equivalent |
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
-| WebSocket `/streaming` timeline channel | **不要** for MVP | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
+| WebSocket `/streaming` timeline channel | **不要** for MVP; **minimal stub since Issue #41** | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -525,6 +525,75 @@ without a stream.
 MVP therefore uses poll/reload semantics as the release gate. A future
 streaming adapter may be added behind a capability check, but a stream outage
 must not make the HTTP timeline, post, or thread endpoints unavailable.
+
+### Issue #41: minimal stub, not a capability
+
+Before Issue #41, `GET /streaming` was unregistered, so Aria's WebSocket
+upgrade request received net/http's default 404, which fails the handshake
+outright. Because this endpoint requires no `read:account`-scoped token
+check to *reach* that failure, Aria attempted this on every timeline tab
+open; `misskey_dart`'s `StreamingService._connect` retries once after five
+seconds and then surfaces the resulting exception as a Riverpod `AsyncError`
+to whatever UI is watching the stream — a real, observed error report, not
+merely a theoretical gap in this contract's Non-goals.
+
+Issue #41 adds a `read:account`-authenticated `GET /streaming` that
+completes the WebSocket handshake, sends a `{"type":"connected", ...}` ack
+for `connect`, tracks (but never reads back) `disconnect`/`subNote`/
+`unsubNote` state, and pings every `StreamPingInterval` (default 30s) to
+stay alive through an idle-timeout intermediary. It still pushes no real
+note/notification event — the "not an MVP requirement" decision above is
+unchanged in substance. This is a wire-availability fix for the symptom
+above, not a promotion of streaming to a supported capability; do not treat
+a successful handshake as evidence that live timeline updates work.
+
+As with Issues #7 and #13, **no real Aria/Misskey end-to-end verification
+has been performed for this issue**: `streaming_handlers_test.go` proves
+the handshake, auth gate, keepalive, and message handling against a real
+WebSocket connection, but the client on the other end is
+`gorilla/websocket`'s dialer, not a pinned `misskey_dart`/Aria build — it
+does not exercise `StreamingService`'s actual reconnect/error-surfacing
+path this issue exists to stop. The message shapes below were confirmed by
+reading the pinned client source, not by running it, so whether opening a
+real Aria timeline tab against this endpoint is actually silent (this
+issue's acceptance criterion) remains 要実機確認 until that run happens.
+
+#### Traced `/streaming` message shapes
+
+Source-traced against the pinned `misskey_dart` streaming request enum
+([`streaming_request_type.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/enums/streaming_request_type.dart)),
+its [`StreamingService` implementation](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/services/streaming_service_impl.dart),
+and Aria's
+[`timeline_stream_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/streaming/timeline_stream_provider.dart) —
+not guessed from the sakurasato precedent alone (`plan-issue-41` §0 required
+this before implementation).
+
+Every client-to-server frame uses the envelope `{"type": ..., "body": ...}`.
+
+| `type` | `body` fields observed | Server reply |
+| --- | --- | --- |
+| `connect` | `channel`, `id`, `params` (Aria's home-timeline provider sends these three; `params` carries filters such as `withRenotes`/`withReplies`/`withFiles` that this stub reads nothing from, since no real event delivery exists yet to filter) | `{"type":"connected","body":{"id":...}}` |
+| `disconnect` | `id` | none |
+| `subNote` | `id`, `params` | none |
+| `unsubNote` | `id`, `params` | none |
+
+`misskey_dart`'s enum additionally declares abbreviated wire values `sn` and
+`un` as aliases for `subNote`/`unsubNote`; the pinned Aria commit's timeline
+provider does not call them (it only sends `connect`/`disconnect` for the
+home timeline), but the server implementation accepts all four spellings
+defensively.
+
+Aria never actually waits for or requires the `connected` ack:
+`StreamingService`'s incoming-message handler broadcasts every frame to its
+listeners without matching it against a pending request. Its response model
+(`StreamingResponse`, `@Freezed(unionKey: "type", fallbackUnion:
+"fallback")`) falls back to an opaque `StreamingChannelUnknownResponse` for
+any `type` it does not statically declare (`connected` is not one of its
+declared cases) rather than throwing — confirmed against the pinned
+`misskey_dart` commit, not assumed. So a malformed or absent `connected` ack
+would not have reproduced the class of error this issue fixes; it is sent
+because the sakurasato precedent and real Misskey servers do, not because
+Aria's pinned version depends on it.
 
 ## Requirement traceability
 

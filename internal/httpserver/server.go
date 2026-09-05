@@ -22,6 +22,7 @@ package httpserver
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
@@ -40,6 +41,11 @@ type Server struct {
 	localOrigin              string
 	llmEnabled               bool
 	llmClassificationEnabled bool
+
+	// streamSem bounds concurrent GET /streaming connections; see
+	// maxConcurrentStreamConnections (streaming_handlers.go).
+	streamSem          chan struct{}
+	streamPingInterval time.Duration
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -60,6 +66,10 @@ type Server struct {
 // RequireScope (which needs the MiAuth service), and there is no
 // meaningful note API without a timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
+	pingInterval := opts.StreamPingInterval
+	if pingInterval <= 0 {
+		pingInterval = defaultStreamPingInterval
+	}
 	s := &Server{
 		mux:                      http.NewServeMux(),
 		logger:                   logger,
@@ -68,6 +78,8 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		localOrigin:              opts.LocalOrigin,
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
+		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
+		streamPingInterval:       pingInterval,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +92,12 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
+		// GET /streaming only needs read:account authentication (Issue
+		// #41), not a timeline: it never pushes a real note/notification
+		// event yet, so it belongs in this MiAuthService-only group rather
+		// than mixed into the note-API group below, which exists because
+		// every route there needs both scoped auth and a timeline to read.
+		s.Handle("GET /streaming", http.HandlerFunc(s.handleStreaming))
 	}
 
 	if opts.MiAuthService != nil && opts.TimelineService != nil {
