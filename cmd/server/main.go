@@ -173,6 +173,7 @@ func run() error {
 		}
 
 		rssScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
+			Kind:         rss.Kind,
 			PollInterval: cfg.RSS.PollInterval,
 		}, logger)
 	}

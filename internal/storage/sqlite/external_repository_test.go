@@ -30,12 +30,35 @@ func TestExternalSourceRepository_CreateGetList(t *testing.T) {
 		t.Errorf("Kind = %q, want rss", got.Kind)
 	}
 
-	all, err := db.ExternalSources.List(t.Context())
+	all, err := db.ExternalSources.List(t.Context(), "rss")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Errorf("len(all) = %d, want 2", len(all))
+	if len(all) != 1 {
+		t.Errorf("len(all) = %d, want 1", len(all))
+	}
+}
+
+func TestExternalSourceRepository_List_FiltersByKind(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateExternalSource(t, db, "rss", "https://example.com/a.xml")
+	mustCreateExternalSource(t, db, "rss", "https://example.com/b.xml")
+	mustCreateExternalSource(t, db, "imap", "imap://example.com/inbox")
+
+	rssSources, err := db.ExternalSources.List(t.Context(), "rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rssSources) != 2 {
+		t.Errorf("len(rssSources) = %d, want 2", len(rssSources))
+	}
+
+	imapSources, err := db.ExternalSources.List(t.Context(), "imap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imapSources) != 1 {
+		t.Errorf("len(imapSources) = %d, want 1", len(imapSources))
 	}
 }
 
@@ -206,7 +229,7 @@ func TestExternalSourceRepository_EnsureFromConfig_CreatesMissingAndSkipsExistin
 		t.Fatalf("ensure from config: %v", err)
 	}
 
-	all, err := db.ExternalSources.List(t.Context())
+	all, err := db.ExternalSources.List(t.Context(), "rss")
 	if err != nil {
 		t.Fatal(err)
 	}

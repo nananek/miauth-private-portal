@@ -13,7 +13,7 @@ func TestScheduler_TickEnqueuesOneJobPerSource(t *testing.T) {
 	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
 	mustCreateSource(t, db, "rss", "https://example.com/b.xml")
 
-	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{PollInterval: time.Hour}, nil)
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "rss", PollInterval: time.Hour}, nil)
 	scheduler.tick(t.Context())
 
 	jobs, err := db.Jobs.List(t.Context(), domain.JobFilter{})
@@ -42,7 +42,7 @@ func TestScheduler_TickWithinSameWindowDoesNotDoubleEnqueue(t *testing.T) {
 	db := newTestDB(t)
 	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
 
-	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{PollInterval: time.Hour}, nil)
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "rss", PollInterval: time.Hour}, nil)
 	scheduler.tick(t.Context())
 	scheduler.tick(t.Context())
 
@@ -55,6 +55,32 @@ func TestScheduler_TickWithinSameWindowDoesNotDoubleEnqueue(t *testing.T) {
 	}
 }
 
+// TestScheduler_TickOnlyEnqueuesConfiguredKind documents the fix for the
+// double-enqueue bug this ticket's plan called out: two Scheduler
+// instances, each scoped to its own Kind with its own PollInterval, must
+// each enqueue jobs only for sources of their own kind, never for the
+// other's.
+func TestScheduler_TickOnlyEnqueuesConfiguredKind(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
+	mustCreateSource(t, db, "rss", "https://example.com/b.xml")
+	mustCreateSource(t, db, "imap", "imap://example.com/inbox")
+
+	rssScheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "rss", PollInterval: time.Hour}, nil)
+	imapScheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "imap", PollInterval: time.Minute}, nil)
+
+	rssScheduler.tick(t.Context())
+	imapScheduler.tick(t.Context())
+
+	jobs, err := db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("len(jobs) = %d, want 3 (2 rss + 1 imap, no double-enqueue)", len(jobs))
+	}
+}
+
 // TestScheduler_RunStopsOnCancel is a shutdown-path regression test: Run
 // must return promptly (rather than hang on its ticker) once ctx is
 // cancelled.
@@ -62,7 +88,7 @@ func TestScheduler_RunStopsOnCancel(t *testing.T) {
 	db := newTestDB(t)
 	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
 
-	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{PollInterval: time.Hour}, nil)
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "rss", PollInterval: time.Hour}, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := scheduler.Run(ctx); err != nil {
