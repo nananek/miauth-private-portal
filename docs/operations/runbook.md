@@ -1,7 +1,8 @@
 # Operations runbook
 
 Issue #13's release-gate acceptance criteria call for a documented,
-single-owner operator runbook: secret rotation, token revocation, DB/file
+single-owner operator runbook: starting and stopping the service,
+incident response, secret rotation, token revocation, DB/file
 permissions, reverse proxy/TLS, request rate/concurrency limits, and log
 retention. This document is the primary source for those procedures; it
 links to [configuration.md](configuration.md) and the
@@ -78,11 +79,12 @@ that something else broke.
   `IMAP_MAILFETCH_SOCKET` (server side) and `MAILFETCH_SOCKET_PATH`
   (`cmd/mailfetch` side) resolve to the same socket path/volume.
 - **Suspected database corruption, or before relying on any backup**: see
-  `cmd/backupctl`'s `verify` subcommand (Issue #13 AC6, added
-  alongside this runbook) for a read-only schema/row-count check, and its
-  `backup` subcommand for taking an online snapshot without stopping the
-  server. If the live database itself is damaged, stop the server and
-  restore from the most recent verified backup.
+  `cmd/backupctl`'s `verify` subcommand (Issue #13 AC6, a separate PR in
+  this same release-gate effort — see "Backup and restore" below if it
+  has not landed on your checkout yet) for a read-only schema/row-count
+  check, and its `backup` subcommand for taking an online snapshot
+  without stopping the server. If the live database itself is damaged,
+  stop the server and restore from the most recent verified backup.
 
 ## Secret rotation
 
@@ -298,9 +300,10 @@ about secrets appearing in logs in the first place.
 
 ## Backup and restore
 
-Issue #13 AC6 (implemented alongside this runbook) adds `cmd/backupctl`,
-an online-safe SQLite backup/verify tool, and a documented restore
-procedure. See `docs/operations/backup-restore.md` for the full
-`backupctl backup`/`backupctl verify` usage and the manual restore steps
-— this runbook's "Incident response" section above only points to it for
+Issue #13 AC6, tracked as its own PR in this same release-gate effort,
+adds `cmd/backupctl`, an online-safe SQLite backup/verify tool, and a
+documented restore procedure. Once that PR has landed, see
+`docs/operations/backup-restore.md` for the full `backupctl backup`/
+`backupctl verify` usage and the manual restore steps — this runbook's
+"Incident response" section above only points to it for
 the corruption/restore scenario, rather than duplicating the procedure.
