@@ -45,7 +45,7 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		"notes/create": true, "notes/timeline": true, "notes/show": true,
 		"notes/conversation": true, "notes/children": true, "notes/delete": true,
 		"notes/reactions/create": true, "notes/reactions/delete": true, "notes/reactions": true,
-		"stats": true,
+		"notes/mentions": true, "stats": true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("endpoints = %v, want exactly %v", got, want)

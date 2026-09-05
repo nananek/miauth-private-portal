@@ -89,10 +89,15 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 		t.Fatalf("ensure reserved actors: %v", err)
 	}
 
+	miauthCfg := defaultMiAuthTestConfig()
 	clock := &fakeTimelineClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{Clock: clock})
+	// OwnerUsername mirrors miauthCfg's so Issue #23 PR5's self-mention
+	// detection (an "@" + this username pattern) matches the same
+	// username DescribeOwner/resolveUserLite project onto note.user in
+	// these contract tests.
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{Clock: clock, OwnerUsername: miauthCfg.OwnerUsername})
 
-	miauthSvc := miauth.NewService(db, db.Repos, defaultMiAuthTestConfig())
+	miauthSvc := miauth.NewService(db, db.Repos, miauthCfg)
 
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()

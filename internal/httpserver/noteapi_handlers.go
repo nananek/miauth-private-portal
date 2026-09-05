@@ -93,6 +93,7 @@ var implementedEndpoints = []string{
 	"notes/reactions/create",
 	"notes/reactions/delete",
 	"notes/reactions",
+	"notes/mentions",
 	"stats",
 }
 

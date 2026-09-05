@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -40,6 +41,19 @@ var authorActorTypeForKind = map[domain.EntryKind]domain.ActorType{
 type Config struct {
 	// Clock defaults to the real wall clock when nil.
 	Clock Clock
+	// OwnerUsername enables Issue #23 PR5's self-mention detection: a
+	// user_post whose Body contains "@" + OwnerUsername, word-bounded
+	// (not a plain substring match, so a username that is itself a
+	// prefix of a longer @-handle in the body never false-positives —
+	// see recordSelfMentionIfAny), records a domain.Mention pointing
+	// back at its own author. Detection never runs on llm_reply/
+	// llm_follow_up/news/mail entries, and never backfills entries
+	// created before this Config took effect (docs/compat/
+	// aria-v1.5.11.md's "POST /api/notes/mentions" section;
+	// owner-confirmed scope, 2026-09-06). An empty value (the zero
+	// Config, matching every timeline.NewService caller before PR5)
+	// disables detection entirely rather than matching every post.
+	OwnerUsername string
 }
 
 // Service enforces timeline business rules while composing domain
@@ -48,6 +62,9 @@ type Service struct {
 	uow   domain.UnitOfWork
 	repos domain.Repos
 	clock Clock
+	// mentionPattern is nil when Config.OwnerUsername is unset,
+	// disabling self-mention detection entirely.
+	mentionPattern *regexp.Regexp
 }
 
 // NewService builds a timeline Service. uow and repos commonly come
@@ -58,7 +75,47 @@ func NewService(uow domain.UnitOfWork, repos domain.Repos, cfg Config) *Service 
 	if clock == nil {
 		clock = realClock{}
 	}
-	return &Service{uow: uow, repos: repos, clock: clock}
+	svc := &Service{uow: uow, repos: repos, clock: clock}
+	if cfg.OwnerUsername != "" {
+		// Word-bounded: the character immediately before "@" (if any)
+		// and immediately after the username (if any) must not be part
+		// of Misskey's username charset ([A-Za-z0-9_], see
+		// internal/config's ownerUsernamePattern). This keeps a longer
+		// @-handle that merely starts with the owner's username (e.g.
+		// "@ownersecondary") from false-positiving, and incidentally
+		// keeps an embedded email-like token ("name@owner.example")
+		// from matching either, since the character right before "@"
+		// there is alphanumeric.
+		svc.mentionPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@` + regexp.QuoteMeta(cfg.OwnerUsername) + `([^A-Za-z0-9_]|$)`)
+	}
+	return svc
+}
+
+// recordSelfMentionIfAny persists a domain.Mention row when e is a
+// user_post whose Body contains an @-mention of the owner's own
+// username (Issue #23 PR5's real-detection option). single-owner means
+// the mentioned actor is always e's own author — there is no other
+// login-capable local actor a post could mention — so this never needs
+// a separate actor lookup. It is a no-op when e.Kind is not
+// EntryUserPost or mention detection is disabled
+// (Config.OwnerUsername unset). It is called unconditionally from
+// every entry-creation path below (CreateRoot, CreateReply,
+// CreateGeneratedReply, CreateExternalEntry) so a future scope change
+// needs only touch this one function, not each call site (see
+// plan-issue-23's PR5 notes); every kind but EntryUserPost's own
+// creation paths currently no-op here immediately on the Kind check.
+// Callers must run this inside the same transaction as the
+// Entries.Create it follows.
+func (s *Service) recordSelfMentionIfAny(ctx context.Context, repos domain.Repos, e domain.Entry) error {
+	if e.Kind != domain.EntryUserPost || s.mentionPattern == nil || !s.mentionPattern.MatchString(e.Body) {
+		return nil
+	}
+	return repos.Mentions.Create(ctx, domain.Mention{
+		ID:               domain.NewID(),
+		EntryID:          e.ID,
+		MentionedActorID: e.AuthorActorID,
+		CreatedAt:        e.CreatedAt,
+	})
 }
 
 // CreateRoot creates a thread and its root entry atomically. User posts
@@ -101,6 +158,9 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 		if err := repos.Entries.Create(ctx, entry); err != nil {
 			return err
 		}
+		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
+			return err
+		}
 		return enqueueForEntry(ctx, repos, jobs, entry.ID)
 	})
 	if err != nil {
@@ -121,6 +181,9 @@ func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind do
 		var err error
 		entry, err = createReplyEntry(ctx, repos, parentEntryID, kind, body, now)
 		if err != nil {
+			return err
+		}
+		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
 			return err
 		}
 		return enqueueForEntry(ctx, repos, jobs, entry.ID)
@@ -153,6 +216,9 @@ func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string
 		var err error
 		entry, err = createReplyEntry(ctx, repos, targetEntryID, kind, body, now)
 		if err != nil {
+			return err
+		}
+		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
 			return err
 		}
 		return repos.Generations.Complete(ctx, generationID, entry.ID, body, promptTokens, completionTokens, now)
@@ -213,6 +279,9 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 				return err
 			}
 			if err := repos.Entries.Create(ctx, entry); err != nil {
+				return err
+			}
+			if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
 				return err
 			}
 			return repos.ExternalItems.Promote(ctx, item.ID, entry.ID)
@@ -462,6 +531,14 @@ func (s *Service) ListReactions(ctx context.Context, entryID string, emoji *stri
 // used only to resolve ListReactions' untilId pagination anchor.
 func (s *Service) GetReaction(ctx context.Context, id string) (domain.Reaction, error) {
 	return s.repos.Reactions.Get(ctx, id)
+}
+
+// ListMentions returns actorID's newest-first, archived/hidden-excluded
+// self-mentions (Issue #23 PR5's POST /api/notes/mentions) — the same
+// paging contract as GetTimelineDesc: before nil returns the most
+// recent page, otherwise entries strictly older than before.
+func (s *Service) ListMentions(ctx context.Context, actorID string, before *domain.Cursor, limit int) ([]domain.Entry, error) {
+	return s.repos.Mentions.ListEntriesByMentionedActor(ctx, actorID, before, limit)
 }
 
 // ResolveAuthor returns the Actor an entry's AuthorActorID names, so

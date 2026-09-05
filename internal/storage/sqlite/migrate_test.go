@@ -13,7 +13,7 @@ import (
 var expectedTables = []string{
 	"actors", "miauth_local_sessions", "api_tokens", "threads", "entries", "user_tags", "llm_classifications",
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
-	"external_sources", "external_items", "reactions",
+	"external_sources", "external_items", "reactions", "mentions",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {
@@ -385,6 +385,87 @@ func TestMigrate_UpgradeAppliesReactionsTable(t *testing.T) {
 		entryID, ownerID,
 	); err == nil {
 		t.Error("second reaction from the same actor on the same entry should violate UNIQUE(entry_id, reactor_actor_id)")
+	}
+}
+
+// TestMigrate_UpgradeAppliesMentionsTable backs migration 0014 (Issue #23
+// PR5): another brand-new table with no pre-existing rows to preserve, so
+// this upgrade test's job is only to confirm the table (and its foreign
+// keys into entries/actors) exist and are usable after upgrading from a
+// pre-0014 database, mirroring TestMigrate_UpgradeAppliesReactionsTable's
+// structure.
+func TestMigrate_UpgradeAppliesMentionsTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 13 {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+
+	const ownerID = "pre-existing-owner"
+	const entryID = "pre-existing-entry"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO threads (id, created_at, updated_at) VALUES (?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, entryID,
+	); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES (?, ?, 'user_post', ?, '@owner body', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`,
+		entryID, entryID, ownerID,
+	); err != nil {
+		t.Fatalf("seed entry: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// The pre-existing entry's "@owner" body is never backfilled into
+	// mentions (Issue #23 PR5's forward-only scope, owner-confirmed
+	// 2026-09-06): inserting a mention row after upgrade must still work
+	// against it, but the migration itself must not have created one.
+	var mentionCount int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM mentions`).Scan(&mentionCount); err != nil {
+		t.Fatalf("count mentions after upgrade: %v", err)
+	}
+	if mentionCount != 0 {
+		t.Errorf("mentions after upgrade = %d, want 0 (no backfill)", mentionCount)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO mentions (id, entry_id, mentioned_actor_id, created_at) VALUES ('m1', ?, ?, '2024-01-01T00:00:00Z')`,
+		entryID, ownerID,
+	); err != nil {
+		t.Fatalf("insert mention after upgrade: %v", err)
 	}
 }
 
