@@ -47,6 +47,7 @@ The contract covers these concrete Aria paths:
 3. Create a note or a reply and receive the created note.
 4. Open a note, load its ancestor conversation, and load direct children.
 5. Optionally use the access-token login fallback exposed by the login page.
+6. (Issue #23) Edit the owner's display name from Settings → Profile.
 
 The source locations used for the trace are:
 
@@ -79,6 +80,8 @@ redacted.
 | `POST /api/notes/show` | **必要** | Note reload and opening a note not already cached | `i` token required; local `read:notes` equivalent |
 | `POST /api/notes/conversation` | **必要** | Loads the ancestor chain for a thread | `i` token required; local `read:notes` equivalent |
 | `POST /api/notes/children` | **必要** | Loads direct replies / quote-renotes for a thread | `i` token required; local `read:notes` equivalent |
+| `POST /api/i/update` (`name` field only) | **必要** for Issue #23 | Owner profile display-name self-edit from Settings → Profile | `i` token; local `write:account` equivalent |
+| `POST /api/i/update` (`username` field) | **不要** | No traced Aria/misskey_dart source ever sends or exposes a `username` field on this endpoint | N/A — never implement without a new observed source |
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
 | WebSocket `/streaming` timeline channel | **不要** for MVP; **minimal stub since Issue #41** | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
 
@@ -309,6 +312,58 @@ Most other fields are nullable or have defaults, but the exact minimum needed
 by the current timeline UI (including `policies`) is **要実機確認** against
 the target instance. The local wire projection must not expose token hashes
 or administrative secrets.
+
+### `POST /api/i/update` (Issue #23 profile self-edit)
+
+Traced from [`lib/view/page/settings/profile_page.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/view/page/settings/profile_page.dart) and
+[`lib/provider/api/i_notifier_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/api/i_notifier_provider.dart),
+plus the pinned `misskey_dart` request model
+[`lib/src/data/i/i_update_request.dart`](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/data/i/i_update_request.dart).
+
+Every `INotifier` setter (`setName`, `setDescription`, `setBirthday`, ...) sends
+only the single field it changed, with every other field omitted, and decodes
+the response as `MeDetailed`:
+
+```json
+{
+  "name": "New Display Name",
+  "i": "REDACTED_LOCAL_TOKEN"
+}
+```
+
+```json
+{ "...": "MeDetailed" }
+```
+
+`profile_page.dart`'s "Name" field is what real Misskey/Aria call the display
+name; it maps to Aria's `setName`, which calls
+`_misskey.i.update(IUpdateRequest(name: value))` (or the raw
+`apiService.post('i/update', {'name': value})` form other setters use). This is
+the only field this issue's PR1 scope implements
+(`docs/decisions`/Issue #23 Non-goals: avatar, description, and the rest of
+`IUpdateRequest`'s 40+ fields are out of scope and must be rejected the same
+way `/api/notes/create` rejects unsupported fields — `UNSUPPORTED_FEATURE`, not
+silently ignored).
+
+**`username` is not part of this contract.** The pinned `IUpdateRequest` model
+has no `username` field at all — Misskey's real `/api/i/update` does not
+support self-service handle renaming, and neither `misskey_dart` nor Aria
+model it. Confirmed independently in the client UI: `profile_page.dart` has no
+username input (username is not one of its editable fields), and
+[`account_settings_page.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/view/page/settings/account_settings_page.dart)
+renders the username through a read-only `UsernameWidget`. Aria therefore never
+sends, and has no code path that could ever send, a `username` field to this
+or any endpoint. Per the same standard applied to `/api/notes/update` above,
+this service must not accept-and-apply a `username` field it has never
+observed any real client send — doing so would be inventing a protocol rather
+than implementing an observed one. **This directly narrows Issue #23's
+`/api/i/update` acceptance criteria, which asks for username **and**
+display-name self-edit; see the Issue #23 implementation notes below for the
+resulting scope decision.**
+
+The exact `write:account`-scope enforcement status code, and whether a real
+instance's `MeDetailed` response after `i/update` differs from `/api/i`'s, are
+**要実機確認**.
 
 ### `POST /api/endpoints`
 
@@ -789,6 +844,39 @@ rather than replacing it.
   prior PR on this same issue. The README's "Known limitations" section
   and this document's non-goals below cover what remains permanently
   out of scope rather than merely deferred.
+
+## Issue #23 implementation notes
+
+Issue #23's PR1 (`/api/i/update`, owner profile self-edit) traced Aria's
+Settings → Profile screen and the pinned `misskey_dart` request model before
+writing any handler code, per this document's 必要/不要 method and AGENTS.md's
+"do not silently invent a protocol" rule. The trace surfaced a scope
+conflict against Issue #23's acceptance criteria, which is recorded here
+rather than resolved unilaterally:
+
+- **Finding**: neither Aria (`profile_page.dart`, `account_settings_page.dart`)
+  nor the pinned `misskey_dart` `IUpdateRequest` model has any way to send a
+  `username` field to `/api/i/update` (see this document's `/api/i/update`
+  section above for the full source trace). Real Misskey does not expose
+  self-service username renaming through this endpoint either. Only `name`
+  (display name) is a traced, observed, implementable field.
+- **Conflict**: Issue #23's `/api/i/update` acceptance criteria ask for both
+  username and display-name self-edit ("owner actor の username/表示名を更新
+  できる"), and `plan-issue-23`'s PR1 section calls for a mutable `username`
+  column alongside `display_name`. Neither source anticipated that the trace
+  itself would come back with no observed `username` wire path at all — the
+  plan's own precedent for this situation (drop a sub-scope to 不要 when the
+  trace shows Aria never exercises it, as applied to `/api/notes/renote`) has
+  not yet been applied here because it changes what the parent issue's
+  acceptance criteria promise, which is a call for the issue owner rather
+  than an implementation detail.
+- **Status**: implementation paused at this point pending a decision on how
+  to reconcile the acceptance criteria with the trace (e.g., narrow
+  `/api/i/update`'s AC to display-name-only and record `username` as 不要 the
+  same way `/api/notes/update` is; or pick a different mechanism entirely
+  for username changes, such as remaining `OWNER_USERNAME`-config-only via
+  SSH/CLI). No `actors` schema change, repository method, or HTTP handler for
+  `/api/i/update` has been written yet.
 
 ## Non-goals and implementation boundary
 
