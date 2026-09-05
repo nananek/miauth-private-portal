@@ -346,14 +346,24 @@ func TestEntryRepository_CountByAuthor(t *testing.T) {
 	if err := db.Entries.SetHidden(t.Context(), root.ID, true, now); err != nil {
 		t.Fatal(err)
 	}
-	mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Minute))
+	archived := mustCreateThreadAndRoot(t, db, actorID, now.Add(time.Minute))
+	if err := db.Entries.SetArchived(t.Context(), archived.ID, true, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateThreadAndRoot(t, db, actorID, now.Add(2*time.Minute))
 
+	// Issue #23 PR3 (docs/decisions/0004-note-delete-as-hide.md): /api/notes/
+	// delete maps onto SetHidden, so notesCount must drop for a deleted
+	// (hidden) note, matching real Misskey's delete-decrements-notesCount
+	// wire behavior. archived entries are excluded the same way, since
+	// nothing distinguishes the two states from CountByAuthor's caller
+	// (/api/i's notesCount projection).
 	n, err := db.Entries.CountByAuthor(t.Context(), actorID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("CountByAuthor = %d, want 2 (hidden entries still count)", n)
+	if n != 1 {
+		t.Errorf("CountByAuthor = %d, want 1 (hidden/archived entries excluded)", n)
 	}
 
 	if n, err := db.Entries.CountByAuthor(t.Context(), other); err != nil || n != 0 {

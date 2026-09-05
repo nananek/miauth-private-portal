@@ -113,6 +113,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /api/notes/show", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesShow)))
 		s.Handle("POST /api/notes/conversation", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesConversation)))
 		s.Handle("POST /api/notes/children", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesChildren)))
+		s.Handle("POST /api/notes/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesDelete)))
 	}
 
 	return s

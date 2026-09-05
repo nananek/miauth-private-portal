@@ -777,16 +777,28 @@ func TestGetEntry_ReturnsArchivedAndHiddenWithoutFiltering(t *testing.T) {
 	}
 }
 
-func TestCountByAuthor_CountsAcrossThreadsIncludingHidden(t *testing.T) {
+// TestCountByAuthor_CountsAcrossThreadsExcludingHiddenAndArchived pins
+// Issue #23 PR3's (docs/decisions/0004-note-delete-as-hide.md) change to
+// CountByAuthor: since /api/notes/delete maps onto SetHidden, notesCount
+// must decrement for a deleted note, matching real Misskey's
+// delete-decrements-notesCount wire behavior.
+func TestCountByAuthor_CountsAcrossThreadsExcludingHiddenAndArchived(t *testing.T) {
 	ts := newTestService(t)
 	first, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "one", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "two", nil); err != nil {
+	second, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "two", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "three", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := ts.SetHidden(t.Context(), first.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.SetArchived(t.Context(), second.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -794,8 +806,8 @@ func TestCountByAuthor_CountsAcrossThreadsIncludingHidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("CountByAuthor = %d, want 2", n)
+	if n != 1 {
+		t.Errorf("CountByAuthor = %d, want 1 (hidden/archived entries excluded)", n)
 	}
 }
 

@@ -389,8 +389,8 @@ func (s *Service) GetEntry(ctx context.Context, id string) (domain.Entry, error)
 	return s.repos.Entries.Get(ctx, id)
 }
 
-// CountByAuthor returns actorID's total entry count, including archived
-// and hidden entries (see EntryRepository.CountByAuthor).
+// CountByAuthor returns actorID's entry count, excluding archived and
+// hidden entries (see EntryRepository.CountByAuthor).
 func (s *Service) CountByAuthor(ctx context.Context, actorID string) (int, error) {
 	return s.repos.Entries.CountByAuthor(ctx, actorID)
 }
