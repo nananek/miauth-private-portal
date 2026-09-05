@@ -81,6 +81,32 @@ func TestHandleMiAuthStart_RejectsDisallowedCallback(t *testing.T) {
 	}
 }
 
+// TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody is Issue
+// #13 AC8's XSS regression test for the one HTTP response in this
+// service that renders anything other than a Misskey-compatible JSON
+// body: handleMiAuthStart's waiting/error page. Aria fully controls the
+// permission and callback query values, so if either were ever
+// interpolated into the response, a crafted value could inject markup.
+// Today they never are (writePlainTextPage always renders one of a
+// handful of fixed constant strings), and the Content-Type is always
+// text/plain, not text/html, so nothing here is ever eligible for
+// browser script execution even if that changed. This test pins both
+// properties.
+func TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody(t *testing.T) {
+	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
+	payload := `<script>alert(document.cookie)</script>`
+	recorder := startLocalSession(t, ts, "route-1", payload, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if ct := recorder.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain (a browser never executes script from a non-HTML response)", ct)
+	}
+	if strings.Contains(recorder.Body.String(), payload) {
+		t.Errorf("response body echoed the query-supplied permission value verbatim: %q", recorder.Body.String())
+	}
+}
+
 func TestRemovedUpstreamRoutesAreNotRegistered(t *testing.T) {
 	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
 	// The old bootstrap route has an extra path segment and must no
