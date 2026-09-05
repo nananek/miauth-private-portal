@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -32,24 +33,14 @@ func newFakeLLMServer() *fakeLLMServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":` + jsonString(generatedReplyBody) + `,"refusal":""},"finish_reason":"stop"}]}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": generatedReplyBody, "refusal": ""},
+				"finish_reason": "stop",
+			}},
+		})
 	}))
 	return f
-}
-
-// jsonString renders s as a JSON string literal without importing
-// encoding/json into this small handler; it only ever encodes the fixed
-// generatedReplyBody constant above, so a minimal escaper is enough.
-func jsonString(s string) string {
-	out := []byte{'"'}
-	for _, r := range s {
-		if r == '"' || r == '\\' {
-			out = append(out, '\\')
-		}
-		out = append(out, string(r)...)
-	}
-	out = append(out, '"')
-	return string(out)
 }
 
 // TestServerE2E_PostSucceedsWhileLLMDownAndReplyRecoversWithMarker is
