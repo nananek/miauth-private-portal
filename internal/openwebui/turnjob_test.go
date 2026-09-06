@@ -214,6 +214,14 @@ func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
 	if turn.PromptTokens == nil || *turn.PromptTokens != 3 || turn.CompletionTokens == nil || *turn.CompletionTokens != 5 {
 		t.Errorf("turn tokens = %v/%v, want 3/5", turn.PromptTokens, turn.CompletionTokens)
 	}
+	// The turn's own remote_chat_id must survive complete()'s later
+	// SetRemoteCorrelation call, which replaces all five correlation
+	// columns at once rather than merging: it must be seeded from what
+	// OnChatCreated already persisted, not from a stale in-memory turn
+	// value that never learned the chat id.
+	if turn.RemoteChatID == nil || *turn.RemoteChatID != "remote-chat-1" {
+		t.Errorf("turn.RemoteChatID = %v, want remote-chat-1", turn.RemoteChatID)
+	}
 }
 
 func TestTurnJob_DuplicateDelivery_NeverCallsProvider(t *testing.T) {
@@ -279,6 +287,75 @@ func TestTurnJob_StartChat_AuthFailed_PermanentAndMarksLinkFailed(t *testing.T) 
 	}
 	if turn.Status != domain.TurnFailed || turn.FailureCategory == nil || *turn.FailureCategory != domain.FailureCategoryAuthFailed {
 		t.Errorf("turn = %+v, want failed/auth_failed", turn)
+	}
+}
+
+// TestTurnJob_StartChat_TurnPhaseFailureAfterCreation_RetriesRatherThanFreezing
+// covers a case the plan's §5.4 table treats very differently from a
+// creation failure: StartChat bundles createChat and the chat's first
+// runTurn into one call, so a transient failure coming back from it can
+// belong to either phase. Once OnChatCreated has already run (the chat
+// exists and the link is ready in storage), the failure is the turn's,
+// not the chat's, and must get the same bounded-retry treatment a ready
+// link's continuation gets — never an immediate, permanent ambiguous
+// freeze on the very first attempt (that treatment is reserved for a
+// genuine creation failure, where the chat's existence itself is
+// unknown).
+func TestTurnJob_StartChat_TurnPhaseFailureAfterCreation_RetriesRatherThanFreezing(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		// The chat now exists and the link has already been marked
+		// ready by OnChatCreated; this failure is the completions call
+		// that follows it, i.e. a turn-phase error, not a create-phase
+		// one.
+		return TurnResult{}, NewProviderError(CategoryServerError, PhaseTurn, errors.New("500"))
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	err := turnJob.Handle(t.Context(), job)
+	var permanent *jobs.PermanentError
+	if errors.As(err, &permanent) {
+		t.Fatalf("Handle error = %v, want a retryable (non-Permanent) error: a transient failure after a successful chat creation must not be treated as an unrecoverable creation loss", err)
+	}
+	if err == nil {
+		t.Fatal("Handle error = nil, want a retryable error for the failed turn")
+	}
+
+	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.State != domain.LinkReady {
+		t.Errorf("link.State = %q, want ready (chat creation succeeded; only the turn failed)", link.State)
+	}
+	if link.RemoteChatID == nil || *link.RemoteChatID != "remote-chat-1" {
+		t.Errorf("link.RemoteChatID = %v, want remote-chat-1", link.RemoteChatID)
+	}
+
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status.IsTerminal() {
+		t.Errorf("turn.Status = %q, want non-terminal (still retryable)", turn.Status)
+	}
+	if turn.RemoteChatID == nil || *turn.RemoteChatID != "remote-chat-1" {
+		t.Errorf("turn.RemoteChatID = %v, want remote-chat-1", turn.RemoteChatID)
+	}
+	if start, _, _ := provider.counts(); start != 1 {
+		t.Errorf("StartChat calls = %d, want exactly 1", start)
 	}
 }
 

@@ -230,11 +230,20 @@ func (j *TurnJob) handleCreationPending(
 			if err := j.repos.OpenWebUILinks.MarkReady(hookCtx, link.ID, remoteChatID, nil, confirmedAt); err != nil {
 				return fmt.Errorf("mark link ready: %w", err)
 			}
-			if err := j.repos.OpenWebUITurnLinks.SetRemoteCorrelation(hookCtx, turn.ID, domain.OpenWebUITurnCorrelation{
+			// Route this write through setCorrelation (not a direct
+			// SetRemoteCorrelation call) so it also updates the outer
+			// turn variable this closure captures. SetRemoteCorrelation
+			// replaces all five correlation columns rather than merging,
+			// so complete()'s own later call — which reads RemoteChatID
+			// off that same turn variable — would otherwise null this
+			// chat id straight back out after a successful first turn.
+			updated, err := j.setCorrelation(hookCtx, turn, domain.OpenWebUITurnCorrelation{
 				RemoteChatID: &remoteChatID, RemoteMessageID: &userMsgID, RemoteAssistantMessageID: &assistantMsgID,
-			}, confirmedAt); err != nil {
+			}, confirmedAt)
+			if err != nil {
 				return fmt.Errorf("set remote correlation: %w", err)
 			}
+			turn = updated
 			if workspace.ChatCreateStatus != domain.CapabilityVerified {
 				if err := j.repos.OpenWebUIWorkspaces.SetCapabilityStatus(hookCtx, workspace.ID, domain.CapabilityVerified, workspace.ChatContinueStatus, confirmedAt); err != nil {
 					return fmt.Errorf("record chat-create capability: %w", err)
@@ -244,7 +253,7 @@ func (j *TurnJob) handleCreationPending(
 		},
 	})
 	if err != nil {
-		return j.handleCreateError(ctx, turn, link, err)
+		return j.handleCreateError(ctx, job, turn, link, err)
 	}
 	return j.complete(ctx, turn, link, workspace, model, entry, result)
 }
@@ -255,10 +264,23 @@ func (j *TurnJob) handleCreationPending(
 // it is left retryable and the turn/link untouched, since BeginAttempt
 // already recorded the attempt — the next delivery's turn.Attempt > 0
 // branch resolves it as creation_lost rather than replaying the call.
-func (j *TurnJob) handleCreateError(ctx context.Context, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink, err error) error {
+//
+// StartChat bundles two calls (createChat, then the first runTurn) into
+// one, so an error coming back from it can belong to either phase —
+// exactly what ProviderError.Phase exists to tell apart (see its doc
+// comment). A pe.Phase other than PhaseCreate means createChat and
+// OnChatCreated already succeeded (the link is ready in storage by now),
+// so the failure is this turn's, not the chat's: it gets the same
+// bounded-retry treatment handleTurnError gives a ready link's
+// continuation, rather than being frozen ambiguous on the very first
+// attempt the way an actual creation failure is.
+func (j *TurnJob) handleCreateError(ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink, err error) error {
 	var pe *ProviderError
 	if !errors.As(err, &pe) {
 		return fmt.Errorf("openwebui: turn: create: onChatCreated: %w", err)
+	}
+	if pe.Phase != PhaseCreate {
+		return j.handleTurnError(ctx, job, turn, link, err)
 	}
 	switch pe.Category {
 	case CategoryAuthFailed:
