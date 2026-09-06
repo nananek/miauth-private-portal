@@ -336,7 +336,11 @@ the same `chatcmpl-…` value on every chunk — so duplicate and out-of-order
 detection is impossible from the wire alone (see the synthetic
 `sse_duplicate_chunk` / `sse_out_of_order_chunk` fixtures). Also note that in
 streaming mode a re-run **appends** to an existing message's content, where
-buffered mode replaces it. Streaming stays out of MVP (ADR-0005 D8).
+buffered mode replaces it — this was observed during the capture session by
+re-running a `stream:true` request against an already-filled message id, but
+no fixture of the appended state was retained, so it rests on the observation
+record alone (the weakest-evidenced streaming statement here). Streaming stays
+out of MVP (ADR-0005 D8).
 
 ### `GET /api/v1/chats/{id}` (必要)
 
@@ -358,7 +362,10 @@ Returns the same `ChatResponse` shape. The tree lives in
 - `done: true` on the assistant message is the completion flag. A failed turn
   has `done: false`, `content: ""`, and an `error: {content: "<upstream text>"}`
   object ([`error_chat_managed_message_state.json`](fixtures/openwebui/error_chat_managed_message_state.json)).
-  The **user** message never carries `done` at all.
+  A **user** message written by a completions turn never carries `done`; the
+  one place a user message does carry it is the `/fork` copy
+  ([`fork_response_reference.json`](fixtures/openwebui/fork_response_reference.json)),
+  which this integration never calls.
 - `chat.history.currentId` and the top-level `current_message_id` both point at
   the newest assistant message and stay in sync in every capture. They advance
   to a **failed** message as well: in
@@ -441,11 +448,12 @@ Fields observed to be absent or `null` in at least one capture, which the
 adapter must therefore tolerate:
 
 - on a message: `done` (absent entirely on user messages), `output`, `usage`,
-  `error` (present only on a failed turn), `model`, `childrenIds` (an empty
-  array on a leaf), and `parentId` (`null` at a root — and, per (d) above,
-  possibly `null` where a parent was expected). `modelName` and `modelIdx`
-  appear only when a client wrote them into the history itself; the server
-  does not add them;
+  `error` (present only on a failed turn), `model`, and `parentId` (`null` at
+  a root — and, per (d) above, possibly `null` where a parent was expected).
+  `childrenIds` is the opposite case: always present, never `null`, but an
+  empty array on a leaf, so it must be read as "possibly empty" rather than
+  "possibly missing". `modelName` and `modelIdx` appear only when a client
+  wrote them into the history itself; the server does not add them;
 - on a chat response: `share_id`, `folder_id`, `tasks`, `summary`,
   `current_message_id`, and `context_usage`;
 - inside the free-form `chat` object: `params`, which a completions-created

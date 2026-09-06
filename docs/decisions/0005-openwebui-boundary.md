@@ -183,7 +183,9 @@ For a chat-managed request, `stream:true` returns either
 The only true HTTP SSE path is the legacy one, which persists nothing — and
 its chunks carry no sequence number or per-chunk id, so the roadmap's required
 duplicate/out-of-order detection is impossible on the wire. Streaming also
-*appends* to an existing message where buffered mode replaces it.
+*appends* to an existing message where buffered mode replaces it (observed
+during the capture session; no fixture of that state was retained — see the
+compat document's streaming table).
 
 Buffered is the default and the only supported mode. Streaming needs a
 socket.io client and a separate contract; it is a future issue, not a TODO
