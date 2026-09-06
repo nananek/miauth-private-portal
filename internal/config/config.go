@@ -321,8 +321,8 @@ type OpenWebUIConfig struct {
 	PresentationHost string
 
 	// The fields below are Issue #53's (OWUI-B) client-side bounds and
-	// generation gate. They are parsed and validated from this
-	// migration on, but nothing in this service reads them yet: no
+	// generation gate. They are parsed and validated from this PR
+	// (Issue #53 PR1) on, but nothing in this service reads them yet: no
 	// bridge, job, or provider adapter exists until Issue #53's later
 	// PRs build one.
 
@@ -1154,6 +1154,19 @@ func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool
 // separately from Validate, gated by that flag — the same "parse now,
 // validate only if enabled" split LLM_BASE_URL uses. An unset or empty
 // value yields nil: no feed is polled.
+func splitOptionalURLList(values map[string]string, key string) []string {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return nil
+	}
+	parts := splitCallbackList(v)
+	list := make([]string, len(parts))
+	for i, p := range parts {
+		list[i] = strings.TrimSpace(p)
+	}
+	return list
+}
+
 // trimRightEach returns a new slice with cutset right-trimmed from every
 // entry, leaving a nil list nil. Used by OPENWEBUI_ALLOWED_ORIGINS so a
 // trailing slash there does not make an otherwise-identical origin fail
@@ -1167,19 +1180,6 @@ func trimRightEach(list []string, cutset string) []string {
 		out[i] = strings.TrimRight(v, cutset)
 	}
 	return out
-}
-
-func splitOptionalURLList(values map[string]string, key string) []string {
-	v, ok := values[key]
-	if !ok || v == "" {
-		return nil
-	}
-	parts := splitCallbackList(v)
-	list := make([]string, len(parts))
-	for i, p := range parts {
-		list[i] = strings.TrimSpace(p)
-	}
-	return list
 }
 
 // validateRSSFeedURLs checks each RSS_FEED_URLS entry is an absolute

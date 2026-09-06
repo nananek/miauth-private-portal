@@ -430,7 +430,8 @@ const (
 	FailureCategoryPolicyViolation = "policy_violation"
 	// FailureCategoryCreationLost is a chat-creation call whose response
 	// was lost or uncertain, discovered on a later attempt that must not
-	// retry it (D-2's absolute rule against re-creating a chat).
+	// retry it: a lost creation is never replayed (see the roadmap's
+	// "Outbound job, retry, and error contract" and ADR-0005 D7).
 	FailureCategoryCreationLost = "creation_lost"
 	// FailureCategoryLinkNotReady is a turn a job attempted against a
 	// link in a state that does not allow it (already spent, ambiguous,
@@ -517,8 +518,9 @@ type OpenWebUITurnLink struct {
 	FinishReason *string
 	// LastAttemptAt is when the most recent provider attempt for this
 	// turn was recorded as started (Issue #53's TurnJob calls
-	// BeginAttempt before making the call, per ADR-0005 D-3's "durably
-	// record the attempt before calling out"), nil before any attempt.
+	// BeginAttempt before making the call, so a lease expiry or crash
+	// afterward is distinguishable from a turn that never attempted
+	// anything), nil before any attempt.
 	LastAttemptAt *time.Time
 	// CompletedAt is when this turn's status last became terminal
 	// (TurnProviderStatus.IsTerminal), nil while still pending.
@@ -707,11 +709,9 @@ type OpenWebUITurnLinkRepository interface {
 	SetRemoteCorrelation(ctx context.Context, id string, corr OpenWebUITurnCorrelation, at time.Time) error
 	// BeginAttempt records that a provider attempt for this turn is
 	// starting, before the call is made: it advances Attempt and
-	// LastAttemptAt in the same write. ADR-0005 D-3's durability
-	// requirement is what this exists for — a lease expiry or crash
-	// after this write but before a result is known must be
-	// distinguishable, on the next run, from a turn that never attempted
-	// anything.
+	// LastAttemptAt in the same write, so a lease expiry or crash after
+	// this write but before a result is known is distinguishable, on the
+	// next run, from a turn that never attempted anything.
 	BeginAttempt(ctx context.Context, id string, attempt int, at time.Time) error
 	SetProviderStatus(ctx context.Context, id string, status TurnProviderStatus, attempt int, at time.Time) error
 	// RecordOutcome writes a turn's status together with the outcome

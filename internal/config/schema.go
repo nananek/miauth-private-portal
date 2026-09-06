@@ -87,9 +87,9 @@ const (
 	KeyOpenWebUIPresentationHost = "OPENWEBUI_PRESENTATION_HOST"
 
 	// The five keys below are Issue #53's (OWUI-B) client-side bounds and
-	// generation gate. They exist from this migration on, but nothing
-	// reads them yet: no bridge, job, or provider adapter is wired up
-	// until Issue #53's later PRs build one.
+	// generation gate. They exist from this PR (Issue #53 PR1) on, but
+	// nothing reads them yet: no bridge, job, or provider adapter is
+	// wired up until Issue #53's later PRs build one.
 	KeyOpenWebUIGenerationEnabled  = "OPENWEBUI_GENERATION_ENABLED"
 	KeyOpenWebUITimeout            = "OPENWEBUI_TIMEOUT"
 	KeyOpenWebUIMaxResponseBytes   = "OPENWEBUI_MAX_RESPONSE_BYTES"

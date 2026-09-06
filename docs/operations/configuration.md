@@ -126,7 +126,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MODEL_DISPLAY_NAME` | no | `OPENWEBUI_DEFAULT_MODEL_ID`'s value | The seeded model's display name. |
 | `OPENWEBUI_MODEL_SLUG` | no | `model` | 1-32 lowercase ASCII letters, digits, or underscores. The local half of the VirtualActor handle `@<slug>@<presentation host>`. Must not collide (case-insensitively) with `OWNER_USERNAME` or the reserved `assistant`/`system` names. |
 | `OPENWEBUI_PRESENTATION_HOST` | required if `OPENWEBUI_ENABLED=true` | `""` | A bare lowercase DNS hostname (no scheme, port, path, or trailing dot) — a fixed, deployment-provisioned presentation value, never inferred from `OPENWEBUI_BASE_URL`. Must differ from `LOCAL_ORIGIN`'s host: a `UserLite` with a null host means "local to this service", so reusing the local host here would make a VirtualActor indistinguishable from a local actor. |
-| `OPENWEBUI_GENERATION_ENABLED` | no | `false` | Issue #53's outbound-generation gate, independent of `OPENWEBUI_ENABLED` the same way `LLM_CLASSIFICATION_ENABLED` is independent of `LLM_ENABLED`. `Registry.Seed` reconciles it onto the enabled workspace's `generation_enabled` column on every run (both directions — turning it back off clears a previous `true`), but as of this issue nothing reads that column: there is no bridge yet to gate. |
+| `OPENWEBUI_GENERATION_ENABLED` | no | `false` | Issue #53's outbound-generation gate; only meaningful when `OPENWEBUI_ENABLED=true`, ignored otherwise (parsed and defaulted regardless, the same "sub-flag" shape `LLM_CLASSIFICATION_ENABLED` has relative to `LLM_ENABLED`, but never validated or required while the parent flag is off). `Registry.Seed` reconciles it onto the enabled workspace's `generation_enabled` column on every run (both directions — turning it back off clears a previous `true`), but as of this issue nothing reads that column: there is no bridge yet to gate. |
 | `OPENWEBUI_TIMEOUT` | no | `120s` | Issue #53's per-HTTP-call bound for the outbound adapter. Larger than `LLM_TIMEOUT`'s default because a buffered (non-streaming) chat completion can run considerably longer than an ordinary reply generation. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_RESPONSE_BYTES` | no | `4194304` (4 MiB) | Issue #53's response-size bound. Larger than `RSS_MAX_RESPONSE_BYTES`/`IMAP_MAX_MESSAGE_BYTES` because `GET /api/v1/chats/{id}` returns the whole chat, not one message. Minimum `65536`. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
@@ -991,8 +991,9 @@ provider error text (ADR-0005 D6); there is deliberately no `CHECK`
 pinning the set of values, the same choice already made for
 `provider_status` and `jobs.job_type`. `OpenWebUITurnLinkRepository`
 gained `BeginAttempt` (records an attempt starting, before the provider is
-ever called — ADR-0005 D-3) and `RecordOutcome` (writes a terminal or
-non-terminal status together with the category/usage/finish-reason that
+ever called, so a lease expiry or crash afterward is distinguishable from
+a turn that never attempted anything) and `RecordOutcome` (writes a
+terminal or non-terminal status together with the category/usage/finish-reason that
 explains it); `OpenWebUIConversationLinkRepository` gained `List`
 (filterable by state/thread, for the CLI) and `MarkReady` now refuses to
 move a link already carrying a `remote_chat_id` onto a *different* one.

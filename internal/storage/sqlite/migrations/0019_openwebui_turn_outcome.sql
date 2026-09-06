@@ -16,8 +16,9 @@ ALTER TABLE openwebui_turn_links ADD COLUMN prompt_tokens INTEGER;
 ALTER TABLE openwebui_turn_links ADD COLUMN completion_tokens INTEGER;
 ALTER TABLE openwebui_turn_links ADD COLUMN finish_reason TEXT;
 -- When the most recent provider attempt was recorded as starting
--- (BeginAttempt, called before the provider is ever called — ADR-0005
--- D-3) and when the turn's status last became terminal
+-- (BeginAttempt, called before the provider is ever called, so a crash
+-- or lease expiry afterward is distinguishable from a never-attempted
+-- turn) and when the turn's status last became terminal
 -- (TurnProviderStatus.IsTerminal, written by RecordOutcome).
 ALTER TABLE openwebui_turn_links ADD COLUMN last_attempt_at TEXT;
 ALTER TABLE openwebui_turn_links ADD COLUMN completed_at TEXT;

@@ -371,10 +371,10 @@ func (r *openWebUITurnLinkRepository) SetProviderStatus(ctx context.Context, id 
 }
 
 // BeginAttempt records that a provider attempt for this turn is starting,
-// before the call is made (ADR-0005 D-3): it advances attempt and
-// last_attempt_at in the same write, so a crash or lease expiry after
-// this point but before a result is known is distinguishable, on the
-// next run, from a turn that never attempted anything.
+// before the call is made: it advances attempt and last_attempt_at in
+// the same write, so a crash or lease expiry after this point but
+// before a result is known is distinguishable, on the next run, from a
+// turn that never attempted anything.
 func (r *openWebUITurnLinkRepository) BeginAttempt(ctx context.Context, id string, attempt int, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE openwebui_turn_links SET attempt = ?, last_attempt_at = ?, updated_at = ? WHERE id = ?`,
