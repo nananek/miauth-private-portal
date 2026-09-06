@@ -111,14 +111,14 @@ func formatFrom(addrs []*imap.Address) string {
 
 // buildHeaderPrefix renders sender/subject/received time as plain text
 // ahead of the sanitized body snippet. This is the only place
-// From/Subject/received time reach Item.Body:
-// internal/ingest.FetchedItem.Title is written by
-// internal/ingest/rss but never read by internal/ingest.Service.Handle
-// (only Body is passed to timeline.Service.CreateExternalEntry), so an
-// IMAP adapter that only set Title would silently lose sender/subject
-// entirely. Folding them into Body instead is what actually satisfies
-// Issue #12's "store sender, subject, received time" acceptance
-// criterion.
+// From/Subject/received time reach Item.Body: internal/ingest.Service's
+// composeExternalBody (Issue #13) does read FetchedItem.Title, but only
+// to fold it into a generic "[<kind>] <title>" header — it has no notion
+// of From/Subject/Date structure, so an IMAP adapter that set Title
+// instead of writing this prefix directly into Body would still lose
+// the sender/subject/received-time shape Issue #12's "store sender,
+// subject, received time" acceptance criterion requires. Folding them
+// into Body here is what actually satisfies it.
 func buildHeaderPrefix(env *imap.Envelope, receivedAt time.Time) string {
 	var sb strings.Builder
 	sb.WriteString("From: ")

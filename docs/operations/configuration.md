@@ -70,8 +70,8 @@ catch that class of mistake during local development.
 | `DB_MAX_OPEN_CONNS` | no | `8` | 1-100. Bounds the SQLite connection pool. |
 | `LOCAL_ORIGIN` | yes | — | This service's public origin. Scheme+host only: no userinfo, path beyond `""`/`"/"`, query, or fragment. Must be `https` in production. |
 | `ARIA_CLIENT_CALLBACKS` | no | `""` (reject any client callback) | Comma-separated exact-match allowlist of Aria's client return callbacks (for example `aria://aria/miauth`). Commas inside a callback path or query are retained; a separator is a comma followed by the next absolute URL scheme. A non-HTTPS scheme is explicitly allowed. |
-| `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username` until a later issue adds self-service profile editing. |
-| `OWNER_DISPLAY_NAME` | no | `""` (null) | Reported as the owner's `UserDetailedNotMe.name` (nullable); empty means `null`. |
+| `OWNER_USERNAME` | no | `owner` | ASCII letters, digits, and underscores only. Reported as the owner's `UserDetailedNotMe.username`. Permanently config-only: neither Aria nor the pinned `misskey_dart` client has any way to send a username field to `POST /api/i/update` (see `docs/compat/aria-v1.5.11.md`'s "POST /api/i/update" section), so there is no self-service way to change this — edit the config and restart. |
+| `OWNER_DISPLAY_NAME` | no | `""` (null) | Only the *initial* value copied into the database the first time the owner actor is created (approving the first MiAuth session). From then on, `POST /api/i/update` (Issue #23 PR1) is the source of truth for the owner's `UserDetailedNotMe.name` (nullable; empty means `null`), and this config value is no longer consulted — changing it after the owner already exists has no effect. |
 | `JOBS_WORKER_ID` | no | hostname + PID | Human-readable worker identity used in logs and as a lease-owner prefix. Each claim appends a random fencing value, so a reclaim never reuses the previous lease generation. Set a deployment-unique value when operational logs need one; an empty config-file value uses the generated default. |
 | `JOBS_POLL_INTERVAL` | no | `1s` | How often an idle worker checks for due or lease-expired work. Positive duration. |
 | `JOBS_CLAIM_BATCH_SIZE` | no | `10` | Maximum jobs claimed per poll, 1-100; available concurrency can reduce it further. |
@@ -227,12 +227,15 @@ Owner actor and later approvals reuse it.
 
 - Managing SSH access, host accounts, or operating-system audit policy.
 - Browser session cookies; authorization occurs through the host-local CLI.
-- `POST /api/meta` and `POST /api/i`: assigned to Issue #7's minimal
-  Aria/Misskey surface.
-- Self-service profile editing (`POST /api/i/update`): `OWNER_USERNAME`/
-`OWNER_DISPLAY_NAME` remain config-only; a fast-follow issue is
-  expected to add an editable, database-backed profile so an operator does
-  not need to edit config to change them.
+- `POST /api/meta`, `POST /api/i`, and `POST /api/i/update`: assigned to
+  Issue #7's minimal Aria/Misskey surface and Issue #23 PR1's
+  self-service display-name editing, respectively; see the Note API
+  section below.
+- Self-service **username** editing: permanently out of scope. Issue
+  #23 PR1's source trace found no wire path for it in Aria or the
+  pinned `misskey_dart` client at all (see `docs/compat/aria-v1.5.11.md`),
+  so `OWNER_USERNAME` remains the only way to set it, and changing it
+  requires a config edit and restart.
 
 ## Note API
 
@@ -250,6 +253,7 @@ notes" section.
 | `POST /api/meta` | Anonymous | — |
 | `POST /api/endpoints` | Anonymous | — |
 | `POST /api/i` | `i` token | `read:account` |
+| `POST /api/i/update` | `i` token | `write:account` |
 | `POST /api/notes/create` | `i` token | `write:notes` |
 | `POST /api/notes/timeline` | `i` token | `read:notes` |
 | `POST /api/notes/show` | `i` token | `read:notes` |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -163,6 +164,32 @@ func TestRequireScope_StorageFailureIsLoggedAndReturnsServerError(t *testing.T) 
 	}
 	if strings.Contains(ts.logBuf.String(), token) || strings.Contains(rec.Body.String(), token) {
 		t.Error("raw API token leaked in log or response")
+	}
+}
+
+func TestVerifyTokenFromQuery_StorageFailureIsReturnedNotSwallowed(t *testing.T) {
+	// verifyTokenFromQuery is handleStreaming's (streaming_handlers.go)
+	// only caller; streaming_handlers_test.go exercises it end-to-end
+	// through a real WebSocket handshake for the missing/invalid/
+	// insufficient-scope cases, but a storage failure is impractical to
+	// force through a live listener the way TestRequireScope_
+	// StorageFailureIsLoggedAndReturnsServerError does for the JSON-body
+	// sibling above. Test it directly instead: it must surface the raw
+	// error (for handleStreaming to log and answer with 500), not the
+	// sentinel miauth.ErrTokenInvalid a genuinely bad token produces —
+	// conflating the two would make handleStreaming answer a storage
+	// outage with a misleading 401.
+	ts := newMiAuthTestServer(t, defaultMiAuthTestConfig())
+	token, _ := mintToken(t, ts)
+	if err := ts.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/streaming?i="+token, nil)
+	if _, err := verifyTokenFromQuery(req.Context(), ts.miauth, req, miauth.ScopeReadAccount); err == nil {
+		t.Fatal("expected a storage-failure error")
+	} else if errors.Is(err, miauth.ErrTokenInvalid) {
+		t.Errorf("storage failure was reported as ErrTokenInvalid, want the underlying error: %v", err)
 	}
 }
 

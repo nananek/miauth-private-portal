@@ -27,6 +27,7 @@ build:
 	go build -o bin/miauthctl ./cmd/miauthctl
 	go build -o bin/jobsctl ./cmd/jobsctl
 	go build -o bin/mailfetch ./cmd/mailfetch
+	go build -o bin/backupctl ./cmd/backupctl
 
 run: build
 	./bin/server

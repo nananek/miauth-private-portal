@@ -77,3 +77,65 @@ func TestActorRepository_Create_RejectsSecondOwner(t *testing.T) {
 		t.Errorf("second Create() error = %v, want ErrConflict", err)
 	}
 }
+
+// TestActorRepository_Create_WithDisplayName covers Issue #23 PR1's
+// display_name column: a Create call that provides one must round-trip
+// through Get, while TestActorRepository_Create above (no DisplayName)
+// already covers the nil/never-set case.
+func TestActorRepository_Create_WithDisplayName(t *testing.T) {
+	db := newTestDB(t)
+	name := "Initial Name"
+	a := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: time.Now(), DisplayName: &name}
+	if err := db.Actors.Create(t.Context(), a); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := db.Actors.Get(t.Context(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DisplayName == nil || *got.DisplayName != "Initial Name" {
+		t.Errorf("DisplayName = %v, want %q", got.DisplayName, "Initial Name")
+	}
+}
+
+func TestActorRepository_SetDisplayName(t *testing.T) {
+	db := newTestDB(t)
+	a := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: time.Now()}
+	if err := db.Actors.Create(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Actors.SetDisplayName(t.Context(), a.ID, "Updated Name"); err != nil {
+		t.Fatalf("SetDisplayName: %v", err)
+	}
+	got, err := db.Actors.Get(t.Context(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DisplayName == nil || *got.DisplayName != "Updated Name" {
+		t.Errorf("DisplayName after SetDisplayName = %v, want %q", got.DisplayName, "Updated Name")
+	}
+
+	// Clearing to "" must persist as an explicit empty string, not leave
+	// the column NULL again (see SetDisplayName's doc comment on why "no
+	// value written yet" and "explicitly cleared" are kept distinct).
+	if err := db.Actors.SetDisplayName(t.Context(), a.ID, ""); err != nil {
+		t.Fatalf("SetDisplayName clear: %v", err)
+	}
+	got, err = db.Actors.Get(t.Context(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DisplayName == nil || *got.DisplayName != "" {
+		t.Errorf("DisplayName after clearing = %v, want pointer to empty string", got.DisplayName)
+	}
+}
+
+func TestActorRepository_SetDisplayName_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	err := db.Actors.SetDisplayName(t.Context(), "does-not-exist", "x")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("SetDisplayName() error = %v, want ErrNotFound", err)
+	}
+}

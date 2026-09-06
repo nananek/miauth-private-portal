@@ -22,6 +22,7 @@ package httpserver
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
@@ -40,6 +41,11 @@ type Server struct {
 	localOrigin              string
 	llmEnabled               bool
 	llmClassificationEnabled bool
+
+	// streamSem bounds concurrent GET /streaming connections; see
+	// maxConcurrentStreamConnections (streaming_handlers.go).
+	streamSem          chan struct{}
+	streamPingInterval time.Duration
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -54,12 +60,21 @@ type Server struct {
 // opts.TimelineService additionally configures Issue #7's minimal
 // Aria/Misskey-compatible note routes (POST /api/meta, /api/i,
 // /api/endpoints, /api/notes/create, /api/notes/timeline,
-// /api/notes/show, /api/notes/conversation, /api/notes/children). They
-// register only when both opts.MiAuthService and opts.TimelineService
-// are non-nil: every protected note route authenticates through
-// RequireScope (which needs the MiAuth service), and there is no
-// meaningful note API without a timeline to back it.
+// /api/notes/show, /api/notes/conversation, /api/notes/children), plus
+// Issue #23 PR1's POST /api/i/update, PR2's anonymous POST /api/stats,
+// PR3's POST /api/notes/delete, PR4's POST
+// /api/notes/reactions/create, /api/notes/reactions/delete, and POST
+// /api/notes/reactions, PR5's POST /api/notes/mentions, and PR6's POST
+// /api/i/notifications. They register only when both
+// opts.MiAuthService and opts.TimelineService are non-nil: every
+// protected note route authenticates through RequireScope (which needs
+// the MiAuth service), and there is no meaningful note API without a
+// timeline to back it.
 func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server {
+	pingInterval := opts.StreamPingInterval
+	if pingInterval <= 0 {
+		pingInterval = defaultStreamPingInterval
+	}
 	s := &Server{
 		mux:                      http.NewServeMux(),
 		logger:                   logger,
@@ -68,6 +83,8 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		localOrigin:              opts.LocalOrigin,
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
+		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
+		streamPingInterval:       pingInterval,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,17 +97,31 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
+		// GET /streaming only needs read:account authentication (Issue
+		// #41), not a timeline: it never pushes a real note/notification
+		// event yet, so it belongs in this MiAuthService-only group rather
+		// than mixed into the note-API group below, which exists because
+		// every route there needs both scoped auth and a timeline to read.
+		s.Handle("GET /streaming", http.HandlerFunc(s.handleStreaming))
 	}
 
 	if opts.MiAuthService != nil && opts.TimelineService != nil {
 		s.Handle("POST /api/meta", http.HandlerFunc(s.handleMeta))
 		s.Handle("POST /api/endpoints", http.HandlerFunc(s.handleEndpoints))
+		s.Handle("POST /api/stats", http.HandlerFunc(s.handleStats))
 		s.Handle("POST /api/i", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleAPII)))
+		s.Handle("POST /api/i/update", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleAPIIUpdate)))
 		s.Handle("POST /api/notes/create", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesCreate)))
 		s.Handle("POST /api/notes/timeline", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesTimeline)))
 		s.Handle("POST /api/notes/show", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesShow)))
 		s.Handle("POST /api/notes/conversation", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesConversation)))
 		s.Handle("POST /api/notes/children", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesChildren)))
+		s.Handle("POST /api/notes/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteNotes)(http.HandlerFunc(s.handleNotesDelete)))
+		s.Handle("POST /api/notes/reactions/create", RequireScope(logger, s.miauth, miauth.ScopeWriteReactions)(http.HandlerFunc(s.handleNotesReactionsCreate)))
+		s.Handle("POST /api/notes/reactions/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteReactions)(http.HandlerFunc(s.handleNotesReactionsDelete)))
+		s.Handle("POST /api/notes/reactions", RequireScope(logger, s.miauth, miauth.ScopeReadReactions)(http.HandlerFunc(s.handleNotesReactions)))
+		s.Handle("POST /api/notes/mentions", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesMentions)))
+		s.Handle("POST /api/i/notifications", RequireScope(logger, s.miauth, miauth.ScopeReadNotifications)(http.HandlerFunc(s.handleAPINotifications)))
 	}
 
 	return s

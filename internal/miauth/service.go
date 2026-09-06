@@ -17,6 +17,14 @@ var (
 	ErrSessionUnavailable       = errors.New("miauth: session unavailable")
 	ErrCheckNotReady            = errors.New("miauth: check not ready")
 	ErrTokenInvalid             = errors.New("miauth: invalid token")
+	// ErrNotOwner is returned by UpdateOwnerDisplayName when the resolved
+	// local actor ID is not the Owner actor. In normal operation this
+	// never happens (only the Owner is ever issued a local API token —
+	// see RequireScope's doc comment), so this is a defense-in-depth
+	// check rather than a reachable user-facing case; handlers must
+	// treat it the same as any other authentication failure rather than
+	// revealing that a valid-but-wrong-actor token was presented.
+	ErrNotOwner = errors.New("miauth: actor is not the owner")
 )
 
 type Config struct {
@@ -106,7 +114,7 @@ func (s *Service) ApproveSession(ctx context.Context, routeSessionID string) err
 			return ErrSessionUnavailable
 		}
 
-		ownerActorID, err := ensureOwnerActor(ctx, repos, now)
+		ownerActorID, err := s.ensureOwnerActor(ctx, repos, now)
 		if err != nil {
 			return err
 		}
@@ -121,7 +129,11 @@ func (s *Service) ApproveSession(ctx context.Context, routeSessionID string) err
 	return err
 }
 
-func ensureOwnerActor(ctx context.Context, repos domain.Repos, now time.Time) (string, error) {
+// ensureOwnerActor seeds the initial display name from cfg.OwnerDisplayName
+// only at Owner-row creation time (Issue #23 PR1: OWNER_DISPLAY_NAME is
+// now just that initial value, not an ongoing source of truth — the
+// actors.display_name column is, once POST /api/i/update can change it).
+func (s *Service) ensureOwnerActor(ctx context.Context, repos domain.Repos, now time.Time) (string, error) {
 	owner, err := repos.Actors.GetByType(ctx, domain.ActorOwner)
 	if err == nil {
 		return owner.ID, nil
@@ -129,7 +141,8 @@ func ensureOwnerActor(ctx context.Context, repos domain.Repos, now time.Time) (s
 	if !errors.Is(err, domain.ErrNotFound) {
 		return "", err
 	}
-	owner = domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: now}
+	initialDisplayName := s.cfg.OwnerDisplayName
+	owner = domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: now, DisplayName: &initialDisplayName}
 	if err := repos.Actors.Create(ctx, owner); err != nil {
 		if errors.Is(err, domain.ErrConflict) {
 			existing, getErr := repos.Actors.GetByType(ctx, domain.ActorOwner)
@@ -203,7 +216,7 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 		}
 		result = CheckResult{
 			Token: raw, OwnerActorID: owner.ID, OwnerCreatedAt: owner.CreatedAt,
-			OwnerUsername: s.cfg.OwnerUsername, OwnerDisplayName: s.cfg.OwnerDisplayName,
+			OwnerUsername: s.cfg.OwnerUsername, OwnerDisplayName: displayNameOrEmpty(owner.DisplayName),
 		}
 		return nil
 	})
@@ -247,9 +260,12 @@ type OwnerProfile struct {
 // ever issues local API tokens to the single bound owner (AGENTS.md: no
 // general user login), so any actorID reaching here from
 // httpserver.LocalActorIDFromContext already names the owner actor; this
-// just re-fetches its CreatedAt and layers the configured
-// username/display name on top, the same projection CheckResult carries
-// right after a successful Check.
+// just re-fetches its CreatedAt/display name and layers the configured
+// username on top, the same projection CheckResult carries right after a
+// successful Check. Since Issue #23 PR1, DisplayName comes from the
+// actors row (mutable via UpdateOwnerDisplayName), not from config;
+// Username remains config-sourced permanently (see UpdateOwnerDisplayName's
+// doc comment for why).
 func (s *Service) DescribeOwner(ctx context.Context, actorID string) (OwnerProfile, error) {
 	actor, err := s.repos.Actors.Get(ctx, actorID)
 	if err != nil {
@@ -258,7 +274,73 @@ func (s *Service) DescribeOwner(ctx context.Context, actorID string) (OwnerProfi
 	return OwnerProfile{
 		ActorID:     actor.ID,
 		Username:    s.cfg.OwnerUsername,
-		DisplayName: s.cfg.OwnerDisplayName,
+		DisplayName: displayNameOrEmpty(actor.DisplayName),
 		CreatedAt:   actor.CreatedAt,
 	}, nil
+}
+
+// UpdateOwnerDisplayName is POST /api/i/update's use case (Issue #23
+// PR1). displayName is applied verbatim, including "" to clear it.
+// actorID must already be RequireScope-verified; it is re-checked
+// against the Owner actor type here rather than trusted blindly, so a
+// hypothetical non-owner-bound token (see ErrNotOwner's doc comment)
+// can never reach this write path. There is no equivalent
+// UpdateOwnerUsername: docs/compat/aria-v1.5.11.md's "POST /api/i/update"
+// section records that neither Aria nor the pinned misskey_dart client
+// has any way to send a username field to this endpoint, so
+// OWNER_USERNAME config remains the permanent source of truth for it.
+func (s *Service) UpdateOwnerDisplayName(ctx context.Context, actorID, displayName string) (OwnerProfile, error) {
+	actor, err := s.repos.Actors.Get(ctx, actorID)
+	if err != nil {
+		return OwnerProfile{}, err
+	}
+	if actor.Type != domain.ActorOwner {
+		return OwnerProfile{}, ErrNotOwner
+	}
+	if err := s.repos.Actors.SetDisplayName(ctx, actorID, displayName); err != nil {
+		return OwnerProfile{}, err
+	}
+	return OwnerProfile{
+		ActorID:     actor.ID,
+		Username:    s.cfg.OwnerUsername,
+		DisplayName: displayName,
+		CreatedAt:   actor.CreatedAt,
+	}, nil
+}
+
+// BackfillOwnerDisplayName seeds the Owner actor's display_name from
+// cfg.OwnerDisplayName when the Owner already exists but has never had
+// display_name explicitly set (sql NULL, not ""). Two real paths reach
+// that state: an Owner row bound before Issue #23 PR1's migration 0012
+// added the column, and an Owner row bound by a caller whose Config left
+// OwnerDisplayName unset (cmd/miauthctl performs the actual owner-binding
+// ApproveSession call in production, so its Config must be wired for
+// this to have any effect there). It is a no-op, not an error, if the
+// Owner does not exist yet: ensureOwnerActor seeds it correctly at bind
+// time in that case, and if display_name is already non-nil (including
+// "" from an explicit clear via UpdateOwnerDisplayName), it is left
+// untouched rather than being overwritten back to the config value.
+func (s *Service) BackfillOwnerDisplayName(ctx context.Context) error {
+	owner, err := s.repos.Actors.GetByType(ctx, domain.ActorOwner)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if owner.DisplayName != nil {
+		return nil
+	}
+	return s.repos.Actors.SetDisplayName(ctx, owner.ID, s.cfg.OwnerDisplayName)
+}
+
+// displayNameOrEmpty adapts a domain.Actor.DisplayName (nil until
+// explicitly set) to OwnerProfile/CheckResult's plain-string convention,
+// where "" already means "no display name" to their wire projections
+// (see internal/httpserver's newUserDetailedNotMe).
+func displayNameOrEmpty(dn *string) string {
+	if dn == nil {
+		return ""
+	}
+	return *dn
 }

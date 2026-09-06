@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-message v0.18.2
+	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.58.0
 )
 

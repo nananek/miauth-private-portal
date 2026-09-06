@@ -83,7 +83,10 @@ func run() error {
 		OwnerUsername:    cfg.Auth.OwnerUsername,
 		OwnerDisplayName: cfg.Auth.OwnerDisplayName,
 	})
-	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
+	if err := miauthSvc.BackfillOwnerDisplayName(ctx); err != nil {
+		return fmt.Errorf("backfill owner display name: %w", err)
+	}
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{OwnerUsername: cfg.Auth.OwnerUsername})
 
 	opts := httpserver.Options{
 		Addr:                     cfg.HTTP.Addr(),

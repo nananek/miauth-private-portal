@@ -5,12 +5,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/llmclassify"
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -81,15 +83,46 @@ var implementedEndpoints = []string{
 	"meta",
 	"endpoints",
 	"i",
+	"i/update",
 	"notes/create",
 	"notes/timeline",
 	"notes/show",
 	"notes/conversation",
 	"notes/children",
+	"notes/delete",
+	"notes/reactions/create",
+	"notes/reactions/delete",
+	"notes/reactions",
+	"notes/mentions",
+	"i/notifications",
+	"stats",
 }
 
 func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, implementedEndpoints)
+}
+
+// handleStats handles POST /api/stats (Issue #23 PR2, with reactionsCount
+// added by PR4). It is anonymous and body-independent like
+// handleMeta/handleEndpoints: the pinned Aria/misskey_dart source trace
+// (docs/compat/aria-v1.5.11.md) shows Aria's only call site (the
+// server-info page) always builds a guest/tokenless account for this
+// call, so it never sends an "i" field — this handler must not require
+// one.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	notesCount, err := s.timeline.CountAll(r.Context())
+	if err != nil {
+		s.logger.Error("count all entries failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	reactionsCount, err := s.timeline.CountAllReactions(r.Context())
+	if err != nil {
+		s.logger.Error("count all reactions failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newStatsResponse(notesCount, reactionsCount))
 }
 
 // handleAPII handles POST /api/i. See meDetailed's doc comment for why
@@ -100,6 +133,68 @@ func (s *Server) handleAPII(w http.ResponseWriter, r *http.Request) {
 	owner, err := s.miauth.DescribeOwner(r.Context(), actorID)
 	if err != nil {
 		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, newMeDetailed(owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
+}
+
+// handleAPIIUpdate handles POST /api/i/update (Issue #23 PR1). Only
+// display-name self-edit is implemented: docs/compat/aria-v1.5.11.md's
+// "POST /api/i/update" section records that the pinned misskey_dart
+// IUpdateRequest model has no username field at all, and Aria's profile
+// screen has no username input either, so there is no observed wire
+// path to accept-and-apply a username change (AGENTS.md: do not invent
+// a protocol beyond what a real client is shown to use).
+//
+// Unlike handleNotesCreate's enumerated per-field rejection,
+// IUpdateRequest has 40+ other fields (avatar, description, locked
+// status, mute lists, ...) this issue's Non-goals exclude; naming each
+// one here would risk silently missing one (and getting an exact
+// wire-key name wrong would itself be a guess). Decoding into a raw
+// key set and rejecting anything beyond "i"/"name" rejects all of them
+// correctly without needing to know their exact names.
+func (s *Server) handleAPIIUpdate(w http.ResponseWriter, r *http.Request) {
+	raw := map[string]json.RawMessage{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+			writeInvalidParam(w, "malformed request body")
+			return
+		}
+	}
+	fields := make([]string, 0, len(raw))
+	for field := range raw {
+		if field == "i" || field == "name" {
+			continue
+		}
+		fields = append(fields, field)
+	}
+	if len(fields) > 0 {
+		sort.Strings(fields)
+		writeUnsupportedFeature(w, fields[0])
+		return
+	}
+
+	var name *string
+	if nameRaw, ok := raw["name"]; ok {
+		if err := json.Unmarshal(nameRaw, &name); err != nil {
+			writeInvalidParam(w, "name must be a string")
+			return
+		}
+	}
+	if name == nil {
+		writeInvalidParam(w, "name is required")
+		return
+	}
+
+	actorID := LocalActorIDFromContext(r.Context())
+	owner, err := s.miauth.UpdateOwnerDisplayName(r.Context(), actorID, *name)
+	if err != nil {
+		if errors.Is(err, miauth.ErrNotOwner) {
+			writeAuthenticationFailed(w)
+			return
+		}
+		s.logger.Error("update owner display name failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)
 		return
 	}
@@ -214,7 +309,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: newNote(entry, newUserLiteFromOwner(owner))})
+	createdNote, err := s.projectNote(r.Context(), entry, newUserLiteFromOwner(owner), owner.ActorID)
+	if err != nil {
+		s.logger.Error("project created note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, createdNoteResponse{CreatedNote: createdNote})
 }
 
 // llmReplyJob decides whether posting body should enqueue an
@@ -363,7 +464,13 @@ func (s *Server) handleNotesTimeline(w http.ResponseWriter, r *http.Request) {
 
 	notes := make([]note, 0, len(entries))
 	for _, e := range entries {
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project timeline note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }
@@ -403,7 +510,66 @@ func (s *Server) handleNotesShow(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, newNote(entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner)))
+	n, err := s.projectNote(r.Context(), entry, s.resolveUserLite(r.Context(), entry.AuthorActorID, owner), owner.ActorID)
+	if err != nil {
+		s.logger.Error("project shown note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
+}
+
+type notesDeleteRequest struct {
+	NoteID string `json:"noteId"`
+}
+
+// handleNotesDelete handles POST /api/notes/delete (Issue #23 PR3). Per
+// docs/decisions/0004-note-delete-as-hide.md, delete is mapped onto
+// timeline.Service.SetHidden rather than a true hard delete: the note
+// becomes invisible to every note-reading endpoint (entryVisible), and
+// CountByAuthor's notesCount projection drops, mirroring real Misskey's
+// wire behavior, while the row and any replies survive.
+//
+// Only the owner's own user_post entries are deletable — an unknown ID,
+// an already hidden/archived note, and a non-owner-authored entry (an
+// llm_reply/llm_follow_up/news/mail/system entry) all collapse onto the
+// same NO_SUCH_NOTE response, the uniform denial writeNoSuchNote already
+// documents for notes/show et al., so this endpoint cannot be used to
+// probe which case applies.
+func (s *Server) handleNotesDelete(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[notesDeleteRequest](r)
+	if !ok || req.NoteID == "" {
+		writeInvalidParam(w, "noteId is required")
+		return
+	}
+
+	entry, err := s.timeline.GetEntry(r.Context(), req.NoteID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeNoSuchNote(w)
+			return
+		}
+		s.logger.Error("get note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	if !entryVisible(entry) {
+		writeNoSuchNote(w)
+		return
+	}
+	if entry.Kind != domain.EntryUserPost || entry.AuthorActorID != LocalActorIDFromContext(r.Context()) {
+		writeNoSuchNote(w)
+		return
+	}
+
+	if err := s.timeline.SetHidden(r.Context(), entry.ID, true); err != nil {
+		s.logger.Error("delete note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	// Aria never decodes a typed response here (docs/compat/aria-v1.5.11.md's
+	// POST /api/notes/delete section): any 2xx JSON body is accepted.
+	writeJSON(w, http.StatusOK, struct{}{})
 }
 
 type notesConversationRequest struct {
@@ -473,7 +639,13 @@ func (s *Server) handleNotesConversation(w http.ResponseWriter, r *http.Request)
 		if !entryVisible(e) {
 			continue
 		}
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project conversation note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }
@@ -537,7 +709,13 @@ func (s *Server) handleNotesChildren(w http.ResponseWriter, r *http.Request) {
 
 	notes := make([]note, 0, len(page))
 	for _, e := range page {
-		notes = append(notes, newNote(e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner)))
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project children note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
 	}
 	writeJSON(w, http.StatusOK, notes)
 }

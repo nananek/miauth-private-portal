@@ -198,6 +198,121 @@ func TestHandle_NotModified_RecordsSuccessWithoutCreatingItems(t *testing.T) {
 	}
 }
 
+// TestComposeExternalBody pins Issue #13 AC5's provenance-marker design:
+// an item with a non-empty Title (RSS/Atom today) gets a "[<kind>[:
+// <source display name>]] <title>" header, optionally followed by its
+// ProvenanceURL, folded onto its Body; an item with no Title (every
+// internal/mailfetch item — see FetchedItem's own doc comment) passes
+// through unchanged, since internal/mailfetch already folds its own
+// From/Subject/Date header block into Body itself.
+func TestComposeExternalBody(t *testing.T) {
+	displayName := "Example Blog"
+	provenanceURL := "https://example.com/article"
+
+	tests := []struct {
+		name   string
+		source domain.ExternalSource
+		kind   domain.EntryKind
+		item   FetchedItem
+		want   string
+	}{
+		{
+			name:   "no title passes through unchanged (mail items never set Title)",
+			source: domain.ExternalSource{Kind: "imap"},
+			kind:   domain.EntryMail,
+			item:   FetchedItem{Body: "From: a@example.com\nSubject: Hi\n\nBody"},
+			want:   "From: a@example.com\nSubject: Hi\n\nBody",
+		},
+		{
+			name:   "title with source display name and provenance URL",
+			source: domain.ExternalSource{Kind: "rss", DisplayName: &displayName},
+			kind:   domain.EntryNews,
+			item:   FetchedItem{Title: "Article Title", ProvenanceURL: &provenanceURL, Body: "summary text"},
+			want:   "[news: Example Blog] Article Title\nhttps://example.com/article\n\nsummary text",
+		},
+		{
+			name:   "title without source display name",
+			source: domain.ExternalSource{Kind: "rss"},
+			kind:   domain.EntryNews,
+			item:   FetchedItem{Title: "Article Title", Body: "summary text"},
+			want:   "[news] Article Title\n\nsummary text",
+		},
+		{
+			name:   "title without provenance URL",
+			source: domain.ExternalSource{Kind: "rss", DisplayName: &displayName},
+			kind:   domain.EntryNews,
+			item:   FetchedItem{Title: "Article Title", Body: "summary text"},
+			want:   "[news: Example Blog] Article Title\n\nsummary text",
+		},
+		{
+			name:   "empty source display name treated as absent",
+			source: domain.ExternalSource{Kind: "rss", DisplayName: new(string)},
+			kind:   domain.EntryNews,
+			item:   FetchedItem{Title: "Article Title", Body: "summary text"},
+			want:   "[news] Article Title\n\nsummary text",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := composeExternalBody(tt.source, tt.kind, tt.item); got != tt.want {
+				t.Errorf("composeExternalBody() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandle_RSSItem_StoresComposedBodyWithTitleMarker is
+// TestHandle_Success_CreatesEntriesAndAdvancesCursor's end-to-end
+// counterpart for AC5: it asserts the entry actually persisted by
+// Handle carries the composed provenance-marker body, not the adapter's
+// raw item.Body.
+func TestHandle_RSSItem_StoresComposedBodyWithTitleMarker(t *testing.T) {
+	db := newTestDB(t)
+	displayName := "Example Blog"
+	source := domain.ExternalSource{ID: domain.NewID(), Kind: "rss", URI: "https://example.com/feed.xml", DisplayName: &displayName, CreatedAt: time.Now().UTC()}
+	if err := db.ExternalSources.Create(t.Context(), source); err != nil {
+		t.Fatalf("create external source: %v", err)
+	}
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
+
+	provenanceURL := "https://example.com/article"
+	adapter := &fakeAdapter{kind: "rss", fn: func(ctx context.Context, source domain.ExternalSource, cursor *string) (FetchResult, error) {
+		return FetchResult{
+			Items: []FetchedItem{
+				{ExternalID: "guid-1", DedupeKey: "dedupe-1", Title: "Article Title", ProvenanceURL: &provenanceURL, Body: "summary text"},
+			},
+			NextCursor: `{"etag":"v1"}`,
+		}, nil
+	}}
+
+	svc := NewService(db.Repos, timelineSvc, nil)
+	svc.RegisterAdapter(adapter)
+
+	payload, err := NewJobPayload(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Handle(t.Context(), newTestJob(payload)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	item, err := db.ExternalItems.GetByDedupeKey(t.Context(), "dedupe-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.EntryID == nil {
+		t.Fatal("item was not promoted to an entry")
+	}
+	entry, err := db.Entries.Get(t.Context(), *item.EntryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[news: Example Blog] Article Title\nhttps://example.com/article\n\nsummary text"
+	if entry.Body != want {
+		t.Errorf("entry.Body = %q, want %q", entry.Body, want)
+	}
+}
+
 func TestHandle_MalformedPayloadIsPermanent(t *testing.T) {
 	db := newTestDB(t)
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})

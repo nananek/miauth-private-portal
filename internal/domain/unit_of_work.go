@@ -19,6 +19,9 @@ type Repos struct {
 	Jobs            JobRepository
 	ExternalSources ExternalSourceRepository
 	ExternalItems   ExternalItemRepository
+	Reactions       ReactionRepository
+	Mentions        MentionRepository
+	Notifications   NotificationRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made

@@ -52,7 +52,17 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
-	svc := miauth.NewService(db, db.Repos, miauth.Config{})
+	// Issue #23 PR1: ApproveSession is the trusted-host owner-binding
+	// transition (see its doc comment), and now seeds the Owner actor's
+	// display_name from OwnerDisplayName at creation time. A zero-value
+	// Config here would silently bind every new owner with an empty
+	// display name regardless of OWNER_DISPLAY_NAME, since (unlike
+	// Username) it is no longer read live from Config after bind time.
+	svc := miauth.NewService(db, db.Repos, miauth.Config{
+		ClientCallbacks:  cfg.Auth.AriaClientCallbacks,
+		OwnerUsername:    cfg.Auth.OwnerUsername,
+		OwnerDisplayName: cfg.Auth.OwnerDisplayName,
+	})
 
 	switch args[0] {
 	case "list":

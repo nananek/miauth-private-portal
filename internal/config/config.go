@@ -99,12 +99,20 @@ type AuthConfig struct {
 	// client-supplied callback.
 	AriaClientCallbacks []string
 	// OwnerUsername is the Misskey-compatible username this service
-	// reports for the local owner actor until Issue #5's follow-up adds
-	// self-service profile editing.
+	// reports for the local owner actor. Unlike OwnerDisplayName, this
+	// remains the permanent source of truth: Issue #23 PR1's source
+	// trace (docs/compat/aria-v1.5.11.md's "POST /api/i/update" section)
+	// found that neither Aria nor the pinned misskey_dart client has any
+	// way to send a username field, so self-service username editing was
+	// never added.
 	OwnerUsername string
 	// OwnerDisplayName is the optional display name reported as the
 	// owner's UserDetailedNotMe.name. Empty means null (unset), matching
-	// Misskey's own nullable name field.
+	// Misskey's own nullable name field. Since Issue #23 PR1, this is
+	// only the initial value copied into the actors.display_name column
+	// the first time the owner actor is created; POST /api/i/update
+	// changes the DB value from then on, and this config value is never
+	// consulted again.
 	OwnerDisplayName string
 }
 

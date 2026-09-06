@@ -307,6 +307,46 @@ func TestCreateGeneratedReply_CreatesEntryAndCompletesGeneration(t *testing.T) {
 	}
 }
 
+// TestCreateGeneratedReply_BodyNeverGetsWireMarker pins Issue #13 AC5's
+// design constraint: the "[reply]"/"[follow-up question]" markers Aria's
+// timeline needs to tell generated replies and follow-up questions apart
+// (internal/httpserver's wireText) are a wire-projection concern only.
+// Neither the domain Entry.Body nor the LLMGeneration.Body audit record
+// may ever carry them, or the generation log would stop reflecting what
+// the provider actually produced.
+func TestCreateGeneratedReply_BodyNeverGetsWireMarker(t *testing.T) {
+	for _, kind := range []domain.EntryKind{domain.EntryLLMReply, domain.EntryLLMFollowUp} {
+		t.Run(string(kind), func(t *testing.T) {
+			ts := newTestService(t)
+			root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gen := newTestGeneration(root.ID, domain.GenerationReply, ts.clock.Now())
+			if err := ts.db.Generations.Create(t.Context(), gen); err != nil {
+				t.Fatal(err)
+			}
+
+			const rawBody = "plain generated text, no marker"
+			reply, err := ts.CreateGeneratedReply(t.Context(), root.ID, kind, rawBody, gen.ID, nil, nil)
+			if err != nil {
+				t.Fatalf("CreateGeneratedReply: %v", err)
+			}
+			if reply.Body != rawBody {
+				t.Errorf("reply.Body = %q, want unmarked %q", reply.Body, rawBody)
+			}
+
+			stored, err := ts.db.Generations.Get(t.Context(), gen.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Body == nil || *stored.Body != rawBody {
+				t.Errorf("generation Body = %v, want unmarked %q", stored.Body, rawBody)
+			}
+		})
+	}
+}
+
 func TestCreateGeneratedReply_RejectsNonAssistantKind(t *testing.T) {
 	ts := newTestService(t)
 	root, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "root", nil)
@@ -737,16 +777,28 @@ func TestGetEntry_ReturnsArchivedAndHiddenWithoutFiltering(t *testing.T) {
 	}
 }
 
-func TestCountByAuthor_CountsAcrossThreadsIncludingHidden(t *testing.T) {
+// TestCountByAuthor_CountsAcrossThreadsExcludingHiddenAndArchived pins
+// Issue #23 PR3's (docs/decisions/0004-note-delete-as-hide.md) change to
+// CountByAuthor: since /api/notes/delete maps onto SetHidden, notesCount
+// must decrement for a deleted note, matching real Misskey's
+// delete-decrements-notesCount wire behavior.
+func TestCountByAuthor_CountsAcrossThreadsExcludingHiddenAndArchived(t *testing.T) {
 	ts := newTestService(t)
 	first, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "one", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "two", nil); err != nil {
+	second, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "two", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "three", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := ts.SetHidden(t.Context(), first.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.SetArchived(t.Context(), second.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -754,8 +806,8 @@ func TestCountByAuthor_CountsAcrossThreadsIncludingHidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("CountByAuthor = %d, want 2", n)
+	if n != 1 {
+		t.Errorf("CountByAuthor = %d, want 1 (hidden/archived entries excluded)", n)
 	}
 }
 

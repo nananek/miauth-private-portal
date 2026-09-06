@@ -30,7 +30,11 @@ type userLite struct {
 // so would cost an extra query per note on every timeline/conversation
 // page, and the field is not part of the pinned parser's required
 // minimum — Aria's thread view calls /api/notes/children directly rather
-// than relying on this count (see docs/compat/aria-v1.5.11.md).
+// than relying on this count (see docs/compat/aria-v1.5.11.md). Reactions
+// and MyReaction default to empty/nil from newNote itself (no reaction
+// data yet); (*Server).projectNote fills them with real data from
+// internal/timeline (Issue #23 PR4) — see its doc comment for why that
+// population is split out of this pure conversion function.
 type note struct {
 	ID             string            `json:"id"`
 	CreatedAt      string            `json:"createdAt"`
@@ -45,6 +49,7 @@ type note struct {
 	RenoteCount    int               `json:"renoteCount"`
 	RepliesCount   int               `json:"repliesCount"`
 	Reactions      map[string]int    `json:"reactions"`
+	MyReaction     *string           `json:"myReaction"`
 	Emojis         map[string]string `json:"emojis"`
 	FileIDs        []string          `json:"fileIds"`
 	Files          []any             `json:"files"`
@@ -58,7 +63,7 @@ type note struct {
 // or an actor-type lookup this package deliberately keeps out of the pure
 // wire-conversion helpers.
 func newNote(e domain.Entry, user userLite) note {
-	text := e.Body
+	text := wireText(e)
 	return note{
 		ID:             e.ID,
 		CreatedAt:      e.CreatedAt.UTC().Format(time.RFC3339),
@@ -73,11 +78,55 @@ func newNote(e domain.Entry, user userLite) note {
 		RenoteCount:    0,
 		RepliesCount:   0,
 		Reactions:      map[string]int{},
+		MyReaction:     nil,
 		Emojis:         map[string]string{},
 		FileIDs:        []string{},
 		Files:          []any{},
 		VisibleUserIDs: []string{},
 		Mentions:       []string{},
+	}
+}
+
+// projectNote builds e's wire Note, including this deployment's real
+// reaction data (Issue #23 PR4: note.Reactions/note.myReaction, both
+// otherwise fixed at empty/nil by newNote). It is a Server method rather
+// than folded into newNote itself so newNote stays a pure, repository-free
+// conversion function noteapi_wire_test.go can exercise without a
+// timeline service. viewerActorID is always the requesting owner (the
+// only local actor RequireScope ever authenticates), used to resolve
+// which reaction, if any, is "mine".
+func (s *Server) projectNote(ctx context.Context, e domain.Entry, user userLite, viewerActorID string) (note, error) {
+	n := newNote(e, user)
+	counts, err := s.timeline.ReactionCounts(ctx, e.ID)
+	if err != nil {
+		return note{}, err
+	}
+	n.Reactions = counts
+	my, err := s.timeline.MyReaction(ctx, e.ID, viewerActorID)
+	if err != nil {
+		return note{}, err
+	}
+	n.MyReaction = my
+	return n, nil
+}
+
+// wireText composes the wire-visible note text. Only llm_reply/
+// llm_follow_up get a fixed distinguishing marker: Misskey's Note has
+// no "kind" field, so this is the only way Aria's timeline can tell a
+// generated reply from a generated follow-up question apart. This is
+// presentation-only — domain.Entry.Body and LLMGeneration.Body (the
+// generation audit record) are never touched, matching AGENTS.md's
+// "keep wire projections separate from domain models". EntryUserPost is
+// deliberately excluded: user-authored text is authoritative and must
+// never be altered (AGENTS.md).
+func wireText(e domain.Entry) string {
+	switch e.Kind {
+	case domain.EntryLLMReply:
+		return "[reply]\n\n" + e.Body
+	case domain.EntryLLMFollowUp:
+		return "[follow-up question]\n\n" + e.Body
+	default:
+		return e.Body
 	}
 }
 
@@ -130,6 +179,44 @@ type meDetailed struct {
 	AlwaysMarkNsfw     bool `json:"alwaysMarkNsfw"`
 	CarefulBot         bool `json:"carefulBot"`
 	AutoAcceptFollowed bool `json:"autoAcceptFollowed"`
+}
+
+// statsResponse is the Misskey-compatible projection POST /api/stats
+// returns (Issue #23 PR2). The pinned misskey_dart StatsResponse parser
+// treats every field as optional, so omitting a field this service has
+// no concept for would decode identically to sending it as 0 — this
+// service sends explicit values throughout, matching newNote's
+// always-present-default convention for fields with no local concept
+// (federation/drive), rather than omitting them.
+type statsResponse struct {
+	NotesCount         int `json:"notesCount"`
+	OriginalNotesCount int `json:"originalNotesCount"`
+	UsersCount         int `json:"usersCount"`
+	OriginalUsersCount int `json:"originalUsersCount"`
+	ReactionsCount     int `json:"reactionsCount"`
+	Instances          int `json:"instances"`
+	DriveUsageLocal    int `json:"driveUsageLocal"`
+	DriveUsageRemote   int `json:"driveUsageRemote"`
+}
+
+// newStatsResponse builds statsResponse from notesCount (every entry
+// this deployment has ever stored, regardless of author or archived/
+// hidden state — see EntryRepository.CountAll) and reactionsCount (every
+// reaction this deployment has ever stored, across every entry — see
+// ReactionRepository.CountAll, added by Issue #23 PR4; previously always
+// 0 before that repository existed). usersCount/originalUsersCount are
+// always 1: the single owner is this deployment's only registered user,
+// and there is no federation to tell local from remote users apart.
+// instances/driveUsageLocal/driveUsageRemote are always 0: this service
+// has no federation and no drive.
+func newStatsResponse(notesCount, reactionsCount int) statsResponse {
+	return statsResponse{
+		NotesCount:         notesCount,
+		OriginalNotesCount: notesCount,
+		UsersCount:         1,
+		OriginalUsersCount: 1,
+		ReactionsCount:     reactionsCount,
+	}
 }
 
 func newMeDetailed(owner miauth.OwnerProfile, notesCount int) meDetailed {
