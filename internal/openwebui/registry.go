@@ -87,6 +87,14 @@ type RegistryConfig struct {
 	// identity Seed reconciles a model row on, so changing it registers
 	// a different model rather than renaming this one.
 	DefaultModelID string
+	// GenerationEnabled mirrors OPENWEBUI_GENERATION_ENABLED. Issue #52
+	// creates the workspace column and the write this reconciles onto it
+	// but has no bridge to gate yet (Issue #53's); Seed still reconciles
+	// it on every run so that flipping the config value and restarting
+	// takes effect the same way every other OpenWebUI field does,
+	// instead of needing its own separate startup path once #53 adds
+	// one.
+	GenerationEnabled bool
 }
 
 // Registry owns the Open WebUI workspace/model registry: seeding it from
@@ -124,7 +132,9 @@ func NewRegistry(uow domain.UnitOfWork, repos domain.Repos, cfg RegistryConfig, 
 // deactivate its models) — this deployment supports exactly one enabled
 // workspace, so a re-seed after OPENWEBUI_BASE_URL changes must not
 // leave the previous instance's workspace enabled alongside the new
-// one; and enable the workspace.
+// one; enable the workspace; and reconcile GenerationEnabled onto it
+// (Issue #53's gate — Issue #52 has no bridge to gate yet, but Seed
+// still keeps the stored value in step with config on every run).
 //
 // Two identities are deliberately never rewritten by a re-run: the
 // workspace id and the model's actor id. That is the roadmap's stable
@@ -164,6 +174,9 @@ func (r *Registry) Seed(ctx context.Context) error {
 		}
 		if err := repos.OpenWebUIWorkspaces.SetEnabled(ctx, workspace.ID, true, now); err != nil {
 			return fmt.Errorf("enable workspace: %w", err)
+		}
+		if err := repos.OpenWebUIWorkspaces.SetGenerationEnabled(ctx, workspace.ID, r.cfg.GenerationEnabled, now); err != nil {
+			return fmt.Errorf("set generation enabled: %w", err)
 		}
 		return nil
 	})

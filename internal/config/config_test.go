@@ -76,9 +76,13 @@ func defaultIMAPConfig() IMAPConfig {
 
 func defaultOpenWebUIConfig() OpenWebUIConfig {
 	return OpenWebUIConfig{
-		Enabled:       false,
-		WorkspaceName: "Open WebUI",
-		ModelSlug:     "model",
+		Enabled:            false,
+		WorkspaceName:      "Open WebUI",
+		ModelSlug:          "model",
+		Timeout:            120 * time.Second,
+		MaxResponseBytes:   4_194_304,
+		MaxRequestBytes:    1_048_576,
+		MaxContextMessages: 100,
 	}
 }
 
@@ -1380,15 +1384,19 @@ func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := OpenWebUIConfig{
-		Enabled:          true,
-		BaseURL:          "https://openwebui.example.net",
-		AllowedOrigins:   []string{"https://openwebui.example.net"},
-		APIKey:           "sk-openwebui-secret",
-		WorkspaceName:    "Home Instance",
-		DefaultModelID:   "gpt-oss:20b",
-		ModelDisplayName: "GPT-OSS 20B",
-		ModelSlug:        "gpt_oss",
-		PresentationHost: "openwebui.example.net",
+		Enabled:            true,
+		BaseURL:            "https://openwebui.example.net",
+		AllowedOrigins:     []string{"https://openwebui.example.net"},
+		APIKey:             "sk-openwebui-secret",
+		WorkspaceName:      "Home Instance",
+		DefaultModelID:     "gpt-oss:20b",
+		ModelDisplayName:   "GPT-OSS 20B",
+		ModelSlug:          "gpt_oss",
+		PresentationHost:   "openwebui.example.net",
+		Timeout:            120 * time.Second,
+		MaxResponseBytes:   4_194_304,
+		MaxRequestBytes:    1_048_576,
+		MaxContextMessages: 100,
 	}
 	if !reflect.DeepEqual(cfg.OpenWebUI, want) {
 		t.Errorf("OpenWebUI = %+v, want %+v", cfg.OpenWebUI, want)
@@ -1485,6 +1493,85 @@ func TestLoad_OpenWebUIAcceptsMultipleAllowedOrigins(t *testing.T) {
 	want := []string{"https://openwebui.example.net", "https://openwebui.tail1a2b3c.ts.net"}
 	if !reflect.DeepEqual(cfg.OpenWebUI.AllowedOrigins, want) {
 		t.Errorf("AllowedOrigins = %v, want %v", cfg.OpenWebUI.AllowedOrigins, want)
+	}
+}
+
+// TestLoad_OpenWebUIAllowedOriginsTrailingSlashIsNormalized is Issue #52's
+// handoff item 4: OPENWEBUI_BASE_URL is right-trimmed of "/" (see its own
+// parse line), but OPENWEBUI_ALLOWED_ORIGINS was not, so
+// "https://x.example.net" and "https://x.example.net/" would read as
+// different origins to validateOpenWebUIBaseURL's exact-match membership
+// check even though a human configuring both would expect them to agree.
+func TestLoad_OpenWebUIAllowedOriginsTrailingSlashIsNormalized(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIBaseURL:        "https://openwebui.example.net",
+		KeyOpenWebUIAllowedOrigins: "https://openwebui.example.net/",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://openwebui.example.net"}
+	if !reflect.DeepEqual(cfg.OpenWebUI.AllowedOrigins, want) {
+		t.Errorf("AllowedOrigins = %v, want %v (trailing slash stripped)", cfg.OpenWebUI.AllowedOrigins, want)
+	}
+}
+
+// TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled backs D-8/§4:
+// OPENWEBUI_GENERATION_ENABLED is a plain bool with no dependency check of
+// its own, the same shape LLM_CLASSIFICATION_ENABLED has relative to
+// LLM_ENABLED — it is meaningless while OPENWEBUI_ENABLED=false, but
+// setting it anyway must not fail startup.
+func TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(
+		validAuthEnv(),
+		map[string]string{KeyAppEnv: "development", KeyOpenWebUIGenerationEnabled: "true"},
+	))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.OpenWebUI.GenerationEnabled {
+		t.Error("GenerationEnabled = false, want true")
+	}
+	if cfg.OpenWebUI.Enabled {
+		t.Error("Enabled should stay false: OPENWEBUI_ENABLED was never set")
+	}
+
+	def, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{KeyAppEnv: "development"}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if def.OpenWebUI.GenerationEnabled {
+		t.Error("GenerationEnabled default = true, want false")
+	}
+}
+
+// TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled covers §4's five
+// client-side bounds: each must reject an out-of-range value once
+// OPENWEBUI_ENABLED=true (mirroring how RSS/IMAP's analogous byte/count
+// bounds are checked), and OPENWEBUI_TIMEOUT must reject a non-positive
+// duration the same way LLM_TIMEOUT does.
+func TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"timeout not positive", KeyOpenWebUITimeout, "0s"},
+		{"max response bytes below floor", KeyOpenWebUIMaxResponseBytes, "1"},
+		{"max request bytes below floor", KeyOpenWebUIMaxRequestBytes, "0"},
+		{"max context messages below floor", KeyOpenWebUIMaxContextMessages, "0"},
+		{"max context messages above ceiling", KeyOpenWebUIMaxContextMessages, "1001"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadWithOpenWebUI(t, map[string]string{tt.key: tt.val})
+			if err == nil {
+				t.Fatalf("%s=%s should be rejected", tt.key, tt.val)
+			}
+			if !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("error %q does not name %s", err.Error(), tt.key)
+			}
+		})
 	}
 }
 

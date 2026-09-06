@@ -319,6 +319,39 @@ type OpenWebUIConfig struct {
 	// null means "local to this service", so reusing the local host for
 	// a remote-presented actor would make the two indistinguishable.
 	PresentationHost string
+
+	// The fields below are Issue #53's (OWUI-B) client-side bounds and
+	// generation gate. They are parsed and validated from this PR
+	// (Issue #53 PR1) on, but nothing in this service reads them yet: no
+	// bridge, job, or provider adapter exists until Issue #53's later
+	// PRs build one.
+
+	// GenerationEnabled gates outbound generation specifically,
+	// independent of Enabled, the same "sub-flag" shape
+	// LLMConfig.ClassificationEnabled uses relative to LLMConfig.Enabled.
+	// It is meaningless while Enabled is false and is never validated or
+	// required in that case: a disabled deployment must not fail startup
+	// over a generation setting it will never read.
+	GenerationEnabled bool
+	// Timeout bounds a single HTTP call Issue #53's adapter makes to
+	// BaseURL. Buffered (non-streaming) generation can run considerably
+	// longer than LLMConfig.Timeout's default, hence the larger default
+	// here.
+	Timeout time.Duration
+	// MaxResponseBytes bounds how much of a single response the adapter
+	// reads into memory. GET /api/v1/chats/{id} returns the whole chat,
+	// not just one message, so this is deliberately larger than
+	// LLMConfig's analogous bound.
+	MaxResponseBytes int64
+	// MaxRequestBytes bounds the outbound request body size. Exceeding
+	// it fails the turn closed rather than truncating the conversation
+	// context silently sent to the model.
+	MaxRequestBytes int64
+	// MaxContextMessages bounds how many prior-turn messages (including
+	// the new one) a single request may carry, independent of
+	// MaxRequestBytes: a byte bound alone would let a thread of many
+	// short messages slip through uncapped.
+	MaxContextMessages int
 }
 
 // ModelDisplayNameOrDefault returns ModelDisplayName, falling back to
@@ -489,6 +522,14 @@ const (
 	imapMaxMessageBytesMin                           = 1
 	imapSnippetMaxCharsMin, imapSnippetMaxCharsMax   = 1, 100_000
 	imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax = 1, 1_000_000
+
+	// openWebUIMaxResponseBytesMin is higher than RSS/IMAP's analogous
+	// floors: GET /api/v1/chats/{id} returns the whole chat, so a bound
+	// too small to hold even a short conversation is not a usable
+	// setting to allow at all.
+	openWebUIMaxResponseBytesMin                                   = 65_536
+	openWebUIMaxRequestBytesMin                                    = 1
+	openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax = 1, 1000
 )
 
 // imapAllowedTLSModes is the single source of truth for IMAP_TLS_MODE:
@@ -580,7 +621,12 @@ func parse(values map[string]string) (Config, []FieldError) {
 
 	cfg.OpenWebUI.Enabled = parseOptionalBool(values, KeyOpenWebUIEnabled, false, &errs)
 	cfg.OpenWebUI.BaseURL = strings.TrimRight(parseOptionalString(values, KeyOpenWebUIBaseURL, ""), "/")
-	cfg.OpenWebUI.AllowedOrigins = splitOptionalURLList(values, KeyOpenWebUIAllowedOrigins)
+	// Each entry is right-trimmed the same way BaseURL is, so
+	// "https://x.example.net/" and "https://x.example.net" name the same
+	// allowlist entry: validateOpenWebUIBaseURL's exact-match membership
+	// check would otherwise reject a base URL and an origin that a human
+	// would read as identical.
+	cfg.OpenWebUI.AllowedOrigins = trimRightEach(splitOptionalURLList(values, KeyOpenWebUIAllowedOrigins), "/")
 	cfg.OpenWebUI.APIKey = parseOptionalString(values, KeyOpenWebUIAPIKey, "")
 	cfg.OpenWebUI.WorkspaceName = parseOptionalString(values, KeyOpenWebUIWorkspaceName, "Open WebUI")
 	// Trimmed but otherwise untouched: the provider's model id is opaque
@@ -589,6 +635,11 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.OpenWebUI.ModelDisplayName = parseOptionalString(values, KeyOpenWebUIModelDisplayName, "")
 	cfg.OpenWebUI.ModelSlug = parseOptionalString(values, KeyOpenWebUIModelSlug, "model")
 	cfg.OpenWebUI.PresentationHost = parseOptionalString(values, KeyOpenWebUIPresentationHost, "")
+	cfg.OpenWebUI.GenerationEnabled = parseOptionalBool(values, KeyOpenWebUIGenerationEnabled, false, &errs)
+	cfg.OpenWebUI.Timeout = parseOptionalDuration(values, KeyOpenWebUITimeout, 120*time.Second, &errs)
+	cfg.OpenWebUI.MaxResponseBytes = parseOptionalInt64(values, KeyOpenWebUIMaxResponseBytes, 4_194_304, openWebUIMaxResponseBytesMin, &errs)
+	cfg.OpenWebUI.MaxRequestBytes = parseOptionalInt64(values, KeyOpenWebUIMaxRequestBytes, 1_048_576, openWebUIMaxRequestBytesMin, &errs)
+	cfg.OpenWebUI.MaxContextMessages = parseOptionalInt(values, KeyOpenWebUIMaxContextMessages, 100, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax, &errs)
 
 	return cfg, errs
 }
@@ -740,6 +791,10 @@ func (c Config) Validate() error {
 		}
 		validateOpenWebUIModelSlug(&errs, KeyOpenWebUIModelSlug, c.OpenWebUI.ModelSlug, c.Auth.OwnerUsername)
 		validateOpenWebUIPresentationHost(&errs, KeyOpenWebUIPresentationHost, c.OpenWebUI.PresentationHost, c.Auth.LocalOrigin)
+		validatePositiveDuration(&errs, KeyOpenWebUITimeout, c.OpenWebUI.Timeout)
+		validateInt64Min(&errs, KeyOpenWebUIMaxResponseBytes, c.OpenWebUI.MaxResponseBytes, openWebUIMaxResponseBytesMin)
+		validateInt64Min(&errs, KeyOpenWebUIMaxRequestBytes, c.OpenWebUI.MaxRequestBytes, openWebUIMaxRequestBytesMin)
+		validateIntBounds(&errs, KeyOpenWebUIMaxContextMessages, c.OpenWebUI.MaxContextMessages, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax)
 	}
 
 	if c.Env == EnvProduction {
@@ -845,6 +900,12 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIModelDisplayName: c.OpenWebUI.ModelDisplayName,
 		KeyOpenWebUIModelSlug:        c.OpenWebUI.ModelSlug,
 		KeyOpenWebUIPresentationHost: c.OpenWebUI.PresentationHost,
+
+		KeyOpenWebUIGenerationEnabled:  strconv.FormatBool(c.OpenWebUI.GenerationEnabled),
+		KeyOpenWebUITimeout:            c.OpenWebUI.Timeout.String(),
+		KeyOpenWebUIMaxResponseBytes:   strconv.FormatInt(c.OpenWebUI.MaxResponseBytes, 10),
+		KeyOpenWebUIMaxRequestBytes:    strconv.FormatInt(c.OpenWebUI.MaxRequestBytes, 10),
+		KeyOpenWebUIMaxContextMessages: strconv.Itoa(c.OpenWebUI.MaxContextMessages),
 	}
 }
 
@@ -1104,6 +1165,21 @@ func splitOptionalURLList(values map[string]string, key string) []string {
 		list[i] = strings.TrimSpace(p)
 	}
 	return list
+}
+
+// trimRightEach returns a new slice with cutset right-trimmed from every
+// entry, leaving a nil list nil. Used by OPENWEBUI_ALLOWED_ORIGINS so a
+// trailing slash there does not make an otherwise-identical origin fail
+// OPENWEBUI_BASE_URL's exact-match membership check.
+func trimRightEach(list []string, cutset string) []string {
+	if list == nil {
+		return nil
+	}
+	out := make([]string, len(list))
+	for i, v := range list {
+		out[i] = strings.TrimRight(v, cutset)
+	}
+	return out
 }
 
 // validateRSSFeedURLs checks each RSS_FEED_URLS entry is an absolute

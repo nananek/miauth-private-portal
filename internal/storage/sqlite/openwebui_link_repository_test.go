@@ -1006,3 +1006,240 @@ func TestOpenWebUITurnLinkRepository_TombstoneIsSingleUse(t *testing.T) {
 		t.Errorf("Tombstone on an unknown turn error = %v, want ErrConflict", err)
 	}
 }
+
+// TestOpenWebUIConversationLinkRepository_MarkReadyPinsToTheAlreadyStoredRemoteChat
+// backs Issue #52's handoff item 1: once a link has recorded a
+// remote_chat_id, MarkReady may only confirm it onto that same chat again
+// (the owner-recovery path an ambiguous link with a partial creation
+// result takes), never silently switch it to a different one.
+func TestOpenWebUIConversationLinkRepository_MarkReadyPinsToTheAlreadyStoredRemoteChat(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+
+	// A pending link with no remote_chat_id yet accepts any chat id: the
+	// ordinary creation-confirmed path.
+	fresh := f.claim(t, db, "branch-fresh", testTime)
+	if err := db.OpenWebUILinks.MarkReady(t.Context(), fresh.ID, "chat-any", nil, testTime.Add(time.Minute)); err != nil {
+		t.Fatalf("MarkReady on a link with no stored remote chat: %v", err)
+	}
+
+	// A link that already recorded "chat-a" (via an earlier MarkReady,
+	// then frozen back to ambiguous) may be confirmed onto "chat-a"
+	// again, but not onto "chat-b".
+	pinned := f.claim(t, db, "branch-pinned", testTime.Add(2*time.Minute))
+	readyAt := testTime.Add(3 * time.Minute)
+	if err := db.OpenWebUILinks.MarkReady(t.Context(), pinned.ID, "chat-a", nil, readyAt); err != nil {
+		t.Fatalf("initial MarkReady: %v", err)
+	}
+	setUpLinkAmbiguous(t, db, pinned.ID)
+
+	if err := db.OpenWebUILinks.MarkReady(t.Context(), pinned.ID, "chat-b", nil, testTime.Add(4*time.Minute)); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("MarkReady onto a different remote chat error = %v, want ErrConflict", err)
+	}
+	stillAmbiguous, err := db.OpenWebUILinks.Get(t.Context(), pinned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillAmbiguous.State != domain.LinkAmbiguous || stillAmbiguous.RemoteChatID == nil || *stillAmbiguous.RemoteChatID != "chat-a" {
+		t.Errorf("link after the rejected MarkReady = %+v, want unchanged ambiguous/chat-a", stillAmbiguous)
+	}
+
+	if err := db.OpenWebUILinks.MarkReady(t.Context(), pinned.ID, "chat-a", nil, testTime.Add(5*time.Minute)); err != nil {
+		t.Errorf("MarkReady onto the same already-stored remote chat: %v", err)
+	}
+	confirmed, err := db.OpenWebUILinks.Get(t.Context(), pinned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.State != domain.LinkReady {
+		t.Errorf("State = %q after confirming the same chat, want %q", confirmed.State, domain.LinkReady)
+	}
+}
+
+// TestOpenWebUIConversationLinkRepository_List backs owner-facing
+// recovery tooling's need to enumerate links by state without a thread
+// id, unlike every other lookup in this file.
+func TestOpenWebUIConversationLinkRepository_List(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+
+	pending := f.claim(t, db, "branch-pending", testTime)
+	ambiguous := f.claim(t, db, "branch-ambiguous", testTime.Add(time.Minute))
+	setUpLinkAmbiguous(t, db, ambiguous.ID)
+	ready := f.claim(t, db, "branch-ready", testTime.Add(2*time.Minute))
+	setUpLinkReady(t, db, ready.ID)
+
+	all, err := db.OpenWebUILinks.List(t.Context(), domain.OpenWebUILinkFilter{})
+	if err != nil {
+		t.Fatalf("List(no filter): %v", err)
+	}
+	wantAll := []string{pending.ID, ambiguous.ID, ready.ID}
+	if len(all) != len(wantAll) {
+		t.Fatalf("List(no filter) returned %d links, want %d", len(all), len(wantAll))
+	}
+	for i, id := range wantAll {
+		if all[i].ID != id {
+			t.Errorf("List(no filter)[%d].ID = %q, want %q", i, all[i].ID, id)
+		}
+	}
+
+	ambiguousState := domain.LinkAmbiguous
+	byState, err := db.OpenWebUILinks.List(t.Context(), domain.OpenWebUILinkFilter{State: &ambiguousState})
+	if err != nil {
+		t.Fatalf("List(state=ambiguous): %v", err)
+	}
+	if len(byState) != 1 || byState[0].ID != ambiguous.ID {
+		t.Fatalf("List(state=ambiguous) = %+v, want only %q", byState, ambiguous.ID)
+	}
+
+	threadID := f.root.ThreadID
+	byThread, err := db.OpenWebUILinks.List(t.Context(), domain.OpenWebUILinkFilter{ThreadID: &threadID})
+	if err != nil {
+		t.Fatalf("List(thread): %v", err)
+	}
+	if len(byThread) != len(wantAll) {
+		t.Errorf("List(thread) returned %d links, want %d", len(byThread), len(wantAll))
+	}
+
+	unknownThread := "does-not-exist"
+	empty, err := db.OpenWebUILinks.List(t.Context(), domain.OpenWebUILinkFilter{ThreadID: &unknownThread})
+	if err != nil {
+		t.Fatalf("List(unknown thread): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("List(unknown thread) returned %d links, want 0", len(empty))
+	}
+
+	limited, err := db.OpenWebUILinks.List(t.Context(), domain.OpenWebUILinkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("List(limit=1): %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != pending.ID {
+		t.Fatalf("List(limit=1) = %+v, want only the first link %q", limited, pending.ID)
+	}
+}
+
+// TestOpenWebUITurnLinkRepository_BeginAttempt backs ADR-0005 D-3: the
+// attempt count and last_attempt_at must be durably recorded before a
+// provider call is made, so a crash or lease expiry afterward is
+// distinguishable, on the next run, from a turn that never attempted
+// anything.
+func TestOpenWebUITurnLinkRepository_BeginAttempt(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+	l := f.claim(t, db, "branch-1", testTime)
+	turn := mustCreateTurn(t, db, l.ID, l.BranchID, f.root, "request-1", testTime)
+
+	at := testTime.Add(time.Minute)
+	if err := db.OpenWebUITurnLinks.BeginAttempt(t.Context(), turn.ID, 1, at); err != nil {
+		t.Fatalf("BeginAttempt: %v", err)
+	}
+	got, err := db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Attempt != 1 {
+		t.Errorf("Attempt = %d, want 1", got.Attempt)
+	}
+	if got.LastAttemptAt == nil || !got.LastAttemptAt.Equal(at) {
+		t.Errorf("LastAttemptAt = %v, want %v", got.LastAttemptAt, at)
+	}
+	if got.Status != domain.TurnPending {
+		t.Errorf("Status = %q, want unchanged %q: BeginAttempt records only the attempt", got.Status, domain.TurnPending)
+	}
+
+	if err := db.OpenWebUITurnLinks.BeginAttempt(t.Context(), "does-not-exist", 1, at); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("BeginAttempt on an unknown turn error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestOpenWebUITurnLinkRepository_RecordOutcome covers what RecordOutcome
+// writes together (status, failure category, usage, finish reason) and
+// completed_at's two rules: it is set only for a terminal status, and a
+// later terminal write overwrites it rather than keeping the first one
+// (unlike a link's ready_at).
+func TestOpenWebUITurnLinkRepository_RecordOutcome(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+	l := f.claim(t, db, "branch-1", testTime)
+	turn := mustCreateTurn(t, db, l.ID, l.BranchID, f.root, "request-1", testTime)
+
+	// TurnPending is the only non-terminal status, so it is the one that
+	// must leave completed_at unset.
+	pendingAt := testTime.Add(time.Minute)
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), turn.ID, domain.TurnOutcomeRecord{
+		Status: domain.TurnPending,
+	}, pendingAt); err != nil {
+		t.Fatalf("RecordOutcome(pending): %v", err)
+	}
+	got, err := db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("CompletedAt after a non-terminal RecordOutcome = %v, want nil", got.CompletedAt)
+	}
+
+	firstTerminalAt := testTime.Add(2 * time.Minute)
+	authFailed := domain.FailureCategoryAuthFailed
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), turn.ID, domain.TurnOutcomeRecord{
+		Status:          domain.TurnAuthFailed,
+		FailureCategory: &authFailed,
+	}, firstTerminalAt); err != nil {
+		t.Fatalf("RecordOutcome(auth_failed): %v", err)
+	}
+	got, err = db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.TurnAuthFailed {
+		t.Errorf("Status = %q, want %q", got.Status, domain.TurnAuthFailed)
+	}
+	if got.FailureCategory == nil || *got.FailureCategory != domain.FailureCategoryAuthFailed {
+		t.Errorf("FailureCategory = %v, want %q", got.FailureCategory, domain.FailureCategoryAuthFailed)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(firstTerminalAt) {
+		t.Errorf("CompletedAt = %v, want %v", got.CompletedAt, firstTerminalAt)
+	}
+
+	// A later terminal write (owner recovery resolving an earlier
+	// ambiguous/failed outcome to succeeded) overwrites both the status
+	// and completed_at, and clears the failure category by omitting it.
+	secondTerminalAt := testTime.Add(3 * time.Minute)
+	promptTokens, completionTokens := 12, 34
+	finishReason := "stop"
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), turn.ID, domain.TurnOutcomeRecord{
+		Status:           domain.TurnSucceeded,
+		PromptTokens:     &promptTokens,
+		CompletionTokens: &completionTokens,
+		FinishReason:     &finishReason,
+	}, secondTerminalAt); err != nil {
+		t.Fatalf("RecordOutcome(succeeded): %v", err)
+	}
+	got, err = db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.TurnSucceeded {
+		t.Errorf("Status = %q, want %q", got.Status, domain.TurnSucceeded)
+	}
+	if got.FailureCategory != nil {
+		t.Errorf("FailureCategory = %v, want nil after a write that named none", got.FailureCategory)
+	}
+	if got.PromptTokens == nil || *got.PromptTokens != promptTokens {
+		t.Errorf("PromptTokens = %v, want %d", got.PromptTokens, promptTokens)
+	}
+	if got.CompletionTokens == nil || *got.CompletionTokens != completionTokens {
+		t.Errorf("CompletionTokens = %v, want %d", got.CompletionTokens, completionTokens)
+	}
+	if got.FinishReason == nil || *got.FinishReason != finishReason {
+		t.Errorf("FinishReason = %v, want %q", got.FinishReason, finishReason)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(secondTerminalAt) {
+		t.Errorf("CompletedAt = %v, want the later %v, not the first terminal write", got.CompletedAt, secondTerminalAt)
+	}
+
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), "does-not-exist", domain.TurnOutcomeRecord{Status: domain.TurnFailed}, secondTerminalAt); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("RecordOutcome on an unknown turn error = %v, want ErrNotFound", err)
+	}
+}

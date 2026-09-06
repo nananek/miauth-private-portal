@@ -955,6 +955,80 @@ func TestMigrate_UpgradeAppliesOpenWebUILinkTables(t *testing.T) {
 	}
 }
 
+// TestMigrate_UpgradeAppliesOpenWebUITurnOutcomeColumns backs migration
+// 0019 (Issue #53 PR1): an ALTER TABLE ADD COLUMN upgrade with a
+// pre-existing turn row to preserve, mirroring
+// TestMigrate_UpgradeAppliesExternalSourceCursorColumns' structure, plus
+// the new idx_openwebui_links_state index.
+func TestMigrate_UpgradeAppliesOpenWebUITurnOutcomeColumns(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 18)
+	ctx := t.Context()
+
+	const (
+		ownerID  = "pre-existing-owner"
+		actorID  = "virtual-actor"
+		threadID = "pre-existing-thread"
+		entryID  = threadID
+	)
+	for _, seed := range []struct {
+		what string
+		sql  string
+	}{
+		{"owner actor", `INSERT INTO actors (id, actor_type, created_at) VALUES ('` + ownerID + `', 'owner', '2024-01-01T00:00:00Z')`},
+		{"VirtualActor", `INSERT INTO actors (id, actor_type, created_at) VALUES ('` + actorID + `', 'openwebui_model', '2024-01-01T00:00:00Z')`},
+		{"thread", `INSERT INTO threads (id, created_at, updated_at) VALUES ('` + threadID + `', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"entry", `INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES ('` + entryID + `', '` + threadID + `', 'user_post', '` + ownerID + `', 'body', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"workspace", `INSERT INTO openwebui_workspaces (id, name, base_url, secret_ref, presentation_host, created_at, updated_at)
+		 VALUES ('w1', 'Open WebUI', 'https://a.example.net', 'OPENWEBUI_API_KEY', 'openwebui.example.net', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"model", `INSERT INTO openwebui_models (id, workspace_id, external_model_id, display_name, actor_slug, actor_id, created_at, updated_at)
+		 VALUES ('m1', 'w1', 'gpt-oss:20b', 'Display', 'model', '` + actorID + `', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"link", `INSERT INTO openwebui_conversation_links (id, thread_id, branch_id, workspace_id, model_id, state,
+			claimed_at, last_transition_at, created_at, updated_at)
+		 VALUES ('l1', '` + threadID + `', 'branch-1', 'w1', 'm1', 'creation_pending',
+		 '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"turn", `INSERT INTO openwebui_turn_links (id, link_id, branch_id, local_message_id, request_id, revision,
+			provider_status, created_at, updated_at)
+		 VALUES ('t1', 'l1', 'branch-1', '` + entryID + `', 'request-1', 1, 'pending', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+	} {
+		if _, err := sqlDB.ExecContext(ctx, seed.sql); err != nil {
+			t.Fatalf("seed %s: %v", seed.what, err)
+		}
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var failureCategory, finishReason, lastAttemptAt, completedAt sql.NullString
+	var promptTokens, completionTokens sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT failure_category, prompt_tokens, completion_tokens, finish_reason, last_attempt_at, completed_at
+		 FROM openwebui_turn_links WHERE id = 't1'`,
+	).Scan(&failureCategory, &promptTokens, &completionTokens, &finishReason, &lastAttemptAt, &completedAt); err != nil {
+		t.Fatalf("query upgraded row: %v", err)
+	}
+	if failureCategory.Valid || promptTokens.Valid || completionTokens.Valid || finishReason.Valid || lastAttemptAt.Valid || completedAt.Valid {
+		t.Errorf("upgraded turn row has non-NULL new columns: failure_category=%v prompt_tokens=%v completion_tokens=%v finish_reason=%v last_attempt_at=%v completed_at=%v",
+			failureCategory, promptTokens, completionTokens, finishReason, lastAttemptAt, completedAt)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_turn_links SET failure_category = 'auth_failed', prompt_tokens = 1, completion_tokens = 2,
+			finish_reason = 'stop', last_attempt_at = '2024-01-01T00:00:00Z', completed_at = '2024-01-01T00:00:00Z'
+		 WHERE id = 't1'`); err != nil {
+		t.Errorf("write the new columns after upgrade: %v", err)
+	}
+
+	var indexName string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_openwebui_links_state'`,
+	).Scan(&indexName); err != nil {
+		t.Errorf("idx_openwebui_links_state should exist after upgrade: %v", err)
+	}
+}
+
 func TestMigrate_RejectsEditedAppliedMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := t.Context()

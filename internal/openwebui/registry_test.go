@@ -72,6 +72,42 @@ func TestSeed_CreatesWorkspaceModelAndVirtualActor(t *testing.T) {
 // re-running Seed with different presentation values must not disturb
 // the workspace id, the model id, or the actor id, even though the
 // presentation fields themselves change.
+// TestSeed_ReconcilesGenerationEnabledFromConfig backs §4's "Registry.Seed
+// writes generation_enabled per config on every run": Issue #52 creates
+// the column and the write but has no bridge to gate yet, so this is the
+// only way the flag can currently reach the database — and it must track
+// config both ways (a later false must clear an earlier true), not just
+// turn it on once and leave it.
+func TestSeed_ReconcilesGenerationEnabledFromConfig(t *testing.T) {
+	cfg := validRegistryConfig()
+	cfg.GenerationEnabled = true
+	tr := newTestRegistry(t, cfg)
+	if err := tr.Seed(t.Context()); err != nil {
+		t.Fatalf("first Seed: %v", err)
+	}
+	workspace, err := tr.db.OpenWebUIWorkspaces.GetEnabled(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !workspace.GenerationEnabled {
+		t.Error("GenerationEnabled = false after Seed with GenerationEnabled: true, want true")
+	}
+
+	tr.clock.Advance(time.Hour)
+	cfg.GenerationEnabled = false
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock)
+	if err := tr.Seed(t.Context()); err != nil {
+		t.Fatalf("second Seed: %v", err)
+	}
+	workspace, err = tr.db.OpenWebUIWorkspaces.GetEnabled(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.GenerationEnabled {
+		t.Error("GenerationEnabled = true after re-Seed with GenerationEnabled: false, want false")
+	}
+}
+
 func TestSeed_IsIdempotentWithStableIdentity(t *testing.T) {
 	cfg := validRegistryConfig()
 	tr := newTestRegistry(t, cfg)
