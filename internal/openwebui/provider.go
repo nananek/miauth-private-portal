@@ -42,10 +42,9 @@ type Message struct {
 // — the previous assistant message id this turn attaches to as its
 // remote parent. Compat's "Opaque ID semantics" is what makes this
 // possible: because these ids are minted locally rather than returned
-// by the provider, a caller can persist them (ADR-0005 D-3's "record
-// the attempt before calling out") before ever making the call, so a
-// lost response never leaves the local side without an id to
-// reconcile against.
+// by the provider, a caller can persist them before ever making the
+// call, so a lost response never leaves the local side without an id
+// to reconcile against.
 type TurnIDs struct {
 	UserMessageID      string
 	AssistantMessageID string
@@ -79,10 +78,10 @@ type StartChatRequest struct {
 }
 
 // ContinueTurnRequest is a turn on an already-confirmed remote chat.
-// IDs.ParentAssistantID must name the previous assistant message: D4's
-// addendum requires both the request's own parent id and the new user
-// message's parent id to name it, or the turn lands as a disconnected
-// pair instead of extending the chain.
+// IDs.ParentAssistantID must name the previous assistant message:
+// ADR-0005 D4 requires both the request's own parent id and the new
+// user message's parent id to name it, or the turn lands as a
+// disconnected pair instead of extending the chain.
 type ContinueTurnRequest struct {
 	RemoteChatID  string
 	ModelID       string
@@ -158,9 +157,11 @@ const (
 // classification and a turn's eventual recorded failure_category are
 // different questions: a bounded-retry job handler decides the latter
 // from this Category *and* which Phase produced it *and* how many
-// attempts have already been made (ADR-0005 D-2's asymmetry between a
-// lost chat-creation response and a lost continuation response), so the
-// two vocabularies are deliberately not merged into one. CategoryAmbiguous
+// attempts have already been made (ADR-0005 D7's asymmetry: a
+// `creation_pending` StartChat is never automatically replayed, while
+// a `ready` link's continuation may be retried within a bounded
+// count), so the two vocabularies are deliberately not merged into
+// one. CategoryAmbiguous
 // has no domain.FailureCategory counterpart at all: it means "this call's
 // outcome could not be determined", never a category recorded on its own.
 type Category string
@@ -248,8 +249,8 @@ var ErrRequestTooLarge = errors.New("openwebui: request exceeds the configured s
 // (docs/compat/openwebui-0.11.3.md's "Opaque ID semantics": "client-
 // generated UUIDs"). A caller mints one of these for each side of a
 // turn (TurnIDs.UserMessageID, TurnIDs.AssistantMessageID) and persists
-// them before making the Provider call that will use them (ADR-0005
-// D-3), never after.
+// them before making the Provider call that will use them, never
+// after.
 func newRemoteMessageID() string {
 	buf := make([]byte, 16)
 	// crypto/rand.Read never returns an error on Go 1.24+ (it crashes

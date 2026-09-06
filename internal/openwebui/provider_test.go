@@ -21,10 +21,10 @@ func TestNewRemoteMessageID_IsRFC4122Version4(t *testing.T) {
 	}
 }
 
-// TestNewRemoteMessageID_IsUnique backs ADR-0005 D-3's "record the
-// attempt before calling out": two turns' ids must never collide, or a
-// completions request keyed by a repeated id would silently overwrite
-// the wrong message (compat (e)).
+// TestNewRemoteMessageID_IsUnique backs the rule that these ids are
+// persisted before the call that uses them: two turns' ids must never
+// collide, or a completions request keyed by a repeated id would
+// silently overwrite the wrong message (compat (e)).
 func TestNewRemoteMessageID_IsUnique(t *testing.T) {
 	seen := make(map[string]bool)
 	for range 1000 {

@@ -161,7 +161,7 @@ func TestClient_StartChat_LinearAgainstFixtures(t *testing.T) {
 			t.Fatalf("decode completions request: %v", err)
 		}
 		if _, ok := raw["parent_id"]; !ok {
-			t.Error("completions request has no parent_id key (ADR-0005 D4 addendum)")
+			t.Error("completions request has no parent_id key (ADR-0005 D4)")
 		}
 		writeJSON(t, w, turnResp, http.StatusOK)
 	})

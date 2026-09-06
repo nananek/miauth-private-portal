@@ -175,7 +175,7 @@ func (c *Client) createChat(ctx context.Context, modelID string, sentAt time.Tim
 	// The declared 200 schema is ChatResponse | null (compat: "a null
 	// body is a documented possibility on this endpoint"); a null body
 	// means the chat may or may not have been created and there is no
-	// id to check by — D-2's absolute rule against ever re-creating a
+	// id to check by — ADR-0005 D7's rule against ever re-creating a
 	// chat is exactly why this case is reported as unknown rather than
 	// as a definite failure.
 	if isJSONNull(data) {
@@ -201,9 +201,9 @@ type completionsRequestBody struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
 	ChatID string `json:"chat_id"`
-	// ParentID has no "omitempty": ADR-0005 D4's addendum requires the
-	// parent_id *key* to always be present, even when its value is
-	// null. Omitting it while still naming chat_id and an existing
+	// ParentID has no "omitempty": ADR-0005 D4 requires the parent_id
+	// *key* to always be present, even when its value is null.
+	// Omitting it while still naming chat_id and an existing
 	// message id is not a safe "generate only" call — it overwrites
 	// that message's content and clears its parent link.
 	ParentID        *string             `json:"parent_id"`
