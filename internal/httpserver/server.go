@@ -46,6 +46,10 @@ type Server struct {
 	// OPENWEBUI_ENABLED off) leaves resolveUserLite's existing fallback
 	// projection untouched for every actor.
 	virtualActors VirtualActorResolver
+	// openWebUIBridge is Issue #53's notes/create enqueue hook; see
+	// Options.OpenWebUIBridge. A nil value leaves handleNotesCreate on
+	// its plain Create{Root,Reply} path.
+	openWebUIBridge timeline.EntryHook
 
 	// streamSem bounds concurrent GET /streaming connections; see
 	// maxConcurrentStreamConnections (streaming_handlers.go).
@@ -89,6 +93,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
 		virtualActors:            opts.VirtualActors,
+		openWebUIBridge:          opts.OpenWebUIBridge,
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
 	}

@@ -143,6 +143,21 @@ func recordNotification(ctx context.Context, repos domain.Repos, notifType domai
 	})
 }
 
+// EntryHook is a caller-supplied extension point invoked inside the same
+// transaction as a just-created entry, after its self-mention and
+// enqueueForEntry writes. It exists for Issue #53's Open WebUI bridge:
+// claiming a conversation link, recording a turn, and enqueueing the
+// "openwebui_turn" job all need to commit atomically alongside the owner's
+// post, exactly like a durable job intent does, but their shape (a link
+// claim keyed by branch, a turn row, one job) does not fit the plain
+// jobs-to-enqueue list CreateRoot/CreateReply already take. A hook's error
+// rolls back the whole transaction — including the entry itself — so it
+// must only ever report a bug in the hook's own bookkeeping, never that a
+// remote provider is unreachable: no network call happens inside a hook
+// (AGENTS.md/roadmap: local post success must not depend on provider
+// success).
+type EntryHook func(ctx context.Context, repos domain.Repos, entry domain.Entry) error
+
 // CreateRoot creates a thread and its root entry atomically. User posts
 // and ingestion/system entries may be roots; LLM replies and follow-up
 // questions must attach to an existing entry through CreateReply.
@@ -153,6 +168,14 @@ func recordNotification(ctx context.Context, repos domain.Repos, notifType domai
 // themselves. All other job fields remain under the caller's control
 // because concrete job types belong to later worker issues.
 func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body string, jobs ...*domain.Job) (domain.Entry, error) {
+	return s.CreateRootWithHook(ctx, kind, body, nil, jobs...)
+}
+
+// CreateRootWithHook is CreateRoot with an additional EntryHook run inside
+// the same transaction, after the entry, its self-mention record, and its
+// jobs are all written. hook may be nil, in which case this is exactly
+// CreateRoot's behavior.
+func (s *Service) CreateRootWithHook(ctx context.Context, kind domain.EntryKind, body string, hook EntryHook, jobs ...*domain.Job) (domain.Entry, error) {
 	actorType, ok := authorActorTypeForKind[kind]
 	if !ok || kind == domain.EntryLLMReply || kind == domain.EntryLLMFollowUp {
 		return domain.Entry{}, ErrInvalidKind
@@ -186,7 +209,13 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
 			return err
 		}
-		return enqueueForEntry(ctx, repos, jobs, entry.ID)
+		if err := enqueueForEntry(ctx, repos, jobs, entry.ID); err != nil {
+			return err
+		}
+		if hook == nil {
+			return nil
+		}
+		return hook(ctx, repos, entry)
 	})
 	if err != nil {
 		return domain.Entry{}, err
@@ -199,6 +228,14 @@ func (s *Service) CreateRoot(ctx context.Context, kind domain.EntryKind, body st
 // parent's ThreadID, making cross-thread parent relationships
 // impossible through this use-case API.
 func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind domain.EntryKind, body string, jobs ...*domain.Job) (domain.Entry, error) {
+	return s.CreateReplyWithHook(ctx, parentEntryID, kind, body, nil, jobs...)
+}
+
+// CreateReplyWithHook is CreateReply with an additional EntryHook run
+// inside the same transaction, after the entry, its self-mention record,
+// and its jobs are all written. hook may be nil, in which case this is
+// exactly CreateReply's behavior.
+func (s *Service) CreateReplyWithHook(ctx context.Context, parentEntryID string, kind domain.EntryKind, body string, hook EntryHook, jobs ...*domain.Job) (domain.Entry, error) {
 	now := s.clock.Now().UTC()
 	var entry domain.Entry
 
@@ -211,7 +248,13 @@ func (s *Service) CreateReply(ctx context.Context, parentEntryID string, kind do
 		if err := s.recordSelfMentionIfAny(ctx, repos, entry); err != nil {
 			return err
 		}
-		return enqueueForEntry(ctx, repos, jobs, entry.ID)
+		if err := enqueueForEntry(ctx, repos, jobs, entry.ID); err != nil {
+			return err
+		}
+		if hook == nil {
+			return nil
+		}
+		return hook(ctx, repos, entry)
 	})
 	if err != nil {
 		return domain.Entry{}, err

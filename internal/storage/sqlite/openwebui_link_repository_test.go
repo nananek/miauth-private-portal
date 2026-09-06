@@ -1119,7 +1119,7 @@ func TestOpenWebUIConversationLinkRepository_List(t *testing.T) {
 	}
 }
 
-// TestOpenWebUITurnLinkRepository_BeginAttempt backs ADR-0005 D-3: the
+// TestOpenWebUITurnLinkRepository_BeginAttempt backs ADR-0005 D7: the
 // attempt count and last_attempt_at must be durably recorded before a
 // provider call is made, so a crash or lease expiry afterward is
 // distinguishable, on the next run, from a turn that never attempted

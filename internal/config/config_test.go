@@ -1516,11 +1516,11 @@ func TestLoad_OpenWebUIAllowedOriginsTrailingSlashIsNormalized(t *testing.T) {
 	}
 }
 
-// TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled backs D-8/§4:
-// OPENWEBUI_GENERATION_ENABLED is a plain bool with no dependency check of
-// its own, the same shape LLM_CLASSIFICATION_ENABLED has relative to
-// LLM_ENABLED — it is meaningless while OPENWEBUI_ENABLED=false, but
-// setting it anyway must not fail startup.
+// TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled backs the
+// rule that OPENWEBUI_GENERATION_ENABLED is a plain bool with no
+// dependency check of its own, the same shape LLM_CLASSIFICATION_ENABLED
+// has relative to LLM_ENABLED — it is meaningless while
+// OPENWEBUI_ENABLED=false, but setting it anyway must not fail startup.
 func TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled(t *testing.T) {
 	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(
 		validAuthEnv(),

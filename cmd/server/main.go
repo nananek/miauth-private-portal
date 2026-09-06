@@ -27,6 +27,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/provider/openai"
+	owuiprovider "github.com/nananek/miauth-private-portal/internal/provider/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
@@ -89,6 +90,15 @@ func run() error {
 	}
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{OwnerUsername: cfg.Auth.OwnerUsername})
 
+	// jobsManager is built here, ahead of the feature blocks below (rather
+	// than just before Run, as it was before Issue #53), so the Open
+	// WebUI turn job can register on it in the same block that decides
+	// whether to build one at all. Registration itself is side-effect
+	// free until jobsManager.Run is called at the very end, so moving its
+	// construction earlier changes nothing about the other registrations
+	// that follow it.
+	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
+
 	// Constructed and seeded only when the feature is on: no
 	// openwebui_workspaces/openwebui_models row is ever written, and
 	// httpserver's VirtualActors resolver stays nil (its safe default),
@@ -98,6 +108,7 @@ func run() error {
 	// the config constant here is what keeps the two checked against
 	// each other at every startup instead of silently drifting apart.
 	var virtualActors httpserver.VirtualActorResolver
+	var openWebUIBridge timeline.EntryHook
 	if cfg.OpenWebUI.Enabled {
 		registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
 			Enabled:           cfg.OpenWebUI.Enabled,
@@ -114,6 +125,37 @@ func run() error {
 			return fmt.Errorf("seed openwebui registry: %w", err)
 		}
 		virtualActors = registry
+
+		// Registered only when generation itself is on: no
+		// internal/provider/openwebui.Client is ever built (and so no
+		// request to OPENWEBUI_BASE_URL is ever possible) while
+		// OPENWEBUI_GENERATION_ENABLED is false, mirroring LLM_ENABLED's
+		// gate below. If generation is later turned off after having been
+		// on, any already-enqueued "openwebui_turn" job is left pending
+		// rather than dropped — the same unregistered-job-type recovery
+		// path LLM's gate relies on.
+		if cfg.OpenWebUI.GenerationEnabled {
+			owuiProvider, err := owuiprovider.NewClient(owuiprovider.Config{
+				BaseURL:          cfg.OpenWebUI.BaseURL,
+				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
+				APIKey:           cfg.OpenWebUI.APIKey,
+				Timeout:          cfg.OpenWebUI.Timeout,
+				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
+				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
+			})
+			if err != nil {
+				return fmt.Errorf("build openwebui provider client: %w", err)
+			}
+			bridge := openwebui.NewBridge(openwebui.BridgeConfig{
+				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
+			}, nil, logger)
+			turnJob := openwebui.NewTurnJob(db.Repos, timelineSvc, owuiProvider, openwebui.TurnJobConfig{
+				MaxAttempts:        cfg.Jobs.MaxAttempts,
+				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
+			}, nil, logger)
+			openWebUIBridge = bridge.EnqueueTurn
+			jobsManager.Register(openwebui.JobType, turnJob.Handle)
+		}
 	}
 
 	opts := httpserver.Options{
@@ -130,9 +172,8 @@ func run() error {
 		LLMEnabled:               cfg.LLM.Enabled,
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
 		VirtualActors:            virtualActors,
+		OpenWebUIBridge:          openWebUIBridge,
 	}
-
-	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
 
 	// Registered only when the feature is on: no Provider (and therefore
 	// no request to LLM_BASE_URL) is ever constructed while LLM_ENABLED

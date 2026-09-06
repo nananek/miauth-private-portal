@@ -66,6 +66,7 @@ covered here:
 | Property | Evidence |
 | --- | --- |
 | Loopback/private/link-local addresses rejected by default; redirects can't bypass this; scheme can't be downgraded | `internal/ingest/safehttp/client_test.go`: `TestClient_Do_RejectsLoopbackAddressByDefault`, `TestClient_Do_RejectsRedirectToDisallowedAddress`, `TestCheckRedirect_RejectsSchemeDowngradeFromHTTPS`, `TestClient_Do_RejectsDisallowedSchemeOnInitialRequest`, `TestIsPublicUnicastIP` (and the rest of that file) |
+| The Open WebUI outbound adapter (Issue #53) reuses this same `safehttp.Client` (redirects disabled outright, not merely re-validated) and additionally refuses a base URL outside its own configured allowlist and a remote chat id shaped like a path-traversal segment before either ever reaches a request | `internal/provider/openwebui/client_test.go`: `TestClient_ContinueTurn_PrivateIPIsPolicyViolation`, `TestClient_StartChat_RedirectIsPolicyViolation_NoSecondRequest`, `TestNewClient_RejectsBaseURLNotInAllowlist`, `TestClient_LookupTurnOutcome_RejectsPathTraversalChatID` |
 
 ### Log redaction
 
@@ -74,6 +75,7 @@ covered here:
 | Known sensitive keys (tokens, secrets, credentials) are redacted from structured logs, including nested groups | `internal/logging/logging_test.go`: `TestRedaction_KnownSensitiveKeys`, `TestRedaction_AppliesInsideNestedGroup`, `TestRedaction_NonSensitiveKeysPassThrough` |
 | Access logs never include request headers (which may carry the API token) | `internal/logging/middleware_test.go`: `TestAccessLog_NeverLogsHeaders` |
 | Job payloads (which may carry post/mail bodies) are never logged | `internal/jobs/manager_test.go`: `TestManagerProcessesJobAndNeverLogsPayload` |
+| The Open WebUI outbound adapter (Issue #53) never lets a provider response's own text — including the observed instance's verbatim-echoed upstream credential — reach a returned error, a log line, or any decoded struct; only a fixed local category crosses that boundary | `internal/openwebui/provider_test.go`: `TestProviderError_ErrorTextIsFixedAndCarriesNoWrappedText`; `internal/provider/openwebui/client_test.go`: `TestClient_ContinueTurn_ChatManagedErrorViaGet_TurnFailed`, `TestClient_LookupTurnOutcome_NeverExposesErrorContent` |
 
 ### Prompt injection
 
