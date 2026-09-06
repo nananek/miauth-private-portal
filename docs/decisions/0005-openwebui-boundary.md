@@ -221,18 +221,35 @@ An Open WebUI credential is not an Aria credential: it cannot authenticate
 Aria, create a local owner, mint a local API token, or widen a local scope
 (roadmap §"Auth, permission, and secret boundary", #28 traceability).
 
-**`secret_ref` interpretation — owner confirmation requested.** This
-repository holds third-party secrets as typed config values (`LLM_API_KEY`,
-`IMAP_PASSWORD`) that `internal/config.Config.Redacted()` reports only as
-set/unset. This ADR reads the roadmap's `secret_ref` as *"a reference to a
-config key such as `OPENWEBUI_API_KEY`"*, not as a mandate for a separate
-secret store, and recommends matching the existing mechanism. This is the one
-decision here taken without a prior owner ruling; if the owner intends a real
-secret store, #52 should design it and this clause should be revised rather
-than worked around.
+**`secret_ref` interpretation — decided by the owner on 2026-09-06.** The
+Open WebUI API key is held exactly the way this repository already holds
+third-party secrets: as a typed config value under a key such as
+`OPENWEBUI_API_KEY`, supplied through the ordinary config source (`.env` on a
+bare host; the container's environment-variable source otherwise) and reported
+by `internal/config.Config.Redacted()` only as set/unset — the same treatment
+`LLM_API_KEY` and `IMAP_PASSWORD` get. The roadmap's `secret_ref` therefore
+means *"a reference to a config key"*, and **no separate secret store or
+secret-management subsystem is built**: neither #52's schema nor #53's adapter
+introduces one, and the raw key never reaches the database, a domain object, or
+a fixture. The key referenced is one declared in `internal/config`'s schema,
+not a free-form environment-variable name — `Load` reads only the known keys,
+by name, and never scans the environment
+([`docs/operations/configuration.md`](../operations/configuration.md#why-environment-variable-scanning-is-scoped-to-known-keys)).
+The adapter then reads that value from the typed `Config` it is given, not
+from the process environment itself: an `os.Getenv` shortcut would bypass
+`Load`'s validation and would miss the config file a bare-host `.env`
+deployment relies on.
 
-**TBD (see #50):** who provisions the dedicated account, where the key is
-stored, and who owns rotation.
+Rotation follows the existing procedure in
+[`docs/operations/runbook.md`](../operations/runbook.md#secret-rotation) —
+replace the config value and restart, never an in-place update through an API.
+Because re-issuing an Open WebUI key invalidates the previous one immediately
+(no overlap window, as above), rotation belongs in a maintenance window; the
+runbook already records that same caveat for `LLM_API_KEY`.
+
+**TBD (see #50):** who provisions the dedicated account and who owns rotation.
+Where the key lives is no longer open — it is a config key, per the decision
+above.
 
 ### D11. Network policy mirrors the existing SSRF boundary
 
@@ -277,22 +294,24 @@ this digest.
 
 ### D15. Unknowns are marked, never invented
 
-Six operational questions remain open (credential ownership and storage;
-allowlisted origin and presentation host; sizes/timeouts/rate limits; the
-production version; the model-access grant procedure for a non-admin account;
-socket.io streaming). Each is written as `TBD (see #50)` or `要実機確認` at the
-point where it matters, with no placeholder value that could be mistaken for a
-decision.
+Six operational questions remain open (credential provisioning and rotation
+ownership — storage is settled by D10; allowlisted origin and presentation
+host; sizes/timeouts/rate limits; the production version; the model-access
+grant procedure for a non-admin account; socket.io streaming). Each is
+written as `TBD (see #50)` or `要実機確認` at the point where it matters, with
+no placeholder value that could be mistaken for a decision.
 
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
   D10: which remote ids exist, that they are client- or server-generated, that
   `WorkspaceDefinition` is instance-plus-account, and how the credential is
-  referenced. The `secret_ref` reading in D10 is the one item to confirm with
-  the owner before schema work freezes it.
-- **#53 (OWUI-B)** gets its adapter and job inputs from D3, D6, D7, and D11,
-  and its fixtures from
+  referenced. D10's `secret_ref` reading is now an owner decision (2026-09-06),
+  so #52 can freeze the schema against it: the field holds a reference to a
+  config key, and #52 builds no secret store of its own.
+- **#53 (OWUI-B)** gets its adapter and job inputs from D3, D6, D7, D10, and
+  D11 — including that the worker resolves `secret_ref` from config, never a
+  store of its own — and its fixtures from
   [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/). The
   redaction test asserts on `sk-mock-upstream-secret`.
 - **#54 (OWUI-R)** inherits D14 as release evidence: the digest, the
