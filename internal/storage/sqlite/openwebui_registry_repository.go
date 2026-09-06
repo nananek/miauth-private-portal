@@ -82,6 +82,26 @@ func (r *openWebUIWorkspaceRepository) GetEnabled(ctx context.Context) (domain.O
 	return w, rows.Err()
 }
 
+// List returns every workspace, ordered by (created_at, id) like every
+// other list method in this package.
+func (r *openWebUIWorkspaceRepository) List(ctx context.Context) ([]domain.OpenWebUIWorkspace, error) {
+	rows, err := r.q.QueryContext(ctx, openWebUIWorkspaceSelectColumns+` ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workspaces []domain.OpenWebUIWorkspace
+	for rows.Next() {
+		w, err := scanOpenWebUIWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		workspaces = append(workspaces, w)
+	}
+	return workspaces, rows.Err()
+}
+
 // Update writes the mutable registry fields only. ID, created_at, both
 // enable flags, and default_model_id are deliberately absent: those have
 // their own methods, so a caller that read a row, changed a name, and

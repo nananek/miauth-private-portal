@@ -120,7 +120,11 @@ func NewRegistry(uow domain.UnitOfWork, repos domain.Repos, cfg RegistryConfig, 
 // find-or-create the model by the provider's opaque model id, minting
 // its VirtualActor row on first sight; point the workspace's default at
 // it; deactivate every other model in the workspace, since the MVP
-// publishes only the default one; and enable the workspace.
+// publishes only the default one; disable every *other* workspace (and
+// deactivate its models) — this deployment supports exactly one enabled
+// workspace, so a re-seed after OPENWEBUI_BASE_URL changes must not
+// leave the previous instance's workspace enabled alongside the new
+// one; and enable the workspace.
 //
 // Two identities are deliberately never rewritten by a re-run: the
 // workspace id and the model's actor id. That is the roadmap's stable
@@ -153,6 +157,9 @@ func (r *Registry) Seed(ctx context.Context) error {
 			return fmt.Errorf("set default model: %w", err)
 		}
 		if err := r.deactivateOtherModels(ctx, repos, workspace.ID, model.ID, now); err != nil {
+			return err
+		}
+		if err := r.deactivateOtherWorkspaces(ctx, repos, workspace.ID, now); err != nil {
 			return err
 		}
 		if err := repos.OpenWebUIWorkspaces.SetEnabled(ctx, workspace.ID, true, now); err != nil {
@@ -267,6 +274,52 @@ func (r *Registry) deactivateOtherModels(ctx context.Context, repos domain.Repos
 		}
 		if err := repos.OpenWebUIModels.SetActive(ctx, m.ID, false, now); err != nil {
 			return fmt.Errorf("deactivate model: %w", err)
+		}
+	}
+	return nil
+}
+
+// deactivateOtherWorkspaces disables every workspace but targetWorkspaceID
+// and deactivates each one's models along with it, in the same
+// transaction as the rest of Seed.
+//
+// This is what keeps GetEnabled's single-enabled-workspace invariant
+// true across a re-seed at a changed OPENWEBUI_BASE_URL: seedWorkspace
+// only ever finds-or-creates the workspace named by the *current*
+// config and only ever enables that one, so without this step a
+// previously enabled workspace (and the model actor it was projecting
+// under its own presentation_host) would stay enabled forever —
+// breaking GetEnabled/DefaultVirtualActor/every owner-only write with
+// "more than one enabled Open WebUI workspace" the next time anything
+// calls them, and leaving that stale model resolvable through
+// ResolveVirtualActor indefinitely. Disabling it here, atomically with
+// enabling the new one, is what a single-workspace deployment actually
+// switching instances requires.
+func (r *Registry) deactivateOtherWorkspaces(ctx context.Context, repos domain.Repos, targetWorkspaceID string, now time.Time) error {
+	workspaces, err := repos.OpenWebUIWorkspaces.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list workspaces: %w", err)
+	}
+	for _, w := range workspaces {
+		if w.ID == targetWorkspaceID {
+			continue
+		}
+		if w.Enabled {
+			if err := repos.OpenWebUIWorkspaces.SetEnabled(ctx, w.ID, false, now); err != nil {
+				return fmt.Errorf("disable workspace: %w", err)
+			}
+		}
+		models, err := repos.OpenWebUIModels.ListByWorkspace(ctx, w.ID)
+		if err != nil {
+			return fmt.Errorf("list workspace models: %w", err)
+		}
+		for _, m := range models {
+			if !m.Active {
+				continue
+			}
+			if err := repos.OpenWebUIModels.SetActive(ctx, m.ID, false, now); err != nil {
+				return fmt.Errorf("deactivate model: %w", err)
+			}
 		}
 	}
 	return nil

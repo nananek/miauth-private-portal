@@ -31,6 +31,14 @@ func mustCreateVirtualActor(t *testing.T, db *DB) string {
 // pointed at a model after that model exists.
 func mustCreateWorkspace(t *testing.T, db *DB, baseURL string) domain.OpenWebUIWorkspace {
 	t.Helper()
+	return mustCreateWorkspaceAt(t, db, baseURL, testTime)
+}
+
+// mustCreateWorkspaceAt is mustCreateWorkspace with an explicit
+// CreatedAt, for tests (like List's) that need distinct timestamps to
+// pin (created_at, id) ordering.
+func mustCreateWorkspaceAt(t *testing.T, db *DB, baseURL string, at time.Time) domain.OpenWebUIWorkspace {
+	t.Helper()
 	w := domain.OpenWebUIWorkspace{
 		ID:                 domain.NewID(),
 		Name:               "Open WebUI",
@@ -39,8 +47,8 @@ func mustCreateWorkspace(t *testing.T, db *DB, baseURL string) domain.OpenWebUIW
 		PresentationHost:   "openwebui.example.net",
 		ChatCreateStatus:   domain.CapabilityUnverified,
 		ChatContinueStatus: domain.CapabilityUnverified,
-		CreatedAt:          testTime,
-		UpdatedAt:          testTime,
+		CreatedAt:          at,
+		UpdatedAt:          at,
 	}
 	if err := db.OpenWebUIWorkspaces.Create(t.Context(), w); err != nil {
 		t.Fatalf("create workspace: %v", err)
@@ -178,6 +186,45 @@ func TestOpenWebUIWorkspaceRepository_GetEnabled(t *testing.T) {
 		t.Error("GetEnabled with two enabled workspaces should be an error, not a silently chosen winner")
 	} else if errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("GetEnabled with two enabled workspaces error = %v, want a distinct invariant error", err)
+	}
+}
+
+// TestOpenWebUIWorkspaceRepository_List backs Registry.Seed's own
+// invariant-preserving step: it needs every workspace, not just the
+// enabled one, to find and disable whichever ones it is not
+// reconciling this run.
+func TestOpenWebUIWorkspaceRepository_List(t *testing.T) {
+	db := newTestDB(t)
+
+	// Created newest-first so insertion order and (created_at, id)
+	// order disagree.
+	third := mustCreateWorkspaceAt(t, db, "https://c.example.net", testTime.Add(2*time.Minute))
+	first := mustCreateWorkspaceAt(t, db, "https://a.example.net", testTime)
+	second := mustCreateWorkspaceAt(t, db, "https://b.example.net", testTime.Add(time.Minute))
+
+	got, err := db.OpenWebUIWorkspaces.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{first.ID, second.ID, third.ID}
+	if len(got) != len(want) {
+		t.Fatalf("List returned %d workspaces, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i] {
+			t.Errorf("List[%d].ID = %q, want %q", i, got[i].ID, want[i])
+		}
+	}
+}
+
+func TestOpenWebUIWorkspaceRepository_List_EmptyIsNotAnError(t *testing.T) {
+	db := newTestDB(t)
+	got, err := db.OpenWebUIWorkspaces.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("List returned %d workspaces, want 0", len(got))
 	}
 }
 

@@ -153,7 +153,12 @@ func TestSeed_DifferentBaseURLCreatesADistinctWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstModel, err := tr.db.OpenWebUIModels.Get(t.Context(), *first.DefaultModelID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
+	tr.clock.Advance(time.Hour)
 	changed := cfg
 	changed.BaseURL = "https://internal-instance.example.net"
 	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock)
@@ -171,6 +176,31 @@ func TestSeed_DifferentBaseURLCreatesADistinctWorkspace(t *testing.T) {
 	// different host: it is a configured value, not derived.
 	if second.PresentationHost != cfg.PresentationHost {
 		t.Errorf("PresentationHost = %q, want the configured %q regardless of base_url", second.PresentationHost, cfg.PresentationHost)
+	}
+
+	// The bug this test now also guards: re-seeding at a changed base
+	// URL must disable the workspace it left behind (and its model),
+	// not just create a new enabled one — GetEnabled's
+	// single-enabled-workspace invariant must survive an instance
+	// switch, and the old model must stop being a resolvable
+	// VirtualActor rather than staying projected under its old
+	// presentation host forever.
+	firstAfter, err := tr.db.OpenWebUIWorkspaces.Get(t.Context(), first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstAfter.Enabled {
+		t.Error("the workspace left behind by a base URL change should be disabled")
+	}
+	enabled, err := tr.db.OpenWebUIWorkspaces.GetEnabled(t.Context())
+	if err != nil {
+		t.Fatalf("GetEnabled after a base URL change: %v", err)
+	}
+	if enabled.ID != second.ID {
+		t.Errorf("GetEnabled = %q, want the new workspace %q", enabled.ID, second.ID)
+	}
+	if _, err := tr.ResolveVirtualActor(t.Context(), firstModel.ActorID); !errors.Is(err, ErrNotVirtualActor) {
+		t.Errorf("ResolveVirtualActor(old workspace's model) error = %v, want ErrNotVirtualActor", err)
 	}
 }
 

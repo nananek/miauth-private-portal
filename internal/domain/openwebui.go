@@ -464,6 +464,11 @@ type OpenWebUIWorkspaceRepository interface {
 	// feature flag off — and an error if more than one is, which is a
 	// broken invariant rather than a case to pick a winner from.
 	GetEnabled(ctx context.Context) (OpenWebUIWorkspace, error)
+	// List returns every workspace in a stable (created_at, id) order.
+	// Registry.Seed uses it to disable every workspace but the one it is
+	// reconciling, so re-seeding at a changed base URL can never leave
+	// GetEnabled's single-enabled-workspace invariant broken.
+	List(ctx context.Context) ([]OpenWebUIWorkspace, error)
 	// Update writes the mutable registry fields: name, base URL, secret
 	// ref, presentation host, and both capability statuses. ID,
 	// timestamps, and the enable flags are not touched; SetEnabled and

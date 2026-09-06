@@ -885,7 +885,11 @@ transaction, idempotently:
 3. Point the workspace's `default_model_id` at that model.
 4. Deactivate every other model in the workspace: the MVP publishes only
    the configured default model as an actor.
-5. Enable the workspace.
+5. Disable every *other* workspace (and deactivate its models): this
+   deployment supports exactly one enabled workspace, so changing
+   `OPENWEBUI_BASE_URL` and restarting disables the instance left behind
+   rather than leaving it enabled alongside the new one.
+6. Enable the workspace.
 
 Re-running `Seed` with a changed `OPENWEBUI_MODEL_DISPLAY_NAME` or
 `OPENWEBUI_MODEL_SLUG` updates those presentation fields without
