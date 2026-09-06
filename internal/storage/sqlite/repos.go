@@ -34,5 +34,10 @@ func newRepos(q querier) domain.Repos {
 		Reactions:       &reactionRepository{q: q},
 		Mentions:        &mentionRepository{q: q},
 		Notifications:   &notificationRepository{q: q},
+
+		OpenWebUIWorkspaces: &openWebUIWorkspaceRepository{q: q},
+		OpenWebUIModels:     &openWebUIModelRepository{q: q},
+		OpenWebUILinks:      &openWebUIConversationLinkRepository{q: q},
+		OpenWebUITurnLinks:  &openWebUITurnLinkRepository{q: q},
 	}
 }
