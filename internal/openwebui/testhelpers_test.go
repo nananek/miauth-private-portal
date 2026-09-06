@@ -81,7 +81,7 @@ func newTestRegistry(t *testing.T, cfg RegistryConfig) *testRegistry {
 
 	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	return &testRegistry{
-		Registry: NewRegistry(db, db.Repos, cfg, clock),
+		Registry: NewRegistry(db, db.Repos, cfg, clock, nil, nil),
 		db:       db,
 		clock:    clock,
 	}

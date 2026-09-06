@@ -85,8 +85,9 @@ docker run --rm -it -v "$(pwd)/data:/data" --entrypoint /miauthctl \
 
 `make build` produces `bin/server`, the sign-in/token operator tool
 `bin/miauthctl`, the host-local durable-job inspection/retry tool
-`bin/jobsctl`, and `bin/mailfetch` (Issue #12's IMAP ingestion sidecar;
-see below).
+`bin/jobsctl`, the Open WebUI owner-recovery tool `bin/openwebuictl`
+(Issue #53; see `docs/operations/runbook.md`), and `bin/mailfetch`
+(Issue #12's IMAP ingestion sidecar; see below).
 
 ### IMAP ingestion (`docker-compose.yml`)
 

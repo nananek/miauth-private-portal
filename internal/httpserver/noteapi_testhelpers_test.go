@@ -152,7 +152,7 @@ func newNoteAPITestServerOpenWebUIEnabled(t *testing.T) *noteAPITestServer {
 		ModelSlug:         "model",
 		DefaultModelID:    "gpt-oss:20b",
 		GenerationEnabled: true,
-	}, nil)
+	}, nil, nil, nil)
 	if err := registry.Seed(t.Context()); err != nil {
 		t.Fatalf("seed openwebui registry: %v", err)
 	}

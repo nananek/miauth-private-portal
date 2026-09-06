@@ -892,4 +892,259 @@ func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.
 	}
 }
 
+// TestTurnJob_StaleBranchIsolation_CompletionOnlyMovesItsOwnLink covers a
+// roadmap item PR3 left untested: a turn's completion must only ever
+// move its own link's remote_current_id, never a sibling branch's. Two
+// branches (two links) exist on the same thread; only one of them ever
+// completes a turn during this test, and the other — a stale/never-
+// touched branch — must be left exactly as it started.
+func TestTurnJob_StaleBranchIsolation_CompletionOnlyMovesItsOwnLink(t *testing.T) {
+	env := newTurnTestEnv(t)
+	root := env.mustCreateRoot(t, "root")
+	bridge := newTestBridge(env)
+
+	// Two independent new-branch turns on the same thread (ADR-0005 D4:
+	// two root-level replies, neither a continuation of the other).
+	m1 := env.mustCreateReply(t, root, "question 1")
+	m2 := env.mustCreateReply(t, root, "question 2")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, m1); err != nil {
+		t.Fatalf("EnqueueTurn m1: %v", err)
+	}
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, m2); err != nil {
+		t.Fatalf("EnqueueTurn m2: %v", err)
+	}
+	jobRows, err := env.db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobRows) != 2 {
+		t.Fatalf("jobs = %v, want exactly 2", jobRows)
+	}
+
+	// Identify which job belongs to m1 so only its turn is ever handled;
+	// m2's link is the "stale branch" that must stay untouched throughout.
+	var m1Job domain.Job
+	var m2LinkID string
+	for _, j := range jobRows {
+		p := mustTurnJobPayload(t, j)
+		turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), p.TurnID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if turn.LocalMessageID == m1.ID {
+			m1Job = j
+		} else {
+			m2LinkID = p.LinkID
+		}
+	}
+	if m1Job.ID == "" || m2LinkID == "" {
+		t.Fatalf("could not identify both jobs among %v", jobRows)
+	}
+	m2LinkBefore, err := env.db.OpenWebUILinks.Get(t.Context(), m2LinkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if err := req.OnChatCreated(ctx, "remote-chat-m1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "reply to m1", RemoteCurrentID: strPtr("remote-msg-m1")}, nil
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), m1Job); err != nil {
+		t.Fatalf("Handle(m1): %v", err)
+	}
+
+	m2LinkAfter, err := env.db.OpenWebUILinks.Get(t.Context(), m2LinkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m2LinkAfter.RemoteCurrentID != nil {
+		t.Errorf("m2's link.RemoteCurrentID = %v, want unchanged nil (m1's completion must not touch it)", m2LinkAfter.RemoteCurrentID)
+	}
+	if m2LinkAfter.State != m2LinkBefore.State {
+		t.Errorf("m2's link.State = %q, want unchanged %q", m2LinkAfter.State, m2LinkBefore.State)
+	}
+	if m2LinkAfter.UpdatedAt != m2LinkBefore.UpdatedAt {
+		t.Errorf("m2's link.UpdatedAt changed (%v -> %v), want untouched by m1's completion", m2LinkBefore.UpdatedAt, m2LinkAfter.UpdatedAt)
+	}
+}
+
+// TestTurnJob_StartChat_ContextCancelledMidCall_RetriesWithoutFreezing
+// covers plan §5.4 step 8's cancellation rule for the create phase: a
+// StartChat call that fails only because its own ctx was already
+// cancelled (jobs.Manager shutting down, or this job's lease expiring
+// mid-call) must leave the turn exactly as BeginAttempt left it —
+// pending, attempt already recorded — never freezing the link ambiguous
+// on this same delivery the way a genuine remote-side creation failure
+// would. Only a *later* delivery's turn.Attempt > 0 check (creation is
+// never replayed) may do that, once the outcome is genuinely unknown
+// rather than merely locally interrupted.
+func TestTurnJob_StartChat_ContextCancelledMidCall_RetriesWithoutFreezing(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	provider := newFakeProvider(t)
+	provider.startChat = func(callCtx context.Context, req StartChatRequest) (TurnResult, error) {
+		// Simulate a Manager shutdown or lease loss racing this exact
+		// call: the outer job context is cancelled while the request is
+		// still in flight, and the (real) adapter's own classifyDoError
+		// maps that to CategoryTimeout — see its own doc comment.
+		cancel()
+		<-callCtx.Done()
+		return TurnResult{}, NewProviderError(CategoryTimeout, PhaseCreate, callCtx.Err())
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	err := turnJob.Handle(ctx, job)
+	var permanent *jobs.PermanentError
+	if errors.As(err, &permanent) {
+		t.Fatalf("Handle error = %v, want a retryable (non-Permanent) error for a cancellation-driven failure", err)
+	}
+	if err == nil {
+		t.Fatal("Handle error = nil, want an error (the call was cancelled)")
+	}
+
+	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.State != domain.LinkCreationPending {
+		t.Errorf("link.State = %q, want unchanged creation_pending", link.State)
+	}
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != domain.TurnPending || turn.Attempt != 1 {
+		t.Errorf("turn = %+v, want pending/attempt=1 (retryable, not frozen)", turn)
+	}
+}
+
+// TestTurnJob_ContinueTurn_ContextCancelledMidCall_NextDeliveryLooksUpFirst
+// is ContinueTurn's side of the same rule: a cancellation-driven failure
+// leaves the turn retryable, and — because BeginAttempt and
+// setCorrelation already ran before the call — the next delivery routes
+// through handleReadyRetry's lookup-first path rather than immediately
+// resending.
+func TestTurnJob_ContinueTurn_ContextCancelledMidCall_NextDeliveryLooksUpFirst(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "m0")
+	a0 := env.mustCreateReplyAs(t, m0, env.model.ActorID, domain.EntryLLMReply, "a0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+	env.mustSucceededTurn(t, link, m0, a0)
+
+	bridge := newTestBridge(env)
+	m1 := env.mustCreateReply(t, a0, "m1")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, m1); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	provider := newFakeProvider(t)
+	provider.continueTurn = func(callCtx context.Context, req ContinueTurnRequest) (TurnResult, error) {
+		cancel()
+		<-callCtx.Done()
+		return TurnResult{}, NewProviderError(CategoryTimeout, PhaseTurn, callCtx.Err())
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	err := turnJob.Handle(ctx, job)
+	var permanent *jobs.PermanentError
+	if errors.As(err, &permanent) {
+		t.Fatalf("Handle error = %v, want a retryable (non-Permanent) error", err)
+	}
+
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != domain.TurnPending || turn.Attempt != 1 || turn.RemoteAssistantMessageID == nil {
+		t.Errorf("turn = %+v, want pending/attempt=1 with its correlation already recorded", turn)
+	}
+
+	provider.lookupOutcome = func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error) {
+		return TurnOutcome{Found: true, Done: true, Content: "recovered after cancel", RemoteCurrentID: strPtr("remote-recovered")}, nil
+	}
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	if start, cont, lookup := provider.counts(); start != 0 || cont != 1 || lookup != 1 {
+		t.Errorf("provider calls = start:%d continue:%d lookup:%d, want 0/1/1 (one continue, then a lookup-first redelivery, no resend)", start, cont, lookup)
+	}
+}
+
+// TestTurnJob_ContinueTurn_ContractFailedFailsPermanentlyLinkStaysReady
+// covers a schema-drift/malformed response reaching TurnJob itself,
+// rather than only internal/provider/openwebui's own (already-covered)
+// classification of it into CategoryContractFailed: the turn fails
+// permanently with FailureCategoryContractFailed, the still-confirmed
+// link is left ready (this is a turn-phase failure, not a creation
+// one), and no notification or assistant entry is ever created.
+func TestTurnJob_ContinueTurn_ContractFailedFailsPermanentlyLinkStaysReady(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "m0")
+	a0 := env.mustCreateReplyAs(t, m0, env.model.ActorID, domain.EntryLLMReply, "a0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+	env.mustSucceededTurn(t, link, m0, a0)
+
+	bridge := newTestBridge(env)
+	m1 := env.mustCreateReply(t, a0, "m1")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, m1); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	provider := newFakeProvider(t)
+	provider.continueTurn = func(ctx context.Context, req ContinueTurnRequest) (TurnResult, error) {
+		return TurnResult{}, NewProviderError(CategoryContractFailed, PhaseTurn, errors.New("decode completion response: json: unexpected end of JSON input"))
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	err := turnJob.Handle(t.Context(), job)
+	var permanent *jobs.PermanentError
+	if !errors.As(err, &permanent) {
+		t.Fatalf("Handle error = %v, want a jobs.PermanentError", err)
+	}
+
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != domain.TurnFailed || turn.FailureCategory == nil || *turn.FailureCategory != domain.FailureCategoryContractFailed {
+		t.Errorf("turn = %+v, want failed/contract_failed", turn)
+	}
+	if turn.AssistantEntryID != nil {
+		t.Errorf("turn.AssistantEntryID = %v, want nil (no reply for a schema-drift failure)", turn.AssistantEntryID)
+	}
+
+	gotLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLink.State != domain.LinkReady {
+		t.Errorf("link.State = %q, want ready (a turn failure must not disturb a ready link)", gotLink.State)
+	}
+
+	notifications, err := env.db.Notifications.ListDesc(t.Context(), nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notifications) != 0 {
+		t.Errorf("notifications = %+v, want none", notifications)
+	}
+}
+
 func jobStatePtr(s domain.JobState) *domain.JobState { return &s }

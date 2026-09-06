@@ -26,11 +26,18 @@ hold rows other than the owner and the two reserved presentation actors
 (an Open WebUI model's VirtualActor). Since "the owner is the only row
 that exists" is no longer what keeps login single-owner, the rule that
 presentation actors are wire projections and never additional
-login-capable users (AGENTS.md) needs tests of its own. The last two
+login-capable users (AGENTS.md) needs tests of its own. The next two
 were added by PR3, which gave the Open WebUI use-case layer its own
 owner-only writes and its own caller-supplied-author entry-creation
 path — both had to repeat the same "never a presentation actor" check
-independently, so both get their own regression coverage.
+independently, so both get their own regression coverage. The last row
+was added by PR4, whose five owner recovery methods (`ListLinks`,
+`DescribeLink`, `ConfirmLink`, `AbandonLink`, `FreezeLink`) and their
+`cmd/openwebuictl` CLI are a *third* independent owner-only door — the
+same check repeated a third time, and PR4's own reason it must never be
+reachable from an HTTP request at all (roadmap: "Manual resolution ...
+is an explicit owner/operator action") is exactly why there is no fourth
+row for a request-level test here.
 
 | Bullet | Evidence |
 | --- | --- |
@@ -44,6 +51,7 @@ independently, so both get their own regression coverage.
 | Only the owner actor type reports login/MiAuth capability, and no actor type may hold a credential | `internal/domain/actor_test.go`: `TestActorCapabilityPredicates`, `TestActorCapabilityPredicates_UnknownTypeIsInert` |
 | The Open WebUI registry's own owner-only writes (`SetGenerationEnabled`, `SetCapabilityStatus`, `RenameModel`) refuse every non-owner actor, including the VirtualActor the registry itself projects, and fail closed on the feature flag before ever looking the actor up | `internal/openwebui/registry_test.go`: `TestOwnerOnlyMethods_RejectNonOwnerActors`, `TestOwnerOnlyMethods_SucceedForOwner`, `TestOwnerOnlyMethods_DisabledReturnsErrDisabledBeforeCheckingActor` |
 | A generated reply's caller-supplied author must be the assistant actor or an active, workspace-enabled Open WebUI model actor; the owner, the system actor, an unknown id, a deactivated model, and a disabled workspace are all refused | `internal/timeline/service_test.go`: `TestCreateGeneratedReplyBy_RejectsIneligibleAuthors` |
+| The Open WebUI recovery methods (Issue #53 PR4) refuse a non-owner actor and fail closed on the feature flag before ever looking the actor up, the same guard order `registry_test.go`'s own owner-only tests already establish | `internal/openwebui/recovery_test.go`: `TestConfirmLink_NotOwnerReturnsErrNotOwner`, `TestConfirmLink_DisabledReturnsErrDisabled` |
 
 ## AC8: security regression tests
 
@@ -76,6 +84,7 @@ covered here:
 | Access logs never include request headers (which may carry the API token) | `internal/logging/middleware_test.go`: `TestAccessLog_NeverLogsHeaders` |
 | Job payloads (which may carry post/mail bodies) are never logged | `internal/jobs/manager_test.go`: `TestManagerProcessesJobAndNeverLogsPayload` |
 | The Open WebUI outbound adapter (Issue #53) never lets a provider response's own text — including the observed instance's verbatim-echoed upstream credential — reach a returned error, a log line, or any decoded struct; only a fixed local category crosses that boundary | `internal/openwebui/provider_test.go`: `TestProviderError_ErrorTextIsFixedAndCarriesNoWrappedText`; `internal/provider/openwebui/client_test.go`: `TestClient_ContinueTurn_ChatManagedErrorViaGet_TurnFailed`, `TestClient_LookupTurnOutcome_NeverExposesErrorContent` |
+| `cmd/openwebuictl` (Issue #53 PR4) never prints an owner post's body text through its `links`/`show` output — only id/state/category/timestamp/boolean-presence fields, the same restriction `cmd/jobsctl`'s own `safeCell`-filtered output already applies to job payloads | `cmd/openwebuictl/main_test.go`: `TestRunLinks_ListsAndFiltersWithoutBody`, `TestRunShow_PrintsLinkAndTurnsWithoutBody` |
 
 ### Prompt injection
 
