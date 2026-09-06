@@ -968,6 +968,21 @@ presentation host `openwebui.example.net`). Both intentionally contain no
 access token, real user content, real instance host, or personal
 identifier.
 
+**A VirtualActor's reply arrives asynchronously (Issue #53).** With the
+Open WebUI outbound bridge enabled
+(`docs/operations/configuration.md`'s "Outbound turn bridge" section),
+`POST /api/notes/create`'s response never itself carries the model's
+reply: the created note comes back immediately, exactly as it would with
+the bridge off, and the VirtualActor-authored `llm_reply` child (the same
+`note-virtual-actor.json` shape) appears later as an ordinary new entry
+under the owner's post — visible the same way any other async reply is,
+through a subsequent `notes/children`/`notes/conversation`/timeline read,
+or through the `reply`-type `POST /api/i/notifications` entry this
+service records once the turn actually succeeds (never for a turn that
+fails, is left ambiguous, or is still pending). No existing endpoint's
+request or response shape changes for this; only the timing of when the
+child note exists differs from a synchronous reply.
+
 ### Note.text provenance markers
 
 Misskey's `Note` carries no field of its own to say how a note originated, so

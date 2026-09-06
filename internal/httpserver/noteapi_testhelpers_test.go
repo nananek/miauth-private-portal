@@ -15,6 +15,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
@@ -111,6 +112,64 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}
 	ts.token, ts.ownerID = mustIssueToken(t, ts.Server, "note-api-setup", "read:account,write:notes")
+	return ts
+}
+
+// newNoteAPITestServerOpenWebUIEnabled builds a noteAPITestServer with a
+// real, generation-enabled *openwebui.Registry seeded and its *openwebui.
+// Bridge wired through Options.OpenWebUIBridge — the same shape
+// cmd/server assembles when OPENWEBUI_ENABLED and its generation gate
+// are both on — for tests that verify the wiring itself, not
+// internal/openwebui's own enqueue-decision logic (covered by that
+// package's own tests).
+func newNoteAPITestServerOpenWebUIEnabled(t *testing.T) *noteAPITestServer {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: path, BusyTimeout: 5 * time.Second, MaxOpenConns: 4})
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+	if err := db.Actors.EnsureReservedActors(t.Context()); err != nil {
+		t.Fatalf("ensure reserved actors: %v", err)
+	}
+
+	miauthCfg := defaultMiAuthTestConfig()
+	clock := &fakeTimelineClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{Clock: clock, OwnerUsername: miauthCfg.OwnerUsername})
+	miauthSvc := miauth.NewService(db, db.Repos, miauthCfg)
+
+	registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
+		Enabled:           true,
+		BaseURL:           "https://openwebui.example.net",
+		SecretRef:         openwebui.SecretRefAPIKey,
+		WorkspaceName:     "Open WebUI",
+		PresentationHost:  "openwebui.example.net",
+		ModelDisplayName:  "GPT-OSS 20B",
+		ModelSlug:         "model",
+		DefaultModelID:    "gpt-oss:20b",
+		GenerationEnabled: true,
+	}, nil)
+	if err := registry.Seed(t.Context()); err != nil {
+		t.Fatalf("seed openwebui registry: %v", err)
+	}
+	bridge := openwebui.NewBridge(openwebui.BridgeConfig{MaxContextMessages: 100}, nil, nil)
+
+	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+	srv := NewServer(logger, reg, Options{
+		MiAuthService:   miauthSvc,
+		TimelineService: timelineSvc,
+		LocalOrigin:     testLocalOrigin,
+		VirtualActors:   registry,
+		OpenWebUIBridge: bridge.EnqueueTurn,
+	})
+
+	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}
+	ts.token, ts.ownerID = mustIssueToken(t, ts.Server, "note-api-setup-openwebui", "read:account,write:notes")
 	return ts
 }
 

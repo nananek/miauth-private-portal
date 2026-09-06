@@ -859,15 +859,18 @@ adapter, and `docs/compat/aria-v1.5.11.md` for the per-kind `Body` shapes.
 
 ## Open WebUI bridge (registry and identity projection)
 
-Issue #52 (OWUI-P, `docs/roadmap/openwebui.md`). Unlike RSS/IMAP, Open
-WebUI is an **outbound** provider this service talks to, not an inbound
-source it ingests from — it has no `## <Kind> ingestion` adapter-contract
-row in the table above, and it is not wired through `cmd/server`'s
-ingestion scheduler at all. What exists as of this issue is the registry
-(one configured Open WebUI instance and model) and the identity
-projection (that model presented to Aria as a VirtualActor); the actual
-outbound chat bridge — sending an Aria message to Open WebUI and turning
-its reply into a local entry — is Issue #53's, not implemented yet.
+Issue #52 (OWUI-P) and Issue #53 (OWUI-B), `docs/roadmap/openwebui.md`.
+Unlike RSS/IMAP, Open WebUI is an **outbound** provider this service
+talks to, not an inbound source it ingests from — it has no `##
+<Kind> ingestion` adapter-contract row in the table above, and it is not
+wired through `cmd/server`'s ingestion scheduler at all. #52 built the
+registry (one configured Open WebUI instance and model) and the identity
+projection (that model presented to Aria as a VirtualActor); #53 built
+the outbound chat bridge on top of it — sending an Aria message to Open
+WebUI and turning its reply into a local entry — described in "Outbound
+turn bridge (Issue #53)" below. Owner recovery tooling for a link that
+gets stuck `ambiguous` is Issue #53's still-unimplemented final PR; see
+that section's own note.
 
 ### Feature flag and startup seeding
 
@@ -942,10 +945,12 @@ VirtualActor:
 - **can author a reply**: `internal/timeline.Service.
   CreateGeneratedReplyBy` accepts either the assistant actor or an
   active Open WebUI model actor whose workspace is enabled as an entry's
-  author, which is Issue #53's hook for completing an Open WebUI
-  generation the same atomic way `CreateGeneratedReply` completes an
-  `LLMGeneration` — but records no self-mention and no "reply"
-  notification itself (Issue #53's call to make, not this one's).
+  author. `internal/openwebui.TurnJob` (Issue #53) is its caller: it
+  completes a successful turn the same atomic way `CreateGeneratedReply`
+  completes an `LLMGeneration`, and — unlike that method's own default —
+  its `complete` hook does record a "reply" notification (never a
+  self-mention, since a generated reply is never the owner's own post);
+  see "Outbound turn bridge (Issue #53)" below for exactly when.
 - **falls back cleanly when not resolvable**: if the model is
   deactivated or its workspace disabled after an entry already exists,
   `resolveUserLite` falls back to the same actor-ID-as-username
@@ -1000,18 +1005,111 @@ move a link already carrying a `remote_chat_id` onto a *different* one.
 
 `OPENWEBUI_GENERATION_ENABLED`/`OPENWEBUI_TIMEOUT`/
 `OPENWEBUI_MAX_RESPONSE_BYTES`/`OPENWEBUI_MAX_REQUEST_BYTES`/
-`OPENWEBUI_MAX_CONTEXT_MESSAGES` (table above) are this issue's
+`OPENWEBUI_MAX_CONTEXT_MESSAGES` (table above) are Issue #53's
 generation gate and the outbound adapter's client-side bounds. Their
 defaults are this service's own conservative starting points, not values
 observed from a real Open WebUI deployment — the compat contract
 (`docs/compat/openwebui-0.11.3.md`) leaves "rate limits, sizes, and
 timeouts" as to-be-determined by Issue #50's live-instance testing.
 `Registry.Seed` reconciles `OPENWEBUI_GENERATION_ENABLED` onto the
-enabled workspace on every run; the other four are parsed and validated
-but read by nothing yet. None of this changes runtime behavior while
-Issue #53's bridge, job, and provider adapter do not exist: every
-existing `OPENWEBUI_*`-flag-off code path is unchanged, and no new HTTP
-call or job type is registered by this migration alone.
+enabled workspace on every run; `cmd/server` reads all five to build the
+outbound adapter, the bridge, and the durable job (below) — but only when
+`OPENWEBUI_GENERATION_ENABLED` is `true`. While it is `false` (the safe
+default, independent of `OPENWEBUI_ENABLED`), no
+`internal/provider/openwebui.Client` is ever constructed, no
+`notes/create` enqueue hook is wired, and the `"openwebui_turn"` job type
+is never registered — the same shape `LLM_ENABLED` already has.
+
+### Outbound turn bridge (Issue #53)
+
+With `OPENWEBUI_ENABLED=true` and `OPENWEBUI_GENERATION_ENABLED=true`,
+`cmd/server` additionally builds `internal/provider/openwebui.Client`
+(the HTTP adapter against `OPENWEBUI_BASE_URL`), `internal/openwebui.
+Bridge`, and `internal/openwebui.TurnJob`, wires the bridge's
+`EnqueueTurn` into `httpserver.Options.OpenWebUIBridge`, and registers
+the job under job type `"openwebui_turn"`.
+
+**Trigger.** Every `user_post` the owner creates while an enabled,
+generation-enabled workspace exists is a candidate — there is no
+content-based policy like Issue #9's `DecideReply` — independent of
+`LLM_ENABLED`: an operator running both features gets both jobs for the
+same post; nothing here special-cases that combination. `EnqueueTurn`
+runs as an `internal/timeline.EntryHook`, inside the same transaction
+`POST /api/notes/create` already commits the post in, so a claimed
+conversation link, a turn row, and the `"openwebui_turn"` job intent are
+all durable before the response is sent, exactly like Issue #9/#10's
+existing job-intent hooks — and, symmetrically, a request whose author,
+workspace, model, or reply-tree path is not eligible enqueues nothing at
+all, leaving the post itself unaffected either way (a local post's
+success never depends on the provider being reachable).
+
+**Branch rule (ADR-0005 D4).** A reply continues the thread's existing
+link only when its parent is exactly that link's current head (the
+`assistant_entry_id` of its latest non-superseded succeeded turn) *and*
+no turn already replies to that same parent. A thread root, a reply to
+an earlier node, a second reply to the same head, and a re-ask after a
+failed turn all start a **new** link (and therefore a new remote chat)
+instead — Open WebUI's own per-chat sibling/fork features are never
+used, so one local branch always maps to at most one remote chat.
+
+**Path construction.** Before either enqueueing or actually sending a
+turn, the reply chain from the new message back to the thread root is
+walked and validated fail-closed: a hidden or archived node, an entry
+kind this bridge does not project (`news`/`mail`/`system`), an
+unresolvable author, a walk that cannot reach the root, or a path longer
+than `OPENWEBUI_MAX_CONTEXT_MESSAGES` (including the new message) all
+refuse the turn rather than silently skipping or truncating a node. At
+enqueue time this means "no job is created"; at job-execution time
+(state can have changed since enqueue) it means the turn fails closed —
+see the table below. The sequence actually sent carries only each node's
+role (`user` for the owner, `assistant` for a prior reply) and body text
+— never a local entry id, Misskey metadata, or a system prompt.
+
+**Single-flight (ADR-0005 D5).** `TurnJob` holds an in-process, per-
+thread lock (this deployment runs one worker process) so at most one
+remote turn per thread is ever in flight; a second turn for the same
+thread waits for the first to finish rather than racing it. A future
+multi-worker deployment would need to replace this with a database-backed
+lease — a separate issue, not built here.
+
+**Outcome and retry.** Every provider call this bridge makes is
+classified into a `failure_category` (never provider error text — the
+observed Open WebUI instance echoes an upstream credential verbatim into
+its own error text, so `internal/provider/openwebui` discards it at the
+source; see `docs/decisions/0005-openwebui-boundary.md` D6) and a
+terminal or retryable outcome for the turn and its link, summarized here
+(the full table, phase by phase, is `internal/openwebui/turnjob.go`'s own
+doc comments):
+
+| Situation | Turn | Link | Retried? |
+| --- | --- | --- | --- |
+| Chat creation: credential/request rejected | `failed` | `failed` | No — creation is never replayed |
+| Chat creation: response lost or undecodable | `ambiguous` (`creation_lost`) | `ambiguous` | No — needs owner recovery |
+| Continuation: credential/request rejected, or a schema-drift response | `failed` | unchanged (stays `ready`) | No |
+| Continuation: the chat itself reports an error for this turn | `failed` on the last attempt | unchanged | Yes, same ids (compat: re-sending overwrites rather than duplicates), until the last attempt |
+| Continuation: rate limit / server error / transport / timeout | `ambiguous` on the last attempt | `ambiguous` on the last attempt | Yes, via a fresh lookup first, until the last attempt |
+| Success | `succeeded` | `ready`, current pointer advanced | — |
+
+An `ambiguous` link accepts no further automatic attempt at all (Issue
+#53's still-unimplemented final PR is the only way out —
+`internal/openwebui/recovery.go` and `cmd/openwebuictl`, tracked as this
+issue's remaining PR); until it lands, an owner-visible stuck link has no
+resolution path but leaving it be.
+
+**Notification (ADR-0005 D6).** A succeeded turn's reply records a Note-
+style "reply" notification, the same owner-facing shape Issue #9's
+assistant replies get — but never a self-mention (a generated reply is
+never the owner's own post). Every other outcome (`auth_failed`,
+`ambiguous`, `contract_failed`, `failed`) records neither a notification
+nor a mention, and creates no assistant entry at all: this MVP is
+buffered-only, so there is no partial/placeholder reply to show either.
+
+**Generation later disabled.** Turning `OPENWEBUI_GENERATION_ENABLED`
+back off and restarting deregisters the `"openwebui_turn"` job handler;
+any job already enqueued for a turn already in flight is left pending
+rather than dropped, the same unregistered-job-type recovery path
+`LLM_ENABLED` already relies on — `jobsctl` can list and requeue it once
+generation is turned back on.
 
 ### Table rebuild note
 

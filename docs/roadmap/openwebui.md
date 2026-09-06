@@ -512,26 +512,82 @@ exists.
 
 ### Acceptance criteria
 
-- [ ] Add an `OpenWebUIProvider` port and HTTP adapter implementing
+- [x] Add an `OpenWebUIProvider` port and HTTP adapter implementing
   `StartChat` and `ContinueTurn` with a pinned credential mechanism, timeout,
   redirect-hop, request/message/response-size bounds, TLS/origin,
   cancellation, and redacted-error handling in one boundary. The adapter must
-  not expose unverified endpoint names as a domain contract.
-- [ ] Add an `openwebui_turn` durable job using #8 leases, bounded retry/dead
+  not expose unverified endpoint names as a domain contract. (Issue #53 PR2)
+- [x] Add an `openwebui_turn` durable job using #8 leases, bounded retry/dead
   state for safe ready continuations, explicit terminal creation states,
-  restart recovery, thread single-flight, and local idempotency.
-- [ ] Implement local reply-tree path construction, new-chat versus
+  restart recovery, thread single-flight, and local idempotency. (Issue #53
+  PR3)
+- [x] Implement local reply-tree path construction, new-chat versus
   continuation, one-new-chat-per-local-branch policy, assistant-child
   mapping, remote correlation metadata, provenance, partial/failure status,
-  and no source-text overwrite.
-- [ ] Implement owner action -> local post -> durable job -> outbound chat
+  and no source-text overwrite. (Issue #53 PR3)
+- [x] Implement owner action -> local post -> durable job -> outbound chat
   turn -> assistant entry E2E; local post success must not depend on provider
-  success.
+  success. (Issue #53 PR3)
 - [ ] Test linear ordering, independent branch chat creation or explicit
   unsupported-branch rejection, duplicates, response-loss ambiguity, cycles,
   orphans, stale branches, concurrent turns, outage, auth failure, rate limit,
   malformed response, schema drift, state-transition guards, and
-  cancellation.
+  cancellation. **Partially done (PR3):** linear ordering, new-branch vs.
+  continuation selection (including the same-head-twice and re-ask-after-
+  failure cases), duplicate delivery, response-loss ambiguity on both
+  creation and continuation, orphaned/ineligible path nodes, concurrent
+  same-thread turns (single-flight), and auth failure are covered
+  (`internal/openwebui/{path,bridge,turnjob}_test.go`,
+  `internal/httpserver/openwebui_{enqueue,e2e}_test.go`). A genuine reply-
+  tree cycle cannot be constructed through any legitimate repository write
+  (`entries.parent_entry_id` carries its own foreign key and no write alters
+  a parent after creation — see `path_test.go`'s comment on
+  `ErrPathCycle`), so that guard stays defense-in-depth, untested here.
+  Still open for a later PR: an explicit stale-branch-isolation test (that a
+  turn's completion only ever moves its own link's `remote_current_id`),
+  explicit `ambiguous`/`failed`/`dead`-link state-transition-guard and mid-
+  call-cancellation tests at the `TurnJob` layer (the code paths exist —
+  `TurnJob.Handle`'s `switch link.State` default case, and `ctx.Err() != nil`
+  being left retryable without a state change — but PR3 did not add
+  dedicated tests for them), and malformed/schema-drift responses reaching
+  `TurnJob` itself rather than only `internal/provider/openwebui`'s own
+  (already-covered) classification of them.
+
+Terminology settled during implementation (four PRs, tracked against this
+one issue; PR4 — owner recovery and `openwebuictl` — is not yet built, so
+`Closes #53` is still pending):
+
+- The port ADR-0005 D1 specifies (`StartChat`/`ContinueTurn`) grew two
+  members the bridge could not be built without — `OnChatCreated` (a
+  callback invoked once chat creation's id is confirmed, before any
+  generation is attempted) and `LookupTurnOutcome` (the "result lookup" a
+  bounded retry needs before ever resending an uncertain continuation) —
+  documented as addenda to ADR-0005 D1 and D7 rather than new decisions,
+  since neither promotes an Open WebUI endpoint name into the port.
+- "Confirmed" in the state machine above means exactly what `OnChatCreated`
+  establishes: `POST /api/v1/chats/new` returned a stable id. The first
+  assistant turn on that chat is thereafter an ordinary continuation on a
+  `ready` link, not a special case.
+- The branch rule turned out to need one local check, not two: a reply
+  continues a `ready` link only when its parent is exactly that link's
+  current head *and* no turn already replies to that same parent — the
+  second half is what stops both "a second reply to the same head" and "a
+  re-ask after a failed turn" from attaching to the same remote chat.
+- Single-flight is an in-process, per-thread keyed lock in the worker
+  (`internal/openwebui`'s `threadLocks`), not a database lease table — this
+  deployment runs one worker process, and a lease-based version is a
+  separate issue if that ever changes.
+- Turn provenance and failure category live on `openwebui_turn_links`
+  (migration `0019`) rather than being folded into `llm_generations`: the
+  latter's `(target_entry_id, kind) WHERE pending` unique index would
+  collide with #9's own generations for the same target entry.
+- `internal/openwebui.EnqueueTurn` is wired as an
+  `internal/timeline.EntryHook` — the same shape `internal/httpserver`
+  already used for #9/#10's job-intent enqueueing, generalized to a
+  transaction-scoped hook so a branch claim, a turn row, and the durable
+  job could all commit atomically alongside the owner's post without
+  `internal/timeline` importing `internal/openwebui` (or vice versa beyond
+  what the hook's function signature already requires).
 
 ## OWUI-R: optional release gate
 

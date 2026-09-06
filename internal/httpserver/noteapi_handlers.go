@@ -289,13 +289,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		entry, err = s.timeline.CreateReply(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, job, classificationJob)
+		entry, err = s.timeline.CreateReplyWithHook(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, s.openWebUIBridge, job, classificationJob)
 		if errors.Is(err, timeline.ErrParentNotFound) {
 			writeNoSuchNote(w)
 			return
 		}
 	} else {
-		entry, err = s.timeline.CreateRoot(r.Context(), domain.EntryUserPost, *req.Text, job, classificationJob)
+		entry, err = s.timeline.CreateRootWithHook(r.Context(), domain.EntryUserPost, *req.Text, s.openWebUIBridge, job, classificationJob)
 	}
 	if err != nil {
 		s.logger.Error("create note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())

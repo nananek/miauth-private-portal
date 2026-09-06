@@ -75,6 +75,20 @@ type Options struct {
 	// directly — cmd/server passes its concrete *openwebui.Registry in,
 	// which already satisfies the interface structurally.
 	VirtualActors VirtualActorResolver
+
+	// OpenWebUIBridge is Issue #53's notes/create enqueue hook: when
+	// non-nil, handleNotesCreate creates every user_post through
+	// timeline.Service's Create{Root,Reply}WithHook instead of
+	// Create{Root,Reply}, so a branch claim, turn record, and durable
+	// "openwebui_turn" job are all committed atomically alongside the
+	// post whenever the hook decides to enqueue one. A nil value (the
+	// safe default — OPENWEBUI_ENABLED or its generation gate off) keeps
+	// handleNotesCreate on the plain Create{Root,Reply} path, unchanged
+	// from before this field existed. cmd/server passes an
+	// *openwebui.Bridge's EnqueueTurn method value in, which matches
+	// timeline.EntryHook's signature structurally without this package
+	// importing internal/openwebui.
+	OpenWebUIBridge timeline.EntryHook
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once
