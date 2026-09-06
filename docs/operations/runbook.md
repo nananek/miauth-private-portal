@@ -66,6 +66,52 @@ that something else broke.
   resume automatically on their next scheduled retry — no operator action
   needed. Only `dead`/`failed` jobs need a manual
   `go run ./cmd/jobsctl retry <job-id>`.
+- **Open WebUI outbound turn bridge (`OPENWEBUI_GENERATION_ENABLED=true`)
+  left an `ambiguous` or stuck `creation_pending` conversation link**: the
+  bridge never retries an uncertain outcome automatically (Issue #53's
+  "an ambiguous outcome is resolved only by an explicit owner recovery
+  action, never another automatic attempt") — an owner action is required.
+  `go run ./cmd/jobsctl list --type=openwebui_turn --state=dead` (or
+  `--state=failed`) finds the durable job side of this; the conversation
+  link side, which is what actually needs resolving, is
+  `cmd/openwebuictl`'s own concern and has no `jobsctl` equivalent:
+
+  ```sh
+  go run ./cmd/openwebuictl links --state=ambiguous
+  go run ./cmd/openwebuictl show <link-id>
+  ```
+
+  For each ambiguous link, check the corresponding chat in the Open WebUI
+  instance's own UI (the link's `has_remote_chat_id`/turn's
+  `has_remote_chat_id` fields in `show`'s output say whether a chat id is
+  even known to look for) to see whether it actually completed:
+  - If it did complete with a usable reply, run
+    `go run ./cmd/openwebuictl confirm <link-id>` (add
+    `--remote-chat-id=<id>` only if the link does not already know one —
+    `show`'s `has_remote_chat_id: false` — since this tool never lists the
+    provider's chats to find one itself). This looks up the one turn's
+    outcome and, on success, creates the recovered reply exactly as if
+    the turn had completed live.
+  - If it did not complete, or the chat cannot be identified at all, run
+    `go run ./cmd/openwebuictl abandon <link-id>` instead. The owner's
+    post is unaffected either way; only whether a reply eventually
+    appears under it changes.
+
+  A link stuck `creation_pending` (its claim job crashed or was killed
+  before recording any outcome — `jobsctl show <job-id>` on the job named
+  in `openwebuictl show`'s `state`/claim fields confirms this) cannot be
+  confirmed or abandoned directly; freeze it first, then resolve it the
+  same way:
+
+  ```sh
+  go run ./cmd/openwebuictl freeze <link-id>
+  ```
+
+  `auth_failed` turns/links are never retried automatically, by design
+  (ADR-0005: a rejected credential is never blindly retried) — after
+  rotating `OPENWEBUI_API_KEY`, the fix takes effect only for the
+  **owner's next new post**; an already-`auth_failed` turn stays failed
+  and its link, if `ambiguous`, still needs `confirm`/`abandon` above.
 - **RSS feed or IMAP mailbox outage**: the same isolation applies — a
   broken feed or unreachable mail server only affects its own
   `external_source_poll` jobs, never `notes/create` or other sources (see

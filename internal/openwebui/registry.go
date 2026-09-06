@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
 var (
@@ -99,22 +100,34 @@ type RegistryConfig struct {
 
 // Registry owns the Open WebUI workspace/model registry: seeding it from
 // configuration at startup, projecting a model actor into the
-// VirtualActor the wire layer needs, and applying the few owner-only
-// changes Issue #53 will need.
+// VirtualActor the wire layer needs, and applying the owner-only changes
+// Issue #52 and Issue #53 need — including #53 PR4's recovery.go methods,
+// which is why this type also holds a timeline.Service and a Provider.
 type Registry struct {
-	uow   domain.UnitOfWork
-	repos domain.Repos
-	clock Clock
-	cfg   RegistryConfig
+	uow      domain.UnitOfWork
+	repos    domain.Repos
+	clock    Clock
+	cfg      RegistryConfig
+	timeline *timeline.Service
+	provider Provider
 }
 
 // NewRegistry builds a Registry. uow and repos commonly come from one
 // storage adapter, but no concrete adapter type crosses this boundary.
-func NewRegistry(uow domain.UnitOfWork, repos domain.Repos, cfg RegistryConfig, clock Clock) *Registry {
+//
+// timelineSvc and provider are both nil-safe and needed only by
+// recovery.go's ConfirmLink: timelineSvc to create the recovered
+// assistant reply the same way TurnJob.complete does, and provider to
+// call LookupTurnOutcome. Every other Registry method, and recovery.go's
+// other four methods, need neither — cmd/server's own Registry (which
+// never calls ConfirmLink; recovery is cmd/openwebuictl's job, not an
+// HTTP path) passes both nil, and cmd/openwebuictl passes both only when
+// running its confirm subcommand.
+func NewRegistry(uow domain.UnitOfWork, repos domain.Repos, cfg RegistryConfig, clock Clock, timelineSvc *timeline.Service, provider Provider) *Registry {
 	if clock == nil {
 		clock = realClock{}
 	}
-	return &Registry{uow: uow, repos: repos, clock: clock, cfg: cfg}
+	return &Registry{uow: uow, repos: repos, clock: clock, cfg: cfg, timeline: timelineSvc, provider: provider}
 }
 
 // Seed reconciles the configured instance and model into the registry,
@@ -484,4 +497,28 @@ func (r *Registry) ownerOnly(
 		}
 		return apply(ctx, repos, workspace, now)
 	})
+}
+
+// requireOwner is ownerOnly's read-only half, for recovery.go's
+// ConfirmLink: it needs the same disabled/not-owner/no-enabled-workspace
+// checks, but cannot run them inside the write transaction ownerOnly
+// opens, because a provider call has to happen between this check and
+// ConfirmLink's own write (plan §5.5: "provider 呼び出しは Tx 外、書き込
+// みは 1 Tx"). Holding a database transaction open across a network call
+// is exactly what ownerOnly's Tx-wrapped apply would otherwise force.
+func (r *Registry) requireOwner(ctx context.Context, actorID string) error {
+	if !r.cfg.Enabled {
+		return ErrDisabled
+	}
+	actor, err := r.repos.Actors.Get(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	if !actor.IsLoginable() {
+		return ErrNotOwner
+	}
+	if _, err := r.repos.OpenWebUIWorkspaces.GetEnabled(ctx); err != nil {
+		return err
+	}
+	return nil
 }

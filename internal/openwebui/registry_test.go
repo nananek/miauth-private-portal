@@ -95,7 +95,7 @@ func TestSeed_ReconcilesGenerationEnabledFromConfig(t *testing.T) {
 
 	tr.clock.Advance(time.Hour)
 	cfg.GenerationEnabled = false
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock)
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("second Seed: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSeed_IsIdempotentWithStableIdentity(t *testing.T) {
 	changed.ModelDisplayName = "Renamed Model"
 	changed.ModelSlug = "renamed"
 	changed.PresentationHost = "renamed.example.net"
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock)
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("second Seed: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSeed_DifferentBaseURLCreatesADistinctWorkspace(t *testing.T) {
 	tr.clock.Advance(time.Hour)
 	changed := cfg
 	changed.BaseURL = "https://internal-instance.example.net"
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock)
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("second Seed: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
 	switched := cfg
 	switched.DefaultModelID = "gpt-oss:120b"
 	switched.ModelSlug = "big-model"
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, switched, tr.clock)
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, switched, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("seed model B as default: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
 
 	// Switching back reactivates A rather than leaving it dead forever.
 	tr.clock.Advance(time.Hour)
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock)
+	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("seed model A as default again: %v", err)
 	}

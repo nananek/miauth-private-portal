@@ -528,40 +528,44 @@ exists.
 - [x] Implement owner action -> local post -> durable job -> outbound chat
   turn -> assistant entry E2E; local post success must not depend on provider
   success. (Issue #53 PR3)
-- [ ] Test linear ordering, independent branch chat creation or explicit
+- [x] Test linear ordering, independent branch chat creation or explicit
   unsupported-branch rejection, duplicates, response-loss ambiguity, cycles,
   orphans, stale branches, concurrent turns, outage, auth failure, rate limit,
   malformed response, schema drift, state-transition guards, and
-  cancellation. **Partially done (PR3):** linear ordering, new-branch vs.
-  continuation selection (including the same-head-twice and re-ask-after-
-  failure cases), duplicate delivery, response-loss ambiguity on both
-  creation and continuation, orphaned/ineligible path nodes, concurrent
-  same-thread turns (single-flight), auth failure, and `ambiguous`/`failed`/
-  `dead`-link state-transition guards (`TestTurnJob_LinkStateGuard_
-  AmbiguousFailedDeadNeverCallProvider`: a pending turn whose link is in any
-  of those three states fails closed as `link_not_ready`, `Permanent`,
-  through `TurnJob.Handle`'s `switch link.State` default case, without the
-  provider ever being called) are covered
-  (`internal/openwebui/{path,bridge,turnjob}_test.go`,
-  `internal/httpserver/openwebui_{enqueue,e2e}_test.go`). A genuine reply-
-  tree cycle cannot be constructed through any legitimate repository write
-  (`entries.parent_entry_id` carries its own foreign key and no write alters
-  a parent after creation — see `path_test.go`'s comment on
-  `ErrPathCycle`), so that guard stays defense-in-depth, untested here.
-  Still open for a later PR: an explicit stale-branch-isolation test (that a
-  turn's completion only ever moves its own link's `remote_current_id`), an
-  explicit mid-call-cancellation test at the `TurnJob` layer (the code path
-  exists — `isLastAttempt` treats an already-cancelled `ctx` as never the
-  job's last attempt, so a `jobs.Manager` shutdown or a lost lease never
-  freezes a link ambiguous merely because it happened to land on what would
-  otherwise have been the final attempt — but PR3 did not add a dedicated
-  test for it), and malformed/schema-drift responses reaching `TurnJob`
-  itself rather than only `internal/provider/openwebui`'s own
-  (already-covered) classification of them.
+  cancellation. Linear ordering, new-branch vs. continuation selection
+  (including the same-head-twice and re-ask-after-failure cases), duplicate
+  delivery, response-loss ambiguity on both creation and continuation,
+  orphaned/ineligible path nodes, concurrent same-thread turns
+  (single-flight), auth failure, `ambiguous`/`failed`/`dead`-link
+  state-transition guards (`TestTurnJob_LinkStateGuard_
+  AmbiguousFailedDeadNeverCallProvider`), stale-branch isolation
+  (`TestTurnJob_StaleBranchIsolation_CompletionOnlyMovesItsOwnLink`: a
+  second, untouched branch's `remote_current_id` is unaffected by another
+  branch's completion), mid-call cancellation on both the create and
+  continue phase (`TestTurnJob_StartChat_ContextCancelledMidCall_
+  RetriesWithoutFreezing`, `TestTurnJob_ContinueTurn_
+  ContextCancelledMidCall_NextDeliveryLooksUpFirst`: a `ctx` already
+  cancelled when the provider call returns leaves the turn retryable —
+  pending, its attempt already recorded — instead of freezing the link
+  ambiguous on that same delivery, for both phases), and schema drift
+  reaching `TurnJob` itself rather than only `internal/provider/openwebui`'s
+  own classification of it (`TestTurnJob_ContinueTurn_
+  ContractFailedFailsPermanentlyLinkStaysReady`) are all covered
+  (`internal/openwebui/{path,bridge,turnjob,recovery}_test.go`,
+  `internal/httpserver/openwebui_{enqueue,e2e}_test.go`,
+  `cmd/openwebuictl/main_test.go`). Two residual gaps stay deliberately
+  untested, both defense-in-depth rather than reachable behavior: a genuine
+  reply-tree cycle cannot be constructed through any legitimate repository
+  write (`entries.parent_entry_id` carries its own foreign key and no write
+  alters a parent after creation — see `path_test.go`'s comment on
+  `ErrPathCycle`), and rate limit (429) is classified through the exact same
+  `default:` bucket — and therefore the exact same bounded-retry-then-
+  ambiguous code path — as the already-tested timeout/server_error/transport
+  categories, so a dedicated test would exercise no code a `Category`
+  switch statement doesn't already share.
 
-Terminology settled during implementation (four PRs, tracked against this
-one issue; PR4 — owner recovery and `openwebuictl` — is not yet built, so
-`Closes #53` is still pending):
+Terminology settled during implementation (all four PRs tracked against
+this one issue are now built; this PR, PR4, is `Closes #53`):
 
 - The port ADR-0005 D1 specifies (`StartChat`/`ContinueTurn`) grew two
   members the bridge could not be built without — `OnChatCreated` (a
@@ -594,6 +598,37 @@ one issue; PR4 — owner recovery and `openwebuictl` — is not yet built, so
   job could all commit atomically alongside the owner's post without
   `internal/timeline` importing `internal/openwebui` (or vice versa beyond
   what the hook's function signature already requires).
+- PR4's five recovery methods (`ListLinks`, `DescribeLink`, `ConfirmLink`,
+  `AbandonLink`, `FreezeLink`) landed on `Registry` itself rather than a
+  separate type, matching the plan's own framing of them as more owner-only
+  `Registry` changes alongside `SetGenerationEnabled`/`SetCapabilityStatus`/
+  `RenameModel` — `Registry` grew an optional `*timeline.Service` and an
+  optional `Provider`, both nil for `cmd/server`'s own instance (recovery
+  has no HTTP path; only `cmd/openwebuictl` ever calls `ConfirmLink`, and
+  only its own `confirm` subcommand builds a real provider client).
+- `ConfirmLink` never lists the provider's chats, so a link whose
+  `remote_chat_id` was itself lost (a creation response that never reached
+  `OnChatCreated`) cannot be *verified* — only trusted: with no message id
+  to look up, the owner's (or the link's own already-recorded) chat id is
+  written through `MarkReady` as-is, and the turn is recorded
+  `failed`/`creation_lost` without ever calling the provider. Only a
+  continuation whose client-generated assistant message id was already
+  recorded can be verified through `LookupTurnOutcome`.
+- `FreezeLink` — the operator-driven version of the roadmap's "expired
+  lease before a definitive result -> ambiguous" — gates on the
+  `creation_pending` link's own claim job rather than any timer: a claim
+  job still `pending` or `running` is left alone (it may yet confirm the
+  chat on its own), while `dead`, `failed`, or a job row that no longer
+  exists all mean it is safe to freeze.
+- `cmd/openwebuictl` (`links`, `show`, `confirm`, `abandon`, `freeze`)
+  follows `cmd/jobsctl`'s own skeleton exactly (`config.Load` -> `sqlite.
+  Open` -> `Migrate` -> resolve the owner actor -> build the use-case type),
+  and prints only id/state/category/timestamp/boolean-presence fields
+  (never a post body or a raw opaque remote id) through the same
+  `safeCell` non-printable-character filter `jobsctl` uses. The optional
+  `probe` subcommand the plan floated (checking a configured model is
+  visible to the credential) was left for a later issue rather than built
+  speculatively.
 
 ## OWUI-R: optional release gate
 

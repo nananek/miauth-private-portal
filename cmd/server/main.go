@@ -120,7 +120,7 @@ func run() error {
 			ModelSlug:         cfg.OpenWebUI.ModelSlug,
 			DefaultModelID:    cfg.OpenWebUI.DefaultModelID,
 			GenerationEnabled: cfg.OpenWebUI.GenerationEnabled,
-		}, nil)
+		}, nil, nil, nil)
 		if err := registry.Seed(ctx); err != nil {
 			return fmt.Errorf("seed openwebui registry: %w", err)
 		}

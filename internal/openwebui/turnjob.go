@@ -290,6 +290,22 @@ func (j *TurnJob) handleCreateError(ctx context.Context, job domain.Job, turn do
 	case CategoryPolicyViolation:
 		return j.failPermanent(ctx, turn, link, domain.FailureCategoryPolicyViolation, "chat creation refused by local policy")
 	default: // rate_limited, server_error, transport, timeout, ambiguous, contract_failed
+		// A creation call is never replayed (ADR-0005 D7), so this branch
+		// does not consult isLastAttempt the way handleTurnError's own
+		// default case does — an actual remote-side failure here is
+		// ambiguous on the very first attempt, not the last one. But
+		// plan §5.4 step 8's cancellation rule still applies: a failure
+		// that surfaces only because ctx was already cancelled (Manager
+		// shutting down, or this job's lease expiring mid-call) must
+		// leave the turn exactly as BeginAttempt left it — pending,
+		// attempt already recorded — rather than freezing the link
+		// ambiguous on this delivery. The *next* delivery's turn.Attempt
+		// > 0 check above (an outcome truly unknown, whatever the
+		// reason) is what performs that freeze instead, the same way it
+		// already does for a lost creation response.
+		if ctx.Err() != nil {
+			return fmt.Errorf("openwebui: turn: create: %s", pe.Category)
+		}
 		return j.failAmbiguous(ctx, turn, link, strPtr(domain.FailureCategoryCreationLost))
 	}
 }
