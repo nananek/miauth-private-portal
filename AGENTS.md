@@ -6,7 +6,7 @@ This repository is a single-owner learning log and interactive timeline service 
 
 The service stores user posts first, then performs LLM work and external-source ingestion asynchronously. Failure of an LLM, RSS source, IMAP server, or other integration must never make a user post disappear.
 
-Do not add a custom web UI, federation, general-purpose Misskey compatibility, user registration/deletion/role management, PostgreSQL support, notebook export, or multi-user behavior unless an issue in the tracker explicitly promotes that work.
+Do not add a custom web UI, federation, general-purpose Misskey compatibility, user registration/deletion/role management, PostgreSQL support, notebook export, or multi-user behavior unless an issue in the tracker explicitly promotes that work. Do not add a provider-specific ingestion adapter until the tracker has approved that adapter's value; see "Adding a source adapter" in docs/operations/configuration.md.
 
 ## Sources of truth
 
