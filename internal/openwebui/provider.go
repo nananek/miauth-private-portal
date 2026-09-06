@@ -1,0 +1,263 @@
+// This file is Issue #53's (OWUI-B) outbound provider port: the shape
+// internal/provider/openwebui's HTTP adapter implements against a real
+// Open WebUI instance, and the shape a future durable job handler
+// (Issue #53's later PRs) and its tests call. Like internal/llmreply's
+// Provider, it depends on nothing but the standard library — no
+// net/http, no domain, no endpoint name — so a fake can stand in for
+// tests without pulling in any of that.
+//
+// ADR-0005 D1 keeps the port's two operations, StartChat and
+// ContinueTurn, and its 2026-09-06 addendum for Issue #53 adds the two
+// members below that the bridge could not be built without:
+// OnChatCreated (a callback StartChat's implementation invokes once the
+// chat id is confirmed, before any generation is requested) and
+// LookupTurnOutcome (the "result lookup" a durable job needs before it
+// may ever retry an uncertain continuation — see ADR-0005 D7's
+// addendum). Neither promotes an Open WebUI endpoint name into this
+// port: an adapter for a different chat-persistence backend could
+// implement Provider without either concept mapping to a literal
+// endpoint.
+package openwebui
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// Message is one chat-style turn in the sequence a Provider call sends.
+// Role is "user" or "assistant" — never "system": ADR-0005 D4 requires
+// the locally assembled sequence to carry no system prompt, since Open
+// WebUI forwards it to the upstream model exactly as sent, with nothing
+// added or substituted.
+type Message struct {
+	Role    string
+	Content string
+}
+
+// TurnIDs are the client-generated correlation ids for one turn: the
+// user message id, the assistant message id, and — for a continuation
+// — the previous assistant message id this turn attaches to as its
+// remote parent. Compat's "Opaque ID semantics" is what makes this
+// possible: because these ids are minted locally rather than returned
+// by the provider, a caller can persist them before ever making the
+// call, so a lost response never leaves the local side without an id
+// to reconcile against.
+type TurnIDs struct {
+	UserMessageID      string
+	AssistantMessageID string
+	ParentAssistantID  *string
+}
+
+// StartChatRequest is the initial turn on a brand-new remote chat.
+type StartChatRequest struct {
+	ModelID string
+	// Messages is the root-to-parent context this turn continues, in
+	// order; NewTurn is the message being asked now. Neither carries a
+	// local entry id, a Misskey field, or a system prompt (ADR-0005
+	// D2, D4).
+	Messages []Message
+	NewTurn  Message
+	IDs      TurnIDs
+	// CorrelationID is a local request id for logging only. It is never
+	// sent to the provider and is not a provider idempotency key — Open
+	// WebUI has none (ADR-0005 D7).
+	CorrelationID string
+	SentAt        time.Time
+	// OnChatCreated is invoked once chat creation has returned a
+	// server-assigned chat id and before the first completion is
+	// requested (ADR-0005 D1's addendum). A caller uses it to persist
+	// the id durably at the earliest possible point. A non-nil error
+	// aborts the call before any generation is attempted — returned
+	// as-is, not wrapped in a *ProviderError, so a caller can tell "the
+	// hook itself failed" (its own concern to classify and retry) apart
+	// from a provider-classified failure.
+	OnChatCreated func(ctx context.Context, remoteChatID string) error
+}
+
+// ContinueTurnRequest is a turn on an already-confirmed remote chat.
+// IDs.ParentAssistantID must name the previous assistant message:
+// ADR-0005 D4 requires both the request's own parent id and the new
+// user message's parent id to name it, or the turn lands as a
+// disconnected pair instead of extending the chain.
+type ContinueTurnRequest struct {
+	RemoteChatID  string
+	ModelID       string
+	Messages      []Message
+	NewTurn       Message
+	IDs           TurnIDs
+	CorrelationID string
+	SentAt        time.Time
+}
+
+// TurnResult is a turn's confirmed successful outcome. RemoteCurrentID,
+// PromptTokens, CompletionTokens, and FinishReason are accounting and
+// correlation metadata only — nothing about them is authoritative for
+// anything but bookkeeping.
+type TurnResult struct {
+	Content          string
+	RemoteCurrentID  *string
+	PromptTokens     *int
+	CompletionTokens *int
+	FinishReason     *string
+}
+
+// TurnOutcome is what LookupTurnOutcome reads back about one assistant
+// message: whether it exists, whether it is done, whether it carries an
+// error, its content once done, and the chat's current-message pointer.
+// Found false means the assistant message this turn asked for is not
+// (yet, or ever) present in the chat's history — distinct from the
+// chat lookup itself failing, which LookupTurnOutcome reports as an
+// error instead.
+type TurnOutcome struct {
+	Found            bool
+	Done             bool
+	HasError         bool
+	Content          string
+	RemoteCurrentID  *string
+	PromptTokens     *int
+	CompletionTokens *int
+}
+
+// Provider is the outbound boundary a durable job handler (Issue #53's
+// later PRs) uses to talk to a chat-persistence backend.
+// internal/provider/openwebui implements it against a real Open WebUI
+// instance; tests use a fake.
+type Provider interface {
+	// StartChat creates a new remote chat and runs its first turn.
+	StartChat(ctx context.Context, req StartChatRequest) (TurnResult, error)
+	// ContinueTurn runs a turn on an already-confirmed remote chat.
+	ContinueTurn(ctx context.Context, req ContinueTurnRequest) (TurnResult, error)
+	// LookupTurnOutcome reads back the one assistant message a prior
+	// StartChat or ContinueTurn call named, and nothing else: not the
+	// rest of the chat's history, not its title, not any other message.
+	// It exists so an uncertain completion can be resolved without
+	// resending it (ADR-0005 D7's addendum) — a durable job calls it
+	// before ever retrying a continuation whose previous attempt's
+	// outcome is unknown.
+	LookupTurnOutcome(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error)
+}
+
+// Phase names which of Provider's three calls a ProviderError came
+// from, so a caller (and a log line) can tell "the chat was never
+// created" apart from "an established chat's turn failed" apart from
+// "a result lookup itself failed" without parsing Error()'s text.
+type Phase string
+
+const (
+	PhaseCreate Phase = "create"
+	PhaseTurn   Phase = "turn"
+	PhaseLookup Phase = "lookup"
+)
+
+// Category classifies a Provider failure. It is this port's own
+// vocabulary — not domain.FailureCategory* — because a Provider call's
+// classification and a turn's eventual recorded failure_category are
+// different questions: a bounded-retry job handler decides the latter
+// from this Category *and* which Phase produced it *and* how many
+// attempts have already been made (ADR-0005 D7's asymmetry: a
+// `creation_pending` StartChat is never automatically replayed, while
+// a `ready` link's continuation may be retried within a bounded
+// count), so the two vocabularies are deliberately not merged into
+// one. CategoryAmbiguous
+// has no domain.FailureCategory counterpart at all: it means "this call's
+// outcome could not be determined", never a category recorded on its own.
+type Category string
+
+const (
+	// CategoryAuthFailed is a rejected credential (401/403).
+	CategoryAuthFailed Category = "auth_failed"
+	// CategoryClientRejected is a definitive 4xx for the request itself
+	// (not credentials) — an unknown model, a malformed request, or a
+	// request this client refused to send because it exceeded
+	// Config.MaxRequestBytes (see ErrRequestTooLarge).
+	CategoryClientRejected Category = "client_rejected"
+	// CategoryContractFailed is a response this adapter could not
+	// decode as the pinned contract (docs/compat/openwebui-0.11.3.md) —
+	// the target changed shape, so nothing about the outcome may be
+	// assumed.
+	CategoryContractFailed Category = "contract_failed"
+	// CategoryTurnFailed is a chat lookup that found the assistant
+	// message carrying an error object.
+	CategoryTurnFailed Category = "turn_failed"
+	// CategoryRateLimited is a 429 response.
+	CategoryRateLimited Category = "rate_limited"
+	// CategoryServerError is a 5xx response.
+	CategoryServerError Category = "server_error"
+	// CategoryTransport is a network-level failure below the HTTP
+	// response layer (connection refused, reset, DNS, ...).
+	CategoryTransport Category = "transport"
+	// CategoryTimeout is a call that exceeded its configured deadline.
+	CategoryTimeout Category = "timeout"
+	// CategoryPolicyViolation is a request this client refused to send
+	// or follow at all: a disallowed redirect, a non-allowlisted
+	// origin, an SSRF-guarded address, or a chat id this client will
+	// not embed in a request path.
+	CategoryPolicyViolation Category = "policy_violation"
+	// CategoryAmbiguous is a call whose outcome genuinely could not be
+	// determined: a chat-creation or chat-lookup response that was
+	// itself the literal JSON null the target's own schema documents as
+	// a possible 200 body, or (from runTurn) a turn whose lookup found
+	// the assistant message not yet done and not erroring either. It is
+	// never adopted as evidence of failure — only of "unknown".
+	CategoryAmbiguous Category = "ambiguous"
+)
+
+// ProviderError wraps a classified Provider failure. Error() renders a
+// fixed "openwebui: <phase>: <category>" string — never the request
+// body, a response body, a header, or a URL. This is not incidental
+// caution: the observed Open WebUI instance echoes the upstream
+// credential pseudo-secret verbatim into its own error text (ADR-0005
+// D6), so anything from a response body reaching Error()'s return value
+// would leak it into any log line or error response that prints an
+// error's text.
+type ProviderError struct {
+	Category Category
+	Phase    Phase
+	err      error
+}
+
+// NewProviderError classifies err under category and phase. A nil err
+// returns nil so a caller can write "return result, NewProviderError(...)"
+// without manufacturing a failure when there wasn't one.
+func NewProviderError(category Category, phase Phase, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ProviderError{Category: category, Phase: phase, err: err}
+}
+
+func (e *ProviderError) Error() string {
+	return "openwebui: " + string(e.Phase) + ": " + string(e.Category)
+}
+func (e *ProviderError) Unwrap() error { return e.err }
+
+// ErrRequestTooLarge is the sentinel wrapped inside a *ProviderError
+// with CategoryClientRejected when an assembled request body exceeds
+// Config.MaxRequestBytes. It exists as a distinct sentinel — rather
+// than relying on Category alone — because a future durable job handler
+// needs to tell this specific, request-shape-known-in-advance case
+// apart from an ordinary provider-side rejection, so it can record
+// domain.FailureCategoryRequestTooLarge instead of the generic
+// client_rejected that Category alone would imply.
+var ErrRequestTooLarge = errors.New("openwebui: request exceeds the configured size bound")
+
+// newRemoteMessageID mints a client-generated correlation id in the
+// same RFC 4122 version-4 form Open WebUI's own ids take
+// (docs/compat/openwebui-0.11.3.md's "Opaque ID semantics": "client-
+// generated UUIDs"). A caller mints one of these for each side of a
+// turn (TurnIDs.UserMessageID, TurnIDs.AssistantMessageID) and persists
+// them before making the Provider call that will use them, never
+// after.
+func newRemoteMessageID() string {
+	buf := make([]byte, 16)
+	// crypto/rand.Read never returns an error on Go 1.24+ (it crashes
+	// the process instead — go.dev/issue/66821), so there is no error
+	// path here to check.
+	_, _ = rand.Read(buf)
+	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 10 (RFC 4122)
+	return fmt.Sprintf("%x-%x-%x-%x-%x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}

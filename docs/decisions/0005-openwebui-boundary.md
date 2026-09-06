@@ -58,6 +58,34 @@ but it is only meaningful for background (streaming) generation, which is out
 of scope, and its safety was not verified. The roadmap already conditions
 `CancelTurn` on proven cancellation safety, so the condition simply is not met.
 
+**Addendum (2026-09-06, Issue #53).** The two operations above are kept, and
+the bridge implementation added two things to the port that it could not be
+built without. Neither promotes an endpoint name into the domain contract:
+
+- `StartChat` takes an `OnChatCreated(ctx, remoteChatID)` callback, which the
+  adapter invokes after `POST /api/v1/chats/new` has returned the
+  server-assigned id and *before* the first completion is requested. The
+  bridge uses it to persist `remote_chat_id` and move the link from
+  `creation_pending` to `ready`. "Confirmed" in the roadmap's state machine
+  therefore means "the chat exists with a stable id" — exactly what D3's
+  pre-creation step establishes — and the first assistant turn is an ordinary
+  turn on a ready link. Without this hook, a completion response lost *after*
+  a successful creation would have to be treated as a lost creation and frozen
+  as `ambiguous`, even though its outcome is recoverable (see the next point).
+- `LookupTurnOutcome(ctx, remoteChatID, assistantMessageID)` is the "result
+  lookup" the roadmap (§"Idempotency and failure boundary") requires before
+  any automatic replay of an uncertain completion. It reads
+  `GET /api/v1/chats/{id}` on the chat this bridge itself created and returns
+  only `done`, whether an `error` object is present, `content`, `currentId`,
+  and usage for the one assistant message the bridge itself named. It is not
+  `GetChat`: no other message, no title, and no history is returned or
+  retained, so the roadmap's exclusion of `ListChats`/`GetChat`/history pull
+  stands. The adapter never decodes `error.content` (D6).
+
+The creation call has no client-generated id to look up, and finding a lost
+chat would mean listing chats, which is excluded — so a lost creation
+response remains `ambiguous` until owner recovery, as D7 requires.
+
 ### D2. Local identifiers are the only source of truth
 
 Aria's `thread_id` and `reply_to_id` own the conversation. `chat_id`, message
@@ -174,6 +202,17 @@ The roadmap's local rules therefore stand unchanged and are load-bearing: a
 link's continuation may be retried within a bounded count; an `ambiguous`
 outcome needs an explicit owner recovery action. The `idempotency_key` in the
 port signature stays a local correlation value, not a provider feature.
+
+**Addendum (2026-09-06, Issue #53).** A continuation on a `ready` link may be
+retried within the job's bounded attempt count because two verified facts
+make the replay safe: re-sending a turn with the same client-generated ids
+overwrites the assistant node in place rather than adding one (compat
+§"POST /api/chat/completions" (e)), and `LookupTurnOutcome` (D1 addendum)
+lets the worker read the earlier attempt's outcome first, so a turn that did
+complete is adopted rather than regenerated. A `creation_pending`
+`StartChat` is still never replayed. Single-flight per thread is an
+in-process lock in the worker (this deployment runs one worker process); the
+job's own lease and the "attempt recorded before the call" rule cover restart.
 
 ### D8. Streaming stays out of the MVP
 
