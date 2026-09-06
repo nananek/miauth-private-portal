@@ -14,6 +14,7 @@ var expectedTables = []string{
 	"actors", "miauth_local_sessions", "api_tokens", "threads", "entries", "user_tags", "llm_classifications",
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
 	"external_sources", "external_items", "reactions", "mentions", "notifications",
+	"openwebui_workspaces", "openwebui_models", "openwebui_conversation_links", "openwebui_turn_links",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {
@@ -681,6 +682,276 @@ func TestMigrate_UpgradeRebuildsActorsForOpenWebUIModelType(t *testing.T) {
 		); err != nil {
 			t.Errorf("insert openwebui_model actor %s after upgrade: %v", id, err)
 		}
+	}
+}
+
+// openUpgradeDB opens a fresh file-backed database with only the
+// migrations up to and including throughVersion applied, so an upgrade
+// test can seed pre-existing rows the way a deployed database would have
+// them before the migration under test runs.
+func openUpgradeDB(t *testing.T, throughVersion int) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > throughVersion {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+	return sqlDB
+}
+
+// TestMigrate_UpgradeAppliesOpenWebUIRegistryTables backs migration 0017
+// (Issue #52 PR2). Like the reactions/mentions/notifications upgrades
+// above these are brand-new tables with no pre-existing rows to
+// preserve, so the test's job is the constraints — in particular the
+// composite foreign key, which is the only thing making "a workspace's
+// default model belongs to that workspace" true rather than merely
+// intended.
+func TestMigrate_UpgradeAppliesOpenWebUIRegistryTables(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 16)
+	ctx := t.Context()
+
+	const (
+		actorA = "virtual-actor-a"
+		actorB = "virtual-actor-b"
+	)
+	for _, id := range []string{actorA, actorB} {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'openwebui_model', '2024-01-01T00:00:00Z')`, id,
+		); err != nil {
+			t.Fatalf("seed VirtualActor %s: %v", id, err)
+		}
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	insertWorkspace := func(id, baseURL string) error {
+		_, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO openwebui_workspaces (id, name, base_url, secret_ref, presentation_host, created_at, updated_at)
+			 VALUES (?, 'Open WebUI', ?, 'OPENWEBUI_API_KEY', 'openwebui.example.net',
+			 '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, id, baseURL)
+		return err
+	}
+	if err := insertWorkspace("w1", "https://a.example.net"); err != nil {
+		t.Fatalf("insert workspace after upgrade: %v", err)
+	}
+	if err := insertWorkspace("w2", "https://b.example.net"); err != nil {
+		t.Fatalf("insert second workspace after upgrade: %v", err)
+	}
+	if err := insertWorkspace("w3", "https://a.example.net"); err == nil {
+		t.Error("a duplicate base_url should violate UNIQUE(base_url)")
+	}
+
+	// The gates and capability statuses default to the cautious values:
+	// nothing about the target is assumed before it is observed.
+	var enabled, generationEnabled int
+	var chatCreate, chatContinue, capabilities string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT enabled, generation_enabled, chat_create_status, chat_continue_status
+		 FROM openwebui_workspaces WHERE id = 'w1'`,
+	).Scan(&enabled, &generationEnabled, &chatCreate, &chatContinue); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 0 || generationEnabled != 0 || chatCreate != "unverified" || chatContinue != "unverified" {
+		t.Errorf("workspace defaults = %d/%d/%q/%q, want 0/0/unverified/unverified",
+			enabled, generationEnabled, chatCreate, chatContinue)
+	}
+
+	insertModel := func(id, workspaceID, externalID, slug, actorID string) error {
+		_, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO openwebui_models (id, workspace_id, external_model_id, display_name, actor_slug, actor_id,
+				created_at, updated_at)
+			 VALUES (?, ?, ?, 'Display', ?, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`,
+			id, workspaceID, externalID, slug, actorID)
+		return err
+	}
+	if err := insertModel("m1", "w1", "gpt-oss:20b", "model", actorA); err != nil {
+		t.Fatalf("insert model after upgrade: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT capabilities FROM openwebui_models WHERE id = 'm1'`).Scan(&capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities != "{}" {
+		t.Errorf("model capabilities default = %q, want %q", capabilities, "{}")
+	}
+	if err := insertModel("m2", "w1", "gpt-oss:20b", "other", actorB); err == nil {
+		t.Error("a duplicate (workspace_id, external_model_id) should be rejected")
+	}
+	if err := insertModel("m3", "w1", "other-model", "other", actorA); err == nil {
+		t.Error("a second model on the same actor should violate UNIQUE(actor_id)")
+	}
+	if err := insertModel("m4", "w1", "other-model", "model", actorB); err == nil {
+		t.Error("a duplicate (workspace_id, actor_slug) should be rejected")
+	}
+	// The provider's id namespace is per instance, so the same external
+	// id in another workspace is a different model.
+	if err := insertModel("m5", "w2", "gpt-oss:20b", "model", actorB); err != nil {
+		t.Errorf("the same external model id in another workspace should be allowed: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_workspaces SET default_model_id = 'm1' WHERE id = 'w1'`); err != nil {
+		t.Fatalf("point a workspace at its own model: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_workspaces SET default_model_id = 'm1' WHERE id = 'w2'`); err == nil {
+		t.Error("a model from another workspace must not be usable as a default")
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_workspaces SET default_model_id = 'nope' WHERE id = 'w1'`); err == nil {
+		t.Error("a nonexistent model must not be usable as a default")
+	}
+}
+
+// TestMigrate_UpgradeAppliesOpenWebUILinkTables backs migration 0018
+// (Issue #52 PR2). Its constraints are the local-identity rules
+// ADR-0005 D2 depends on: the branch is identified by (thread_id,
+// branch_id), a remote chat id is unique per workspace only when it is
+// present at all, and the logical turn key is (link, local message,
+// revision).
+func TestMigrate_UpgradeAppliesOpenWebUILinkTables(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 17)
+	ctx := t.Context()
+
+	const (
+		ownerID = "pre-existing-owner"
+		actorID = "virtual-actor"
+		// A thread's root entry shares the thread's ID (see the entries
+		// table's (parent_entry_id IS NULL) = (id = thread_id) check).
+		threadID = "pre-existing-thread"
+		entryID  = threadID
+	)
+	for _, seed := range []struct {
+		what string
+		sql  string
+	}{
+		{"owner actor", `INSERT INTO actors (id, actor_type, created_at) VALUES ('` + ownerID + `', 'owner', '2024-01-01T00:00:00Z')`},
+		{"VirtualActor", `INSERT INTO actors (id, actor_type, created_at) VALUES ('` + actorID + `', 'openwebui_model', '2024-01-01T00:00:00Z')`},
+		{"thread", `INSERT INTO threads (id, created_at, updated_at) VALUES ('` + threadID + `', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"entry", `INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES ('` + entryID + `', '` + threadID + `', 'user_post', '` + ownerID + `', 'body', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"workspace", `INSERT INTO openwebui_workspaces (id, name, base_url, secret_ref, presentation_host, created_at, updated_at)
+		 VALUES ('w1', 'Open WebUI', 'https://a.example.net', 'OPENWEBUI_API_KEY', 'openwebui.example.net', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+		{"model", `INSERT INTO openwebui_models (id, workspace_id, external_model_id, display_name, actor_slug, actor_id, created_at, updated_at)
+		 VALUES ('m1', 'w1', 'gpt-oss:20b', 'Display', 'model', '` + actorID + `', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`},
+	} {
+		if _, err := sqlDB.ExecContext(ctx, seed.sql); err != nil {
+			t.Fatalf("seed %s: %v", seed.what, err)
+		}
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	insertLink := func(id, branchID, state string) error {
+		_, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO openwebui_conversation_links (id, thread_id, branch_id, workspace_id, model_id, state,
+				claimed_at, last_transition_at, created_at, updated_at)
+			 VALUES (?, ?, ?, 'w1', 'm1', ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z',
+			 '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, id, threadID, branchID, state)
+		return err
+	}
+	if err := insertLink("l1", "branch-1", "creation_pending"); err != nil {
+		t.Fatalf("insert link after upgrade: %v", err)
+	}
+	if err := insertLink("l2", "branch-1", "creation_pending"); err == nil {
+		t.Error("a second link for the same (thread_id, branch_id) should be rejected")
+	}
+	if err := insertLink("l3", "branch-2", "unlinked"); err == nil {
+		t.Error("'unlinked' is the absence of a row, not a state: the CHECK should reject it")
+	}
+	if err := insertLink("l4", "branch-2", "creation_pending"); err != nil {
+		t.Fatalf("insert a second branch of the same thread: %v", err)
+	}
+
+	// Many links may have no remote chat; no two in a workspace may
+	// share one.
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_conversation_links SET remote_chat_id = 'chat-1' WHERE id = 'l1'`); err != nil {
+		t.Fatalf("record a remote chat: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE openwebui_conversation_links SET remote_chat_id = 'chat-1' WHERE id = 'l4'`); err == nil {
+		t.Error("two links in one workspace should not be able to claim the same remote chat")
+	}
+
+	insertTurn := func(id, linkID, localMessageID, requestID string, revision int, status string) error {
+		_, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO openwebui_turn_links (id, link_id, branch_id, local_message_id, request_id, revision,
+				provider_status, created_at, updated_at)
+			 VALUES (?, ?, 'branch-1', ?, ?, ?, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`,
+			id, linkID, localMessageID, requestID, revision, status)
+		return err
+	}
+	if err := insertTurn("t1", "l1", entryID, "request-1", 1, "pending"); err != nil {
+		t.Fatalf("insert turn after upgrade: %v", err)
+	}
+	if err := insertTurn("t2", "l1", entryID, "request-1", 2, "pending"); err == nil {
+		t.Error("a duplicate request_id should be rejected")
+	}
+	if err := insertTurn("t3", "l1", entryID, "request-2", 1, "pending"); err == nil {
+		t.Error("a duplicate (link_id, local_message_id, revision) should be rejected")
+	}
+	if err := insertTurn("t4", "l1", entryID, "request-3", 2, "pending"); err != nil {
+		t.Errorf("a new revision of the same message should be allowed: %v", err)
+	}
+	if err := insertTurn("t5", "l1", entryID, "request-4", 3, "probably_fine"); err == nil {
+		t.Error("an unknown provider_status should be rejected by the CHECK constraint")
+	}
+	if err := insertTurn("t6", "l1", "does-not-exist", "request-5", 1, "pending"); err == nil {
+		t.Error("a turn naming a nonexistent entry should fail the foreign key")
+	}
+
+	// Both tables' defaults: a turn starts at its first revision with no
+	// attempt made and no tombstone.
+	var revision, attempt int
+	var tombstonedAt sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT revision, attempt, tombstoned_at FROM openwebui_turn_links WHERE id = 't1'`,
+	).Scan(&revision, &attempt, &tombstonedAt); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 1 || attempt != 0 || tombstonedAt.Valid {
+		t.Errorf("turn defaults = revision %d, attempt %d, tombstoned_at %v; want 1, 0, NULL", revision, attempt, tombstonedAt)
+	}
+
+	rows, err := sqlDB.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("PRAGMA foreign_key_check reported a violation after the link migrations")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

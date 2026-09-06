@@ -22,6 +22,15 @@ type Repos struct {
 	Reactions       ReactionRepository
 	Mentions        MentionRepository
 	Notifications   NotificationRepository
+
+	// The Open WebUI registry and conversation-link repositories (Issue
+	// #52). They are always present; whether anything writes through
+	// them is the OPENWEBUI_ENABLED feature flag's decision, made in
+	// cmd/server, not here.
+	OpenWebUIWorkspaces OpenWebUIWorkspaceRepository
+	OpenWebUIModels     OpenWebUIModelRepository
+	OpenWebUILinks      OpenWebUIConversationLinkRepository
+	OpenWebUITurnLinks  OpenWebUITurnLinkRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made
