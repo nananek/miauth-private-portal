@@ -1,0 +1,13 @@
+{
+  "id": "5407e890-7df7-4879-ae06-cdb1a49950c6",
+  "parentId": "95807eb7-6302-41f3-9c61-e5781462197d",
+  "childrenIds": [],
+  "role": "assistant",
+  "content": "",
+  "done": false,
+  "model": "mock-model",
+  "timestamp": 1788672280,
+  "error": {
+    "content": "simulated upstream error 500; token sk-mock-upstream-secret must not leak"
+  }
+}

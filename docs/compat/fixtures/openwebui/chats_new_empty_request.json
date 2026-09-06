@@ -1,0 +1,17 @@
+{
+  "chat": {
+    "id": "",
+    "title": "bridge-precreated",
+    "models": [
+      "mock-model"
+    ],
+    "params": {},
+    "history": {
+      "messages": {},
+      "currentId": null
+    },
+    "messages": [],
+    "tags": [],
+    "timestamp": 1788672375000
+  }
+}

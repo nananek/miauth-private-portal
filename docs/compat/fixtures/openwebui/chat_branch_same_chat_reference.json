@@ -1,0 +1,159 @@
+{
+  "id": "76f89a52-6ff6-423f-9a4a-adaa9370b687",
+  "user_id": "user-redacted",
+  "title": "precreated turn 1",
+  "chat": {
+    "id": "",
+    "title": "precreated turn 1",
+    "models": [
+      "mock-model"
+    ],
+    "params": {},
+    "history": {
+      "messages": {
+        "7e9cee65-cc92-45ef-911f-16ab2bbca306": {
+          "id": "7e9cee65-cc92-45ef-911f-16ab2bbca306",
+          "parentId": null,
+          "childrenIds": [
+            "bf927bbf-3055-4844-bda2-d12ff775f618"
+          ],
+          "role": "user",
+          "content": "precreated turn 1",
+          "timestamp": 1788672375
+        },
+        "bf927bbf-3055-4844-bda2-d12ff775f618": {
+          "id": "bf927bbf-3055-4844-bda2-d12ff775f618",
+          "parentId": "7e9cee65-cc92-45ef-911f-16ab2bbca306",
+          "childrenIds": [
+            "8332223a-7b0f-4d29-b38c-4ab9fd159daf",
+            "d39e5f7a-a80a-49ff-8339-18295321832c"
+          ],
+          "role": "assistant",
+          "content": "mock reply #14 (received 1 messages; last user: precreated turn 1)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672375,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_c7eea924a04b436eb4b45445",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #14 (received 1 messages; last user: precreated turn 1)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "8332223a-7b0f-4d29-b38c-4ab9fd159daf": {
+          "id": "8332223a-7b0f-4d29-b38c-4ab9fd159daf",
+          "parentId": "bf927bbf-3055-4844-bda2-d12ff775f618",
+          "childrenIds": [
+            "5c49e5b8-e204-4696-90e9-00133d00a843"
+          ],
+          "role": "user",
+          "content": "precreated turn 2",
+          "timestamp": 1788672375
+        },
+        "5c49e5b8-e204-4696-90e9-00133d00a843": {
+          "id": "5c49e5b8-e204-4696-90e9-00133d00a843",
+          "parentId": "8332223a-7b0f-4d29-b38c-4ab9fd159daf",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #15 (received 3 messages; last user: precreated turn 2)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672375,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_7f59eb94f24c452c862b0b5f",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #15 (received 3 messages; last user: precreated turn 2)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "d39e5f7a-a80a-49ff-8339-18295321832c": {
+          "id": "d39e5f7a-a80a-49ff-8339-18295321832c",
+          "parentId": "bf927bbf-3055-4844-bda2-d12ff775f618",
+          "childrenIds": [
+            "810f05f8-eea7-4438-a590-fdb08feeb8c0"
+          ],
+          "role": "user",
+          "content": "precreated branch 2b",
+          "timestamp": 1788672375
+        },
+        "810f05f8-eea7-4438-a590-fdb08feeb8c0": {
+          "id": "810f05f8-eea7-4438-a590-fdb08feeb8c0",
+          "parentId": "d39e5f7a-a80a-49ff-8339-18295321832c",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #16 (received 3 messages; last user: precreated branch 2b)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672375,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_cc27a06a6c794e66b578a59a",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #16 (received 3 messages; last user: precreated branch 2b)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        }
+      },
+      "currentId": "810f05f8-eea7-4438-a590-fdb08feeb8c0"
+    },
+    "messages": [],
+    "tags": [],
+    "timestamp": 1788672375000
+  },
+  "updated_at": 1788672375,
+  "created_at": 1788672375,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {},
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": "810f05f8-eea7-4438-a590-fdb08feeb8c0",
+  "context_usage": null
+}

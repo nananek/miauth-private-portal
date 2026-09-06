@@ -1,0 +1,32 @@
+{
+  "id": "76f89a52-6ff6-423f-9a4a-adaa9370b687",
+  "user_id": "user-redacted",
+  "title": "bridge-precreated",
+  "chat": {
+    "id": "",
+    "title": "bridge-precreated",
+    "models": [
+      "mock-model"
+    ],
+    "params": {},
+    "history": {
+      "messages": {},
+      "currentId": null
+    },
+    "messages": [],
+    "tags": [],
+    "timestamp": 1788672375000
+  },
+  "updated_at": 1788672375,
+  "created_at": 1788672375,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {},
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": null,
+  "context_usage": null
+}

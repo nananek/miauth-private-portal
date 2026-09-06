@@ -220,4 +220,12 @@ work:
 
 ## Roadmap
 
-- Open WebUI integration: [docs/roadmap/openwebui.md](docs/roadmap/openwebui.md)
+- Open WebUI integration: [docs/roadmap/openwebui.md](docs/roadmap/openwebui.md).
+  The target contract is frozen in
+  [docs/compat/openwebui-0.11.3.md](docs/compat/openwebui-0.11.3.md) with
+  redacted fixtures under
+  [docs/compat/fixtures/openwebui/](docs/compat/fixtures/openwebui/), and the
+  boundary decisions are in
+  [docs/decisions/0005-openwebui-boundary.md](docs/decisions/0005-openwebui-boundary.md).
+  Nothing is wired up yet: the feature has no code, no config key, and no
+  migration.

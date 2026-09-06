@@ -1,7 +1,14 @@
 # Open WebUI outbound chat and Aria reply-tree roadmap addition
 
-- Status: Planned, opt-in P1 extension; not required for the Issue #1 MVP
-- Source plan: document board key `openwebui-reply-tree-plan`
+- Status: Planned, opt-in P1 extension; not required for the Issue #1 MVP.
+  Child issues #51–#54 filed 2026-09-06 under umbrella
+  [Issue #50](https://github.com/nananek/miauth-private-portal/issues/50);
+  OWUI-C (#51) is complete.
+- Umbrella issue: [#50](https://github.com/nananek/miauth-private-portal/issues/50)
+- Target contract: [`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md)
+  and [ADR-0005](../decisions/0005-openwebui-boundary.md), from the 2026-09-06
+  verification of a real instance (raw record: ccserver document board key
+  `owui-verification`)
 - Scope: single-owner `miauth-private-portal` service and one allowlisted Open WebUI workspace
 
 ## Goal
@@ -29,17 +36,25 @@ unchanged and are prerequisites.
 The work is inserted at two implementation points and one conditional release
 gate in the existing roadmap:
 
-- **Phase 0.5, after #2 and before #4:** OWUI-C freezes the Open WebUI API,
-  identity, security, and storage contract. It may proceed in parallel with
-  #3, but must finish before #4 starts its schema addendum.
-- **Phase 1, after #4 and #6:** OWUI-P adds the local thread/link, turn,
+- **Phase 0.5, after #2 and before #4:** OWUI-C (#51) freezes the Open WebUI
+  API, identity, security, and storage contract. It may proceed in parallel
+  with #3, but must finish before #4 starts its schema addendum.
+- **Phase 1, after #4 and #6:** OWUI-P (#52) adds the local thread/link, turn,
   branch, and VirtualActor domain projection. Its Aria-facing serialization is
   consumed when #7 reaches the relevant projection work.
-- **Phase 2, after #7 and #8, alongside #9:** OWUI-B adds the outbound
+- **Phase 2, after #7 and #8, alongside #9:** OWUI-B (#53) adds the outbound
   Aria-message → new-chat/continued-turn → local-assistant bridge on top of
   OWUI-P.
-- **Phase 3 / #13 opt-in gate:** OWUI-R adds the release E2E and operations
-  evidence only if this feature is promoted into the same release.
+- **Phase 3 / #13 opt-in gate:** OWUI-R (#54) adds the release E2E and
+  operations evidence only if this feature is promoted into the same release.
+
+The phase numbering above is historical: it was written while the #1 MVP was
+still in progress. That MVP (#2–#13 and #28) has since shipped, so none of the
+listed prerequisites is outstanding and the remaining order is simply
+#51 → #52 → #53 → #54, with #54 conditional on release promotion. OWUI-C (#51)
+is complete: the target contract is frozen in
+[`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md) and
+[ADR-0005](../decisions/0005-openwebui-boundary.md).
 
 The original #13 release gate does not depend on this feature. If the feature
 is promoted into the same release, OWUI-R becomes an explicit #13 dependency;
@@ -48,11 +63,11 @@ behavior.
 
 PR #19 is the Issue #2 contract-document PR; it is not the parent of this
 feature. This roadmap is scoped under Issue #1. OWUI-C, OWUI-P, OWUI-B, and
-OWUI-R are separate child issue/PR units to create under #1 (or under a new
-Open WebUI umbrella issue if the tracker requires one). Each implementation
-PR must handle exactly one child, link the applicable parent requirement, use
-`Closes #<child>` for that child only, and never close #1 or #2 as a side
-effect. The current Issue #2 contract-document PR is not one of those OWUI
+OWUI-R are separate child issue/PR units; they were filed on 2026-09-06 as
+#51, #52, #53, and #54 under Open WebUI umbrella issue #50. Each
+implementation PR must handle exactly one child, link the applicable parent
+requirement, use `Closes #<child>` for that child only, and never close #50,
+#1, or #2 as a side effect. The current Issue #2 contract-document PR is not one of those OWUI
 children. The outbound revision supersedes the former import-oriented OWUI-S
 label.
 
@@ -62,7 +77,14 @@ OWUI-P does not promote new endpoints or make #7 an earlier prerequisite; it
 only supplies the local projection for #7 to consume when that issue reaches
 it.
 
-Dependency graph:
+Dependency graph (current, now that the #1 MVP has shipped):
+
+```text
+#51 (OWUI-C, done) -> #52 (OWUI-P) -> #53 (OWUI-B) -> #54 (OWUI-R, opt-in)
+```
+
+The original graph, kept for historical context — every prerequisite in it is
+now satisfied:
 
 ```text
 #2 -> OWUI-C
@@ -117,37 +139,69 @@ feature; completion-only mode is not success for this persistent-chat goal.
 
 ## OWUI-C: contract and identity ADR
 
-Placement: after #2 and before #4 schema work.
+Issue #51. Placement: after #2 and before #4 schema work. **Complete
+(2026-09-06).**
 
 Acceptance criteria:
 
-- [ ] Add `docs/decisions/0003-openwebui-boundary.md` covering the provider
-  boundary, local source of truth, VirtualActor, non-federation scope, and
-  auth/secret threat model.
-- [ ] Add a pinned compatibility document covering target base URL policy, API
+- [x] Add [`docs/decisions/0005-openwebui-boundary.md`](../decisions/0005-openwebui-boundary.md)
+  covering the provider boundary, local source of truth, VirtualActor,
+  non-federation scope, and auth/secret threat model. (Numbered 0005, not the
+  0003 proposed here: ADR-0003 and ADR-0004 were taken in the meantime.)
+- [x] Add a pinned compatibility document covering target base URL policy, API
   version, outbound chat creation/continuation endpoints, request/response
   and stream fields, auth, errors, rate limits, nullable/unknown fields, and
-  opaque chat/message ID semantics.
-- [ ] Complete target-instance verification that the first request creates a
+  opaque chat/message ID semantics —
+  [`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md).
+- [x] Complete target-instance verification that the first request creates a
   persistent chat, returns a stable `chat_id` and response message ID when
   available, and provides the required default-model workspace permission.
   If persistence cannot be verified, disable this feature; completion-only is
   not a successful fallback for this roadmap.
-- [ ] Store redacted fixtures for linear turns, optional remote
+  **Verified** on Open WebUI 0.11.3
+  (`ghcr.io/open-webui/open-webui@sha256:1a6399d237dc392a2313e0ca826020b3fd5d22536357840eb63393d18dc8b924`):
+  this roadmap's caution against assuming a dedicated chat-creation endpoint
+  is resolved — `POST /api/v1/chats/new` exists, and a completions call alone
+  creates no chat unless it opts into chat management. The bridge pre-creates
+  the chat so `chat_id` is fixed before generation, and message ids are
+  client-generated UUIDs, so both are stable (ADR-0005 D3). Model visibility
+  is access-controlled: a non-admin account sees no base model and every
+  generating call fails with 400 `Model not found`, so granting that access is
+  a prerequisite whose exact procedure is still 要実機確認.
+- [x] Store redacted fixtures for linear turns, optional remote
   `parentId`/`currentId` correlation, user/assistant/system/tool metadata,
   401/429, malformed responses, finish events, duplicate/out-of-order
-  chunks, and response-loss ambiguity.
-- [ ] Add an outbound-only ADR covering source of truth, new chat/continued
+  chunks, and response-loss ambiguity —
+  [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/).
+- [x] Add an outbound-only ADR covering source of truth, new chat/continued
   turn lifecycle, branch policy, edit/delete policy, secret/notification
   boundary, and non-goals for existing-chat import/list/pull/reconciliation.
-- [ ] Update #1/#2 traceability for #3, #4, #6, #8, #9, and #13 impacts;
+  Merged into the same ADR-0005 rather than filed separately.
+- [x] Update #1/#2 traceability for #3, #4, #6, #8, #9, and #13 impacts;
   never treat Open WebUI credentials as MiAuth or local API tokens.
+
+Two verification results are load-bearing for the issues that follow, and are
+recorded here so they are not rediscovered later:
+
+- **Failure is invisible in the HTTP status.** On the chat-managed path an
+  upstream failure returns HTTP 200 with a `null` body; on the legacy path
+  upstream 401/429/500 all collapse into HTTP 400 with the upstream's text
+  passed through verbatim and `Retry-After` dropped. Outcomes must be read
+  back from the chat's `done`/`error` fields, and provider error text must be
+  discarded (ADR-0005 D6).
+- **The server validates nothing and deduplicates nothing.** A non-existent
+  `parentId` is accepted and stored dangling, `messages` is forwarded to the
+  model exactly as supplied, and re-sending a turn overwrites the assistant's
+  content instead of being rejected. Eligibility, tree validation, and
+  idempotency are entirely local responsibilities (ADR-0005 D4, D7).
 
 Implementation must not begin until the target Open WebUI version/API surface,
 persistent chat creation/continuation endpoint and save semantics, real
 workspace/default model IDs, workspace/model permissions, remote ID return
 behavior, and credential provision/rotation ownership are recorded. These are
 implementation start conditions, not blockers for publishing this roadmap.
+See "Implementation start conditions" below for which of them are now
+recorded and which are still open.
 
 ## OWUI-P: local thread/link and identity projection
 
@@ -735,30 +789,48 @@ pull-sync code is deliberately not a deferred TODO; it is outside this track.
 
 | Existing requirement | Outbound feature impact | Owner / dependency |
 | --- | --- | --- |
-| #28 local MiAuth and token separation | Open WebUI credentials never authenticate Aria, approve a session, or mint a local token | #28 → OWUI-C; authentication boundary unchanged |
-| #1 local post survives LLM/provider outage | Save Aria post and `OpenWebUITurnJob` intent atomically before any remote call | #4 + #8 + OWUI-B |
-| #1 thread/reply/restart behavior | Local `reply_to_id` and `thread_id` own the tree; remote IDs are metadata | #6 + OWUI-P + OWUI-B |
-| #1 LLM reply/follow-up remains separate | Default-model VirtualActor writes a separate assistant child; source text is immutable | #9 + OWUI-B, feature off by default |
-| #1 release/security/E2E gate | Outbound root/reply, ambiguity, restart, secret redaction, and notification policy are opt-in evidence | OWUI-R → #13 only on release promotion |
+| #28 local MiAuth and token separation | Open WebUI credentials never authenticate Aria, approve a session, or mint a local token | #28 → #51 (OWUI-C, done: ADR-0005 D10); authentication boundary unchanged |
+| #1 local post survives LLM/provider outage | Save Aria post and `OpenWebUITurnJob` intent atomically before any remote call | #4 + #8 + #53 (OWUI-B) |
+| #1 thread/reply/restart behavior | Local `reply_to_id` and `thread_id` own the tree; remote IDs are metadata | #6 + #52 (OWUI-P) + #53 (OWUI-B); ADR-0005 D2 |
+| #1 LLM reply/follow-up remains separate | Default-model VirtualActor writes a separate assistant child; source text is immutable | #9 + #53 (OWUI-B), feature off by default |
+| #1 release/security/E2E gate | Outbound root/reply, ambiguity, restart, secret redaction, and notification policy are opt-in evidence | #54 (OWUI-R) → #13 only on release promotion |
 | #1 non-goals | Existing-chat open/import/list/pull/reconciliation/history browsing, federation, tools, custom UI, and multi-user behavior stay excluded | #1/#2 boundary; no feature dependency |
 
 ## Implementation start conditions
 
 The first implementation item is OWUI-C: freeze the outbound-only
 boundary/compatibility contract, identity ADR, and redacted fixtures before
-writing migrations or adapters. Start only after these are known:
+writing migrations or adapters. That item is now done (#51); the status of each
+start condition is:
 
-- target Open WebUI version and API surface;
+- target Open WebUI version and API surface — **recorded.** 0.11.3, pinned by
+  image digest (compat §"Pinned target and observation record"). Note that the
+  decisive completions fields are not in the target's published OpenAPI schema,
+  so the pin is a digest rather than a version range.
 - concrete persistent-chat creation and continuation endpoint, including
   first-request creation, initial message-sequence handling, save completion,
-  and response-loss semantics;
-- real workspace/default-model IDs and permissions;
+  and response-loss semantics — **recorded.** Compat §"Observed endpoint
+  contracts"; ADR-0005 D3 and D6.
+- real workspace/default-model IDs and permissions — **partly recorded.** How
+  model ids are obtained and that visibility is access-controlled are recorded
+  (compat §"GET /api/models"); the concrete ids belong to the production
+  instance, and the grant procedure for a non-admin account is **要実機確認**.
 - whether remote `chat_id`/`message.id`/`parentId`/`currentId` are returned or
   accepted, and the local one-chat-per-branch policy independent of remote
-  branch controls;
-- credential provisioning, rotation, and revocation owner;
-- fixed HTTPS base URL and presentation-host allowlist;
-- request/response/stream size, timeout, cancellation, and rate-limit bounds.
+  branch controls — **recorded.** Compat §"Opaque ID semantics"; ADR-0005 D2
+  and D5.
+- credential provisioning, rotation, and revocation owner — **mechanism
+  recorded, ownership TBD (see #50).** Key issuance, the two settings that
+  gate it, and the no-overlap rotation behavior are recorded (compat
+  §"Authentication and credential lifecycle"); who provisions the account,
+  where the key lives, and who owns rotation are not decided. ADR-0005 D10
+  also asks the owner to confirm that `secret_ref` means a config key in this
+  repository's existing secret style rather than a separate secret store.
+- fixed HTTPS base URL and presentation-host allowlist — **TBD (see #50).**
+  The policy is decided (ADR-0005 D11); the values are not.
+- request/response/stream size, timeout, cancellation, and rate-limit bounds —
+  **TBD (see #50).** No server-side limit was observable, so the adapter must
+  set its own; cancellation is not implemented at all (ADR-0005 D1, D8).
 
 If any target-instance contract is unverified, do not emulate success. Keep
 the feature disabled; completion-only mode does not satisfy the persistent-chat
@@ -800,5 +872,8 @@ OWUI-R E2E/operations runbook, backup/restore, rotation, and security gate.
 
 ## References
 
+- Pinned target contract: [`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md)
+- Redacted fixtures: [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/)
+- Boundary decisions: [ADR-0005](../decisions/0005-openwebui-boundary.md)
 - Open WebUI API reference: <https://docs.openwebui.com/reference/api-endpoints/>
 - Open WebUI API keys: <https://docs.openwebui.com/features/authentication-access/api-keys/>

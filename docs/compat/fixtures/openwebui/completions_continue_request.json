@@ -1,0 +1,36 @@
+{
+  "model": "mock-model",
+  "stream": false,
+  "chat_id": "76f89a52-6ff6-423f-9a4a-adaa9370b687",
+  "parent_id": "bf927bbf-3055-4844-bda2-d12ff775f618",
+  "id": "5c49e5b8-e204-4696-90e9-00133d00a843",
+  "user_message": {
+    "id": "8332223a-7b0f-4d29-b38c-4ab9fd159daf",
+    "parentId": "bf927bbf-3055-4844-bda2-d12ff775f618",
+    "childrenIds": [
+      "5c49e5b8-e204-4696-90e9-00133d00a843"
+    ],
+    "role": "user",
+    "content": "precreated turn 2",
+    "timestamp": 1788672375
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "precreated turn 1"
+    },
+    {
+      "role": "assistant",
+      "content": "(prev reply)"
+    },
+    {
+      "role": "user",
+      "content": "precreated turn 2"
+    }
+  ],
+  "background_tasks": {
+    "title_generation": false,
+    "tags_generation": false,
+    "follow_up_generation": false
+  }
+}

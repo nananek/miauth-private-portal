@@ -1,0 +1,141 @@
+{
+  "id": "0395fa97-7707-42e0-82e5-dcbe64f1b02c",
+  "user_id": "user-redacted",
+  "title": "New Chat (fork)",
+  "chat": {
+    "id": "",
+    "title": "New Chat (fork)",
+    "models": [
+      "mock-model"
+    ],
+    "params": {},
+    "history": {
+      "messages": {
+        "70077092-2b84-4ca4-8b83-0bc67dcaeae5": {
+          "id": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+          "role": "assistant",
+          "content": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)",
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_08a58f1d1e0040f48f70bb60",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)"
+                }
+              ]
+            }
+          ],
+          "model": "mock-model",
+          "done": true,
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          },
+          "timestamp": 1788671962,
+          "info": {
+            "usage": {
+              "prompt_tokens": 10,
+              "completion_tokens": 12,
+              "total_tokens": 22,
+              "input_tokens": 10,
+              "output_tokens": 12
+            }
+          },
+          "childrenIds": [
+            "9a6fe934-d647-4950-8e54-6adeb6733e5f"
+          ],
+          "parentId": null
+        },
+        "9a6fe934-d647-4950-8e54-6adeb6733e5f": {
+          "id": "9a6fe934-d647-4950-8e54-6adeb6733e5f",
+          "role": "user",
+          "parentId": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+          "content": "turn-2 follow-up",
+          "done": true,
+          "timestamp": 1788671962,
+          "childrenIds": []
+        }
+      },
+      "currentId": "9a6fe934-d647-4950-8e54-6adeb6733e5f"
+    },
+    "messages": [
+      {
+        "id": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+        "role": "assistant",
+        "content": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg_08a58f1d1e0040f48f70bb60",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)"
+              }
+            ]
+          }
+        ],
+        "model": "mock-model",
+        "done": true,
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 12,
+          "total_tokens": 22,
+          "input_tokens": 10,
+          "output_tokens": 12
+        },
+        "timestamp": 1788671962,
+        "info": {
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "childrenIds": [
+          "9a6fe934-d647-4950-8e54-6adeb6733e5f"
+        ],
+        "parentId": null
+      },
+      {
+        "id": "9a6fe934-d647-4950-8e54-6adeb6733e5f",
+        "role": "user",
+        "parentId": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+        "content": "turn-2 follow-up",
+        "done": true,
+        "timestamp": 1788671962,
+        "childrenIds": []
+      }
+    ],
+    "tags": [],
+    "timestamp": 1788671962000,
+    "originalChatId": "72343fab-9862-473c-adf0-ce63e22ca08c",
+    "branchPointMessageId": "9a6fe934-d647-4950-8e54-6adeb6733e5f"
+  },
+  "updated_at": 1788671964,
+  "created_at": 1788671964,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {
+    "forked_from": "72343fab-9862-473c-adf0-ce63e22ca08c",
+    "forked_from_message_id": "9a6fe934-d647-4950-8e54-6adeb6733e5f"
+  },
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": "9a6fe934-d647-4950-8e54-6adeb6733e5f",
+  "context_usage": null
+}
