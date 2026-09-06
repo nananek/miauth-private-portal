@@ -752,10 +752,16 @@ header block, followed by a sanitized snippet of the message's text
 body (`text/plain` preferred; `text/html` sanitized the same way RSS
 bodies are, via `internal/textsanitize.StripHTML`, when no `text/plain`
 part exists). This header-in-body placement is deliberate:
-`internal/ingest.FetchedItem.Title` is written by the RSS adapter but
-never actually read by `internal/ingest.Service.Handle` (only `Body`
-reaches `CreateExternalEntry`), so folding sender/subject/date into
-`Body` itself is the only way they are actually preserved.
+`internal/mailfetch` builds the block itself and never sets
+`internal/ingest.FetchedItem.Title`, so `internal/ingest.Service.Handle`'s
+`composeExternalBody` — which prepends a
+`[<entry kind>[: <source display name>]] <title>` provenance header (and
+the item's `ProvenanceURL` on its own line) only to an item whose `Title`
+is non-empty, the RSS/Atom case — is a no-op for mail and never
+double-prefixes it. Sender/subject/date are preserved because they are
+already part of `Body` by the time it reaches `CreateExternalEntry`. See
+"Adding a source adapter" below for the boundary this draws for a new
+adapter, and `docs/compat/aria-v1.5.11.md` for the per-kind `Body` shapes.
 
 - `IMAP_STORE_FULL_BODY=false` (the default) stores only a bounded
   snippet (`IMAP_SNIPPET_MAX_CHARS`); `true` raises the bound to
