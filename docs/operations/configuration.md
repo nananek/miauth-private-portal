@@ -866,10 +866,16 @@ properties the framework itself cannot enforce for you.
 - **Sanitize in the adapter, not in `Service`.** Reuse
   `internal/textsanitize.StripHTML` to reduce a fetched body to plain
   text before putting it in `ingest.FetchedItem.Body`.
-  `internal/ingest.Service` stores `Body` verbatim and never interprets
-  it (pinned by
-  [`TestHandle_BodyIsStoredVerbatimAsInertText`](../../internal/ingest/service_test.go)),
-  so whatever the adapter returns is what a reader sees.
+  `internal/ingest.Service` never parses, sanitizes, or executes `Body`
+  (pinned by
+  [`TestHandle_TitlelessItem_BodyIsStoredVerbatimAsInertText`](../../internal/ingest/service_test.go)).
+  Its one edit to `Body` is `composeExternalBody`, which prepends a
+  `[<entry kind>[: <source display name>]] <title>` provenance header —
+  and the item's `ProvenanceURL` on its own line, when it has one — to an
+  item whose `Title` is non-empty, and is a no-op for an item that sets
+  no `Title`. That header is composed from `Service`'s own fields, never
+  from anything `Body` says, so apart from it whatever the adapter
+  returns is what a reader sees.
 - **Keep ingested content out of LLM prompts.** `Service` enqueues no
   `llm_generation`/`llm_classification` job for an ingested entry, and
   the new adapter must not add one. Should a future feature deliberately
@@ -895,7 +901,7 @@ read them, because they define what your adapter is allowed to assume.
 | Duplicate delivery creates no second entry | `TestHandle_DuplicateDeliveryDoesNotDuplicateEntries` (`internal/ingest/service_test.go`) |
 | A mid-batch failure leaves the cursor unadvanced | `TestHandle_PartialBatchFailureKeepsCursorAndCommittedItems` (same file) |
 | One source's failure does not affect another source | `TestHandle_FailingSourceDoesNotAffectAnotherSource` (same file) |
-| An ingested body is stored inert and enqueues no job | `TestHandle_BodyIsStoredVerbatimAsInertText`, `TestHandle_ImapItem_NeverEnqueuesLLMJobs` (same file) |
+| An ingested body is stored inert and enqueues no job | `TestHandle_TitlelessItem_BodyIsStoredVerbatimAsInertText`, `TestHandle_ImapItem_NeverEnqueuesLLMJobs` (same file) |
 | A crashed worker's in-flight job is recovered | `TestManagerRecoversExpiredLeaseAfterCrash` (`internal/jobs/manager_test.go`) |
 | A restart or duplicate tick does not double-enqueue a poll | `TestScheduler_TickWithinSameWindowDoesNotDoubleEnqueue` (`internal/ingest/scheduler_test.go`) |
 | The SSRF/redirect/downgrade address policy holds | `internal/ingest/safehttp/client_test.go` |
