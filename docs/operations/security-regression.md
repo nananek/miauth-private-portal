@@ -20,13 +20,17 @@ Issue #28 (ADR-0002) replaced upstream-Misskey-account authorization with
 local, operator-approved MiAuth sessions; see that ADR for how each
 upstream AC3 bullet maps onto this design.
 
-The last three rows below are about actors rather than requests. They
-were added by Issue #52 PR1, which made `actors` able to hold rows other
-than the owner and the two reserved presentation actors (an Open WebUI
-model's VirtualActor). Since "the owner is the only row that exists" is
-no longer what keeps login single-owner, the rule that presentation
-actors are wire projections and never additional login-capable users
-(AGENTS.md) needs tests of its own.
+The last five rows below are about actors rather than requests. The
+first three were added by Issue #52 PR1, which made `actors` able to
+hold rows other than the owner and the two reserved presentation actors
+(an Open WebUI model's VirtualActor). Since "the owner is the only row
+that exists" is no longer what keeps login single-owner, the rule that
+presentation actors are wire projections and never additional
+login-capable users (AGENTS.md) needs tests of its own. The last two
+were added by PR3, which gave the Open WebUI use-case layer its own
+owner-only writes and its own caller-supplied-author entry-creation
+path — both had to repeat the same "never a presentation actor" check
+independently, so both get their own regression coverage.
 
 | Bullet | Evidence |
 | --- | --- |
@@ -38,6 +42,8 @@ actors are wire projections and never additional login-capable users
 | A presentation actor is never bound by a MiAuth approval and never holds a token | `internal/miauth/service_test.go`: `TestApproveSession_NeverBindsToOpenWebUIModelActor`, `TestCheckAndVerifyToken_NeverResolveToOpenWebUIModelActor` |
 | An owner-only write refuses a presentation actor's ID | `internal/miauth/service_test.go`: `TestUpdateOwnerDisplayName_RejectsNonOwnerActor`, `TestUpdateOwnerDisplayName_RejectsOpenWebUIModelActor`, `TestBackfillOwnerDisplayName_LeavesOpenWebUIModelActorAlone` |
 | Only the owner actor type reports login/MiAuth capability, and no actor type may hold a credential | `internal/domain/actor_test.go`: `TestActorCapabilityPredicates`, `TestActorCapabilityPredicates_UnknownTypeIsInert` |
+| The Open WebUI registry's own owner-only writes (`SetGenerationEnabled`, `SetCapabilityStatus`, `RenameModel`) refuse every non-owner actor, including the VirtualActor the registry itself projects, and fail closed on the feature flag before ever looking the actor up | `internal/openwebui/registry_test.go`: `TestOwnerOnlyMethods_RejectNonOwnerActors`, `TestOwnerOnlyMethods_SucceedForOwner`, `TestOwnerOnlyMethods_DisabledReturnsErrDisabledBeforeCheckingActor` |
+| A generated reply's caller-supplied author must be the assistant actor or an active, workspace-enabled Open WebUI model actor; the owner, the system actor, an unknown id, a deactivated model, and a disabled workspace are all refused | `internal/timeline/service_test.go`: `TestCreateGeneratedReplyBy_RejectsIneligibleAuthors` |
 
 ## AC8: security regression tests
 

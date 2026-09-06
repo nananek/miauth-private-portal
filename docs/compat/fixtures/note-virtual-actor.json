@@ -1,0 +1,23 @@
+{
+  "id": "note-example-0002",
+  "createdAt": "2026-01-02T00:01:00.000Z",
+  "text": "[reply]\n\nsynthetic VirtualActor reply text",
+  "cw": null,
+  "user": {
+    "id": "actor-example-openwebui-model",
+    "username": "model",
+    "host": "openwebui.example.net"
+  },
+  "userId": "actor-example-openwebui-model",
+  "replyId": "note-example-0001",
+  "visibility": "public",
+  "localOnly": false,
+  "renoteCount": 0,
+  "repliesCount": 0,
+  "reactions": {},
+  "emojis": {},
+  "fileIds": [],
+  "files": [],
+  "visibleUserIds": [],
+  "mentions": []
+}

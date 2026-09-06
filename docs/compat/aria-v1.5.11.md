@@ -947,9 +947,26 @@ enums. Counts default to zero, maps/lists (`reactions`, `reactionEmojis`,
 false. Nested `reply`, `renote`, `channel`, and `poll` are optional but must
 be fully valid when present.
 
-The redacted fixture is
-[`fixtures/note.json`](fixtures/note.json). It intentionally contains no
-access token, real user content, real instance host, or personal identifier.
+**`host: null` means local user, with exactly one exception (Issue #52).**
+Every actor this service can author an entry with projects `host: null`
+(the owner, and the reserved `assistant`/`system` presentation actors) —
+except an Open WebUI model's VirtualActor, which projects a non-null,
+deployment-configured presentation host
+(`internal/httpserver.resolveUserLite`; see
+`docs/operations/configuration.md`'s "Open WebUI bridge" section for the
+seeding and eligibility rules behind it). This is a fixed presentation
+value, not federation: the host is never discovered, resolved, or
+delivered to. No other route in this service's API surface (there is no
+`users/show`, so a client cannot look the host up) treats it as
+anything but a label on that one note's author.
+
+The redacted fixtures are [`fixtures/note.json`](fixtures/note.json) (an
+ordinary local author, `host: null`) and
+[`fixtures/note-virtual-actor.json`](fixtures/note-virtual-actor.json) (a
+VirtualActor-authored reply to it, `host` set to the synthetic
+presentation host `openwebui.example.net`). Both intentionally contain no
+access token, real user content, real instance host, or personal
+identifier.
 
 ### Note.text provenance markers
 

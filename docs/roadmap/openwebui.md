@@ -255,26 +255,39 @@ external actors. A workspace is a container, not normally a user; if a future
 requirement needs a workspace actor, it must be a separate non-loginable actor
 row rather than reusing the model actor.
 
-Acceptance criteria:
+Acceptance criteria (Issue #52; all complete as of PR3, `Closes #52`):
 
-- [ ] Add workspace/model/thread/turn-link migrations and narrow repository
+- [x] Add workspace/model/thread/turn-link migrations and narrow repository
   interfaces after OWUI-C and the #4 schema addendum.
-- [ ] Enforce same-workspace default-model FK, unique external IDs,
+- [x] Enforce same-workspace default-model FK, unique external IDs,
   stable actor IDs, and enabled/disabled constraints.
-- [ ] Connect VirtualActor to #6 entries and #7 `UserLite`/`Note` projections;
+- [x] Connect VirtualActor to #6 entries and #7 `UserLite`/`Note` projections;
   exclude it from login and MiAuth paths.
-- [ ] Enforce owner-only workspace changes, `secret_ref`, feature flags, and
+- [x] Enforce owner-only workspace changes, `secret_ref`, feature flags, and
   fixed presentation-host validation.
-- [ ] Add thread-to-workspace, local `branch_id`, conversation, turn-link,
+- [x] Add thread-to-workspace, local `branch_id`, conversation, turn-link,
   revision, tombstone, and status migrations; keep remote IDs
   nullable/opaque and never use them for local identity, ordering, or
   authorization.
-- [ ] Add conversation-link state-transition tests proving only `ready` can
+- [x] Add conversation-link state-transition tests proving only `ready` can
   continue; only the owning `creation_pending` claim can issue its single
   initial `StartChat`, and `creation_pending`/`ambiguous`/`failed`/`dead`
   cannot issue another create, continue, or auto-retry.
-- [ ] Add migration, serialization, unknown/null field, local reply-tree, and
+- [x] Add migration, serialization, unknown/null field, local reply-tree, and
   local stable-cursor contract tests.
+
+Terminology settled during implementation (three PRs, tracked against
+this one issue): the new actor type is `actors.actor_type='openwebui_model'`
+(migration `0016`, a table rebuild — SQLite's only way to widen an
+existing `CHECK`/table-level `UNIQUE`, since done via the migration
+runner's new `-- migrate:rebuild` path); a workspace's `default_model_id`
+is enforced same-workspace by a composite foreign key into
+`openwebui_models(workspace_id, id)` rather than a Go-level check
+(migration `0017`); and the whole registry is populated by **config-driven
+startup seeding** (`internal/openwebui.Registry.Seed`, called from
+`cmd/server` when `OPENWEBUI_ENABLED=true`), not a new HTTP endpoint or
+CLI — see `docs/operations/configuration.md`'s "Open WebUI bridge"
+section for the full seeding/owner-only/VirtualActor writeup.
 
 ## OWUI-B: outbound adapter, durable turn, and thread bridge
 

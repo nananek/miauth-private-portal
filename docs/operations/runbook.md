@@ -108,7 +108,16 @@ in-place update through any API:
    arguments (ADR-0003); it receives them only in each request's payload
    from the server, so `cmd/mailfetch` does not need restarting for a
    credential rotation alone, only the server does.
-3. Any other config-only credential added by a future issue should follow
+3. `OPENWEBUI_API_KEY`: same procedure — reissue the key on the Open
+   WebUI instance (its dedicated adapter account, per ADR-0005 D10),
+   update `OPENWEBUI_API_KEY`, restart the server. Reissuing a key on
+   that instance invalidates the old one immediately; there is no
+   dual-key overlap window, so rotate during a maintenance window if
+   Open WebUI's outbound bridge (Issue #53) is in active use. The
+   database never holds this value — only `OPENWEBUI_API_KEY`'s own
+   *name* is stored as a workspace's `secret_ref` — so rotating the key
+   never requires a database change, only the restart.
+4. Any other config-only credential added by a future issue should follow
    the same pattern: it is not a case this runbook needs to special-case
    individually.
 

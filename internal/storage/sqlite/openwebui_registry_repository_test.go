@@ -31,6 +31,14 @@ func mustCreateVirtualActor(t *testing.T, db *DB) string {
 // pointed at a model after that model exists.
 func mustCreateWorkspace(t *testing.T, db *DB, baseURL string) domain.OpenWebUIWorkspace {
 	t.Helper()
+	return mustCreateWorkspaceAt(t, db, baseURL, testTime)
+}
+
+// mustCreateWorkspaceAt is mustCreateWorkspace with an explicit
+// CreatedAt, for tests (like List's) that need distinct timestamps to
+// pin (created_at, id) ordering.
+func mustCreateWorkspaceAt(t *testing.T, db *DB, baseURL string, at time.Time) domain.OpenWebUIWorkspace {
+	t.Helper()
 	w := domain.OpenWebUIWorkspace{
 		ID:                 domain.NewID(),
 		Name:               "Open WebUI",
@@ -39,8 +47,8 @@ func mustCreateWorkspace(t *testing.T, db *DB, baseURL string) domain.OpenWebUIW
 		PresentationHost:   "openwebui.example.net",
 		ChatCreateStatus:   domain.CapabilityUnverified,
 		ChatContinueStatus: domain.CapabilityUnverified,
-		CreatedAt:          testTime,
-		UpdatedAt:          testTime,
+		CreatedAt:          at,
+		UpdatedAt:          at,
 	}
 	if err := db.OpenWebUIWorkspaces.Create(t.Context(), w); err != nil {
 		t.Fatalf("create workspace: %v", err)
@@ -181,6 +189,45 @@ func TestOpenWebUIWorkspaceRepository_GetEnabled(t *testing.T) {
 	}
 }
 
+// TestOpenWebUIWorkspaceRepository_List backs Registry.Seed's own
+// invariant-preserving step: it needs every workspace, not just the
+// enabled one, to find and disable whichever ones it is not
+// reconciling this run.
+func TestOpenWebUIWorkspaceRepository_List(t *testing.T) {
+	db := newTestDB(t)
+
+	// Created newest-first so insertion order and (created_at, id)
+	// order disagree.
+	third := mustCreateWorkspaceAt(t, db, "https://c.example.net", testTime.Add(2*time.Minute))
+	first := mustCreateWorkspaceAt(t, db, "https://a.example.net", testTime)
+	second := mustCreateWorkspaceAt(t, db, "https://b.example.net", testTime.Add(time.Minute))
+
+	got, err := db.OpenWebUIWorkspaces.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{first.ID, second.ID, third.ID}
+	if len(got) != len(want) {
+		t.Fatalf("List returned %d workspaces, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i] {
+			t.Errorf("List[%d].ID = %q, want %q", i, got[i].ID, want[i])
+		}
+	}
+}
+
+func TestOpenWebUIWorkspaceRepository_List_EmptyIsNotAnError(t *testing.T) {
+	db := newTestDB(t)
+	got, err := db.OpenWebUIWorkspaces.List(t.Context())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("List returned %d workspaces, want 0", len(got))
+	}
+}
+
 // TestOpenWebUIWorkspaceRepository_SetDefaultModel_EnforcesSameWorkspace
 // is the roadmap's "default_model_id points to exactly one model in its
 // workspace", enforced by the composite foreign key rather than by a Go
@@ -312,6 +359,54 @@ func TestOpenWebUIWorkspaceRepository_SetCapabilityStatus(t *testing.T) {
 	}
 	if !got.UpdatedAt.Equal(later) {
 		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, later)
+	}
+}
+
+// TestOpenWebUIWorkspaceRepository_SetGenerationEnabled backs the
+// column Issue #52 creates but never turns on: the write itself is
+// exercised here so #53 can rely on it without a schema or interface
+// change, even though no config key reaches it yet.
+func TestOpenWebUIWorkspaceRepository_SetGenerationEnabled(t *testing.T) {
+	db := newTestDB(t)
+	w, _ := mustSeedWorkspaceWithDefaultModel(t, db)
+	if err := db.OpenWebUIWorkspaces.SetEnabled(t.Context(), w.ID, true, testTime); err != nil {
+		t.Fatal(err)
+	}
+	later := testTime.Add(time.Hour)
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), w.ID, true, later); err != nil {
+		t.Fatalf("SetGenerationEnabled: %v", err)
+	}
+	got, err := db.OpenWebUIWorkspaces.Get(t.Context(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.GenerationEnabled {
+		t.Error("GenerationEnabled = false after SetGenerationEnabled(true)")
+	}
+	if !got.UpdatedAt.Equal(later) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, later)
+	}
+	if !got.Enabled {
+		t.Error("SetGenerationEnabled should not touch the independent workspace-wide Enabled gate")
+	}
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), w.ID, false, later.Add(time.Hour)); err != nil {
+		t.Fatalf("SetGenerationEnabled(false): %v", err)
+	}
+	got, err = db.OpenWebUIWorkspaces.Get(t.Context(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GenerationEnabled {
+		t.Error("GenerationEnabled = true after SetGenerationEnabled(false)")
+	}
+	if !got.Enabled {
+		t.Error("SetGenerationEnabled(false) should not disable the independent workspace-wide Enabled gate")
+	}
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), "does-not-exist", true, later); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("SetGenerationEnabled on an unknown workspace error = %v, want ErrNotFound", err)
 	}
 }
 

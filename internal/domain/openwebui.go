@@ -464,6 +464,11 @@ type OpenWebUIWorkspaceRepository interface {
 	// feature flag off — and an error if more than one is, which is a
 	// broken invariant rather than a case to pick a winner from.
 	GetEnabled(ctx context.Context) (OpenWebUIWorkspace, error)
+	// List returns every workspace in a stable (created_at, id) order.
+	// Registry.Seed uses it to disable every workspace but the one it is
+	// reconciling, so re-seeding at a changed base URL can never leave
+	// GetEnabled's single-enabled-workspace invariant broken.
+	List(ctx context.Context) ([]OpenWebUIWorkspace, error)
 	// Update writes the mutable registry fields: name, base URL, secret
 	// ref, presentation host, and both capability statuses. ID,
 	// timestamps, and the enable flags are not touched; SetEnabled and
@@ -478,6 +483,13 @@ type OpenWebUIWorkspaceRepository interface {
 	// UnitOfWork transaction, which is the roadmap's "workspace disable
 	// and related actor behavior must be one transaction".
 	SetEnabled(ctx context.Context, workspaceID string, enabled bool, at time.Time) error
+	// SetGenerationEnabled flips the outbound-generation gate,
+	// independent of SetEnabled. Issue #52 creates the column and this
+	// method but never calls it: there is no config key for it yet and
+	// no bridge to gate (that is Issue #53's). It exists now so #53's
+	// use-case code has a write to call rather than needing a schema or
+	// interface change of its own.
+	SetGenerationEnabled(ctx context.Context, workspaceID string, enabled bool, at time.Time) error
 	// SetCapabilityStatus records evidence about one provider operation.
 	SetCapabilityStatus(ctx context.Context, workspaceID string, chatCreate, chatContinue CapabilityStatus, at time.Time) error
 }

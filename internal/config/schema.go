@@ -75,6 +75,16 @@ const (
 	KeyIMAPStoreFullBody    = "IMAP_STORE_FULL_BODY"
 	KeyIMAPFullBodyMaxChars = "IMAP_FULL_BODY_MAX_CHARS"
 	KeyIMAPMailfetchSocket  = "IMAP_MAILFETCH_SOCKET"
+
+	KeyOpenWebUIEnabled          = "OPENWEBUI_ENABLED"
+	KeyOpenWebUIBaseURL          = "OPENWEBUI_BASE_URL"
+	KeyOpenWebUIAllowedOrigins   = "OPENWEBUI_ALLOWED_ORIGINS"
+	KeyOpenWebUIAPIKey           = "OPENWEBUI_API_KEY"
+	KeyOpenWebUIWorkspaceName    = "OPENWEBUI_WORKSPACE_NAME"
+	KeyOpenWebUIDefaultModelID   = "OPENWEBUI_DEFAULT_MODEL_ID"
+	KeyOpenWebUIModelDisplayName = "OPENWEBUI_MODEL_DISPLAY_NAME"
+	KeyOpenWebUIModelSlug        = "OPENWEBUI_MODEL_SLUG"
+	KeyOpenWebUIPresentationHost = "OPENWEBUI_PRESENTATION_HOST"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -143,6 +153,15 @@ var knownKeyOrder = []string{
 	KeyIMAPStoreFullBody,
 	KeyIMAPFullBodyMaxChars,
 	KeyIMAPMailfetchSocket,
+	KeyOpenWebUIEnabled,
+	KeyOpenWebUIBaseURL,
+	KeyOpenWebUIAllowedOrigins,
+	KeyOpenWebUIAPIKey,
+	KeyOpenWebUIWorkspaceName,
+	KeyOpenWebUIDefaultModelID,
+	KeyOpenWebUIModelDisplayName,
+	KeyOpenWebUIModelSlug,
+	KeyOpenWebUIPresentationHost,
 }
 
 func isKnownKey(key string) bool {

@@ -74,6 +74,14 @@ func defaultIMAPConfig() IMAPConfig {
 	}
 }
 
+func defaultOpenWebUIConfig() OpenWebUIConfig {
+	return OpenWebUIConfig{
+		Enabled:       false,
+		WorkspaceName: "Open WebUI",
+		ModelSlug:     "model",
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -153,10 +161,11 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 			LocalOrigin:   "https://portal.example",
 			OwnerUsername: "owner",
 		},
-		Jobs: defaultJobsConfig(),
-		LLM:  defaultLLMConfig(),
-		RSS:  defaultRSSConfig(),
-		IMAP: defaultIMAPConfig(),
+		Jobs:      defaultJobsConfig(),
+		LLM:       defaultLLMConfig(),
+		RSS:       defaultRSSConfig(),
+		IMAP:      defaultIMAPConfig(),
+		OpenWebUI: defaultOpenWebUIConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -1299,5 +1308,327 @@ func TestConfig_Redacted_IMAPCredentialsShowOnlySetOrUnset(t *testing.T) {
 	}
 	if unsetRedacted[KeyIMAPPassword] != "<unset>" {
 		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyIMAPPassword, unsetRedacted[KeyIMAPPassword])
+	}
+}
+
+// validOpenWebUIEnv is the smallest environment that enables the Open
+// WebUI feature successfully. Each rejection test below starts from it
+// and breaks exactly one thing, so a failure names the rule it broke
+// rather than a pile of unrelated missing fields.
+func validOpenWebUIEnv() map[string]string {
+	return map[string]string{
+		KeyOpenWebUIEnabled:          "true",
+		KeyOpenWebUIBaseURL:          "https://openwebui.example.net",
+		KeyOpenWebUIAllowedOrigins:   "https://openwebui.example.net",
+		KeyOpenWebUIAPIKey:           "sk-openwebui-secret",
+		KeyOpenWebUIDefaultModelID:   "gpt-oss:20b",
+		KeyOpenWebUIPresentationHost: "openwebui.example.net",
+	}
+}
+
+func loadWithOpenWebUI(t *testing.T, overrides map[string]string) (*Config, error) {
+	t.Helper()
+	return Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(
+		validAuthEnv(),
+		map[string]string{KeyAppEnv: "development"},
+		validOpenWebUIEnv(),
+		overrides,
+	))})
+}
+
+func TestLoad_OpenWebUIDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.Enabled {
+		t.Error("OPENWEBUI_ENABLED should default to false")
+	}
+	if cfg.OpenWebUI.WorkspaceName != "Open WebUI" || cfg.OpenWebUI.ModelSlug != "model" {
+		t.Errorf("defaults = %+v, want workspace name %q and slug %q", cfg.OpenWebUI, "Open WebUI", "model")
+	}
+}
+
+// TestLoad_OpenWebUIDisabledIgnoresInvalidFields is the other half of the
+// safe default: a deployment that once had the feature on, then turned it
+// off, must not fail startup over leftover settings nothing will read.
+func TestLoad_OpenWebUIDisabledIgnoresInvalidFields(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIEnabled:          "false",
+		KeyOpenWebUIBaseURL:          "http://insecure.example.net/path",
+		KeyOpenWebUIAllowedOrigins:   "not-a-url",
+		KeyOpenWebUIModelSlug:        "Not A Slug",
+		KeyOpenWebUIPresentationHost: "https://scheme.example.net",
+	})
+	if err != nil {
+		t.Fatalf("a disabled feature must not validate its own fields: %v", err)
+	}
+	if cfg.OpenWebUI.Enabled {
+		t.Error("Enabled = true, want false")
+	}
+}
+
+func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIWorkspaceName:    "Home Instance",
+		KeyOpenWebUIModelDisplayName: "GPT-OSS 20B",
+		KeyOpenWebUIModelSlug:        "gpt_oss",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := OpenWebUIConfig{
+		Enabled:          true,
+		BaseURL:          "https://openwebui.example.net",
+		AllowedOrigins:   []string{"https://openwebui.example.net"},
+		APIKey:           "sk-openwebui-secret",
+		WorkspaceName:    "Home Instance",
+		DefaultModelID:   "gpt-oss:20b",
+		ModelDisplayName: "GPT-OSS 20B",
+		ModelSlug:        "gpt_oss",
+		PresentationHost: "openwebui.example.net",
+	}
+	if !reflect.DeepEqual(cfg.OpenWebUI, want) {
+		t.Errorf("OpenWebUI = %+v, want %+v", cfg.OpenWebUI, want)
+	}
+}
+
+func TestLoad_OpenWebUIEnabledRequiresEveryRequiredField(t *testing.T) {
+	for _, key := range []string{
+		KeyOpenWebUIBaseURL,
+		KeyOpenWebUIAllowedOrigins,
+		KeyOpenWebUIAPIKey,
+		KeyOpenWebUIDefaultModelID,
+		KeyOpenWebUIPresentationHost,
+	} {
+		t.Run(key, func(t *testing.T) {
+			env := mergeMaps(validAuthEnv(), map[string]string{KeyAppEnv: "development"}, validOpenWebUIEnv())
+			delete(env, key)
+			_, err := Load(LoadOptions{Getenv: getenvFromMap(env)})
+			if err == nil {
+				t.Fatalf("missing %s should fail startup", key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error %q does not name %s", err.Error(), key)
+			}
+		})
+	}
+}
+
+// TestLoad_OpenWebUIRejectsUnsafeBaseURL covers the origin rules that
+// bound where the API key may be sent (ADR-0005 D11). https is required
+// in *every* environment, not only production: a development deployment
+// pointing at a plaintext instance would still put the credential on the
+// wire in the clear.
+func TestLoad_OpenWebUIRejectsUnsafeBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		origins  string
+		wantKeys []string
+	}{
+		{
+			name:     "plaintext http even in development",
+			baseURL:  "http://openwebui.example.net",
+			origins:  "http://openwebui.example.net",
+			wantKeys: []string{KeyOpenWebUIBaseURL, KeyOpenWebUIAllowedOrigins},
+		},
+		{
+			name:     "path",
+			baseURL:  "https://openwebui.example.net/api",
+			origins:  "https://openwebui.example.net/api",
+			wantKeys: []string{KeyOpenWebUIBaseURL, KeyOpenWebUIAllowedOrigins},
+		},
+		{
+			name:     "userinfo",
+			baseURL:  "https://user:pass@openwebui.example.net",
+			origins:  "https://user:pass@openwebui.example.net",
+			wantKeys: []string{KeyOpenWebUIBaseURL, KeyOpenWebUIAllowedOrigins},
+		},
+		{
+			name:     "not in the allowlist",
+			baseURL:  "https://elsewhere.example.net",
+			origins:  "https://openwebui.example.net",
+			wantKeys: []string{KeyOpenWebUIBaseURL},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadWithOpenWebUI(t, map[string]string{
+				KeyOpenWebUIBaseURL:        tt.baseURL,
+				KeyOpenWebUIAllowedOrigins: tt.origins,
+			})
+			if err == nil {
+				t.Fatalf("base URL %q with allowlist %q should be rejected", tt.baseURL, tt.origins)
+			}
+			for _, key := range tt.wantKeys {
+				if !strings.Contains(err.Error(), key) {
+					t.Errorf("error %q does not name %s", err.Error(), key)
+				}
+			}
+			if strings.Contains(err.Error(), "openwebui.example.net") || strings.Contains(err.Error(), "elsewhere") {
+				t.Errorf("error %q leaked a raw config value", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_OpenWebUIAcceptsMultipleAllowedOrigins(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIAllowedOrigins: "https://openwebui.example.net, https://openwebui.tail1a2b3c.ts.net",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://openwebui.example.net", "https://openwebui.tail1a2b3c.ts.net"}
+	if !reflect.DeepEqual(cfg.OpenWebUI.AllowedOrigins, want) {
+		t.Errorf("AllowedOrigins = %v, want %v", cfg.OpenWebUI.AllowedOrigins, want)
+	}
+}
+
+func TestLoad_OpenWebUIRejectsInvalidModelSlug(t *testing.T) {
+	tests := map[string]string{
+		"uppercase":                 "Model",
+		"punctuation":               "my.model",
+		"longer than 32 characters": strings.Repeat("m", 33),
+		"collides with owner":       "owner",
+		"reserved assistant":        "assistant",
+		"reserved system":           "system",
+	}
+	for name, slug := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIModelSlug: slug})
+			if err == nil {
+				t.Fatalf("slug %q should be rejected", slug)
+			}
+			if !strings.Contains(err.Error(), KeyOpenWebUIModelSlug) {
+				t.Errorf("error %q does not name %s", err.Error(), KeyOpenWebUIModelSlug)
+			}
+		})
+	}
+}
+
+// TestLoad_OpenWebUIModelSlugCollisionIsCaseInsensitive: "Owner" and
+// "owner" read as the same handle to a person even though the bytes
+// differ, so the owner-username collision check folds case.
+func TestLoad_OpenWebUIModelSlugCollisionIsCaseInsensitive(t *testing.T) {
+	env := mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:        "development",
+		KeyOwnerUsername: "Nekono",
+	}, validOpenWebUIEnv(), map[string]string{KeyOpenWebUIModelSlug: "nekono"})
+	if _, err := Load(LoadOptions{Getenv: getenvFromMap(env)}); err == nil {
+		t.Fatal("a slug differing from OWNER_USERNAME only by case should be rejected")
+	}
+}
+
+// TestLoad_OpenWebUIRejectsInvalidPresentationHost keeps the presentation
+// host a bare hostname, and distinct from this service's own host: a
+// UserLite with a null host means "local", so a VirtualActor presented on
+// the local host would be indistinguishable from a local actor.
+func TestLoad_OpenWebUIRejectsInvalidPresentationHost(t *testing.T) {
+	tests := map[string]string{
+		"scheme":                 "https://openwebui.example.net",
+		"port":                   "openwebui.example.net:8080",
+		"path":                   "openwebui.example.net/chat",
+		"uppercase":              "OpenWebUI.example.net",
+		"trailing dot":           "openwebui.example.net.",
+		"same host as the local": "portal.example",
+	}
+	for name, host := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIPresentationHost: host})
+			if err == nil {
+				t.Fatalf("presentation host %q should be rejected", host)
+			}
+			if !strings.Contains(err.Error(), KeyOpenWebUIPresentationHost) {
+				t.Errorf("error %q does not name %s", err.Error(), KeyOpenWebUIPresentationHost)
+			}
+		})
+	}
+}
+
+// TestLoad_OpenWebUIPresentationHostIsNotDerivedFromBaseURL is the
+// roadmap's "never inferred from base_url": changing the instance's
+// origin must not change the handle a client already knows.
+func TestLoad_OpenWebUIPresentationHostIsNotDerivedFromBaseURL(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIBaseURL:        "https://internal-instance.example.net",
+		KeyOpenWebUIAllowedOrigins: "https://internal-instance.example.net",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.PresentationHost != "openwebui.example.net" {
+		t.Errorf("PresentationHost = %q, want the configured value regardless of the base URL", cfg.OpenWebUI.PresentationHost)
+	}
+	// The two being allowed to match is deliberate; what is forbidden is
+	// deriving one from the other.
+	same, err := loadWithOpenWebUI(t, nil)
+	if err != nil {
+		t.Fatalf("a presentation host equal to the base URL's host should be allowed: %v", err)
+	}
+	if same.OpenWebUI.PresentationHost != "openwebui.example.net" {
+		t.Errorf("PresentationHost = %q, want openwebui.example.net", same.OpenWebUI.PresentationHost)
+	}
+}
+
+func TestLoad_OpenWebUIModelDisplayNameFallsBackToModelID(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.ModelDisplayName != "" {
+		t.Errorf("ModelDisplayName = %q, want empty when unset", cfg.OpenWebUI.ModelDisplayName)
+	}
+	if got := cfg.OpenWebUI.ModelDisplayNameOrDefault(); got != "gpt-oss:20b" {
+		t.Errorf("ModelDisplayNameOrDefault() = %q, want the model id", got)
+	}
+}
+
+// TestLoad_OpenWebUIDefaultModelIDIsOpaque: ADR-0005 D9 makes the
+// provider's model id opaque, so parsing trims surrounding whitespace and
+// changes nothing else — no case folding, no separator rewriting.
+func TestLoad_OpenWebUIDefaultModelIDIsOpaque(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIDefaultModelID: "  My-Model:20B/v2  "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.DefaultModelID != "My-Model:20B/v2" {
+		t.Errorf("DefaultModelID = %q, want the value trimmed but otherwise unchanged", cfg.OpenWebUI.DefaultModelID)
+	}
+}
+
+func TestConfig_Redacted_NeverExposesOpenWebUIAPIKey(t *testing.T) {
+	const secretKey = "sk-openwebui-secret"
+	cfg := Config{OpenWebUI: OpenWebUIConfig{APIKey: secretKey}}
+	redacted := cfg.Redacted()
+	if strings.Contains(redacted[KeyOpenWebUIAPIKey], secretKey) {
+		t.Errorf("Redacted()[%s] leaked the raw value: %q", KeyOpenWebUIAPIKey, redacted[KeyOpenWebUIAPIKey])
+	}
+	if redacted[KeyOpenWebUIAPIKey] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyOpenWebUIAPIKey, redacted[KeyOpenWebUIAPIKey])
+	}
+	if unset := (Config{}).Redacted(); unset[KeyOpenWebUIAPIKey] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyOpenWebUIAPIKey, unset[KeyOpenWebUIAPIKey])
+	}
+}
+
+// TestConfig_Redacted_CoversEveryKnownKey is broader than the Open WebUI
+// feature but is what makes adding nine keys safe: Redacted is the one
+// place that decides what is safe to log, so a key missing from it would
+// silently vanish from the startup log rather than being redacted.
+func TestConfig_Redacted_CoversEveryKnownKey(t *testing.T) {
+	redacted := Config{}.Redacted()
+	for _, key := range KnownKeys() {
+		if _, ok := redacted[key]; !ok {
+			t.Errorf("Redacted() is missing known key %s", key)
+		}
+	}
+	for key := range redacted {
+		if !isKnownKey(key) {
+			t.Errorf("Redacted() reports %s, which is not a known key", key)
+		}
 	}
 }
