@@ -235,6 +235,10 @@ a fixture. The key referenced is one declared in `internal/config`'s schema,
 not a free-form environment-variable name — `Load` reads only the known keys,
 by name, and never scans the environment
 ([`docs/operations/configuration.md`](../operations/configuration.md#why-environment-variable-scanning-is-scoped-to-known-keys)).
+The adapter then reads that value from the typed `Config` it is given, not
+from the process environment itself: an `os.Getenv` shortcut would bypass
+`Load`'s validation and would miss the config file a bare-host `.env`
+deployment relies on.
 
 Rotation follows the existing procedure in
 [`docs/operations/runbook.md`](../operations/runbook.md#secret-rotation) —
