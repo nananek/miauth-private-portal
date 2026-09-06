@@ -826,7 +826,7 @@ to be able to look up later.
 | Source owner | Public feeds the operator lists in `RSS_FEED_URLS`. No account, no per-source identity. | The single owner's own mailbox (`IMAP_HOST`/`IMAP_USERNAME`); exactly one mailbox. | |
 | API / format | HTTP `GET`; RSS 2.0 / Atom XML parsed with `encoding/xml`. | IMAP4rev1 `EXAMINE` + `UID FETCH` + `BODY.PEEK`; RFC 5322 / MIME, parsed in the separate `cmd/mailfetch` process (ADR-0003). | |
 | Auth | None. Authenticated feeds are not supported; if one is ever added, its credential goes in a request header, never in a query string. | `LOGIN` with `IMAP_USERNAME`/`IMAP_PASSWORD` over TLS (`implicit` or `starttls`; no plaintext mode exists). The credential never enters a job payload — it lives in the adapter's config and travels only in the per-request socket payload. | |
-| Rate limit | One fetch per source per `RSS_POLL_INTERVAL` (default `15m`), bounded by `RSS_FETCH_TIMEOUT` (default `15s`). No additional per-host limiter; each kind has its own `Scheduler`. | One fetch per `IMAP_POLL_INTERVAL` (default `5m`), bounded by `IMAP_FETCH_TIMEOUT` (default `30s`), at most 200 messages per fetch (a fixed internal bound). A rejected `LOGIN` is permanent, so a bad password is not retried into a provider lockout. | |
+| Rate limit | One fetch per source per `RSS_POLL_INTERVAL` (default `15m`), bounded by `RSS_FETCH_TIMEOUT` (default `15s`). No additional per-host limiter; each kind has its own `Scheduler`. | One fetch per `IMAP_POLL_INTERVAL` (default `5m`), bounded by `IMAP_FETCH_TIMEOUT` (default `30s`), at most 200 messages per fetch (a fixed internal bound). A rejected `LOGIN` is classified permanent, so a bad password costs one login attempt per poll rather than a `JOBS_MAX_ATTEMPTS`-deep retry burst each time; nothing disables the source, so the scheduler keeps polling every `IMAP_POLL_INTERVAL` until the credential is fixed. | |
 | Retention | Indefinite; no automatic purge (a dedicated retention policy is its own future issue). | Same. | |
 | Dedupe key | `external_id` from the item's `guid`/Atom `id`, falling back to its link, and to the item's own `dedupe_key` when it has neither (`external_id` is `UNIQUE` per source, so it can never be left empty). `dedupe_key` hashes the source ID with that identifier, or with title+body+date for an item that has no identifier at all. | `external_id` from the message's `Message-ID`, stable across a `UIDVALIDITY` reset; when absent, a hash of source+`UIDVALIDITY`+UID, stable only until the next reset. | |
 | Sanitization | `internal/textsanitize.StripHTML`, bounded by `RSS_SUMMARY_MAX_CHARS`. | `text/plain` preferred, `text/html` run through the same `StripHTML`; bounded by `IMAP_SNIPPET_MAX_CHARS` / `IMAP_FULL_BODY_MAX_CHARS`. | |
@@ -916,9 +916,12 @@ or [`internal/ingest/imap/adapter_test.go`](../../internal/ingest/imap/adapter_t
 ### Wiring a new kind into `cmd/server`
 
 1. Add an `XxxConfig` to `internal/config` (an `XXX_ENABLED` gate
-   defaulting to `false`, plus the adapter's own keys), register its keys
-   in `KnownKeys()`, and reflect every secret in `Config.Redacted()` as
-   set/not-set — never as its value.
+   defaulting to `false`, plus the adapter's own keys), list every one of
+   its `Key…` constants in `knownKeyOrder` — the single list both
+   `isKnownKey` and `KnownKeys()` read, so a key left out of it fails
+   startup as an unknown key the moment it appears in a config file — and
+   reflect every secret in `Config.Redacted()` as set/not-set, never as
+   its value.
 2. In `cmd/server/main.go`, add the new gate to the
    `if cfg.RSS.Enabled || cfg.IMAP.Enabled` condition that constructs
    `ingestSvc` — it is nil when every ingestion feature is off, so a
