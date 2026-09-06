@@ -817,9 +817,9 @@ boundaries can be reviewed on their own.
 ### Adapter contract
 
 Fill the last column in for the new adapter, in its own
-`## <Kind> ingestion` section of this document (see "Startup seeding"
-below). Every row is a decision the operator has to be able to look up
-later.
+`## <Kind> ingestion` section of this document (step 5 of "Wiring a new
+kind into `cmd/server`" below). Every row is a decision the operator has
+to be able to look up later.
 
 | Property | `rss` (`internal/ingest/rss`) | `imap` (`internal/ingest/imap` + `cmd/mailfetch`) | New adapter |
 | --- | --- | --- | --- |
@@ -828,7 +828,7 @@ later.
 | Auth | None. Authenticated feeds are not supported; if one is ever added, its credential goes in a request header, never in a query string. | `LOGIN` with `IMAP_USERNAME`/`IMAP_PASSWORD` over TLS (`implicit` or `starttls`; no plaintext mode exists). The credential never enters a job payload — it lives in the adapter's config and travels only in the per-request socket payload. | |
 | Rate limit | One fetch per source per `RSS_POLL_INTERVAL` (default `15m`), bounded by `RSS_FETCH_TIMEOUT` (default `15s`). No additional per-host limiter; each kind has its own `Scheduler`. | One fetch per `IMAP_POLL_INTERVAL` (default `5m`), bounded by `IMAP_FETCH_TIMEOUT` (default `30s`), at most 200 messages per fetch (a fixed internal bound). A rejected `LOGIN` is permanent, so a bad password is not retried into a provider lockout. | |
 | Retention | Indefinite; no automatic purge (a dedicated retention policy is its own future issue). | Same. | |
-| Dedupe key | `external_id` from the item's `guid`/Atom `id`; when absent, a content hash of title+body+date. Both are hashed with the source ID into `dedupe_key`. | `external_id` from the message's `Message-ID`, stable across a `UIDVALIDITY` reset; when absent, a hash of source+`UIDVALIDITY`+UID, stable only until the next reset. | |
+| Dedupe key | `external_id` from the item's `guid`/Atom `id`, falling back to its link, and to the item's own `dedupe_key` when it has neither (`external_id` is `UNIQUE` per source, so it can never be left empty). `dedupe_key` hashes the source ID with that identifier, or with title+body+date for an item that has no identifier at all. | `external_id` from the message's `Message-ID`, stable across a `UIDVALIDITY` reset; when absent, a hash of source+`UIDVALIDITY`+UID, stable only until the next reset. | |
 | Sanitization | `internal/textsanitize.StripHTML`, bounded by `RSS_SUMMARY_MAX_CHARS`. | `text/plain` preferred, `text/html` run through the same `StripHTML`; bounded by `IMAP_SNIPPET_MAX_CHARS` / `IMAP_FULL_BODY_MAX_CHARS`. | |
 | Failure classification | `classifyDoError` / `categorizeStatus` in `internal/ingest/rss/adapter.go`. | `classifyConnError` / `classifyFetchError` in `internal/mailfetch/fetch.go`. | |
 
@@ -919,11 +919,17 @@ or [`internal/ingest/imap/adapter_test.go`](../../internal/ingest/imap/adapter_t
    defaulting to `false`, plus the adapter's own keys), register its keys
    in `KnownKeys()`, and reflect every secret in `Config.Redacted()` as
    set/not-set — never as its value.
-2. In `cmd/server/main.go`, behind that gate: construct the adapter,
-   `ingestSvc.RegisterAdapter(adapter)`, and start one
-   `ingest.NewScheduler` for the new kind. There is deliberately no
+2. In `cmd/server/main.go`, add the new gate to the
+   `if cfg.RSS.Enabled || cfg.IMAP.Enabled` condition that constructs
+   `ingestSvc` — it is nil when every ingestion feature is off, so a
+   deployment that enables only the new kind would otherwise panic on the
+   first `RegisterAdapter`. Then, behind the new kind's own gate:
+   construct the adapter, `ingestSvc.RegisterAdapter(adapter)`, build one
+   `ingest.NewScheduler` for the kind, and run it in the goroutine block
+   alongside `rssScheduler`/`imapScheduler`. There is deliberately no
    second `jobsManager.Register`: `ingest.JobType` is shared by every
-   kind and `Service.Handle` dispatches on `source.Kind` itself.
+   kind, `Service.Handle` dispatches on `source.Kind` itself, and a
+   second registration would silently overwrite the first.
 3. Seed the source rows with
    `db.ExternalSources.EnsureFromConfig(ctx, sources)`, which leaves an
    existing `(kind, uri)` pair — and its cursor and failure counters —
