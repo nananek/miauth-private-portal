@@ -869,8 +869,10 @@ projection (that model presented to Aria as a VirtualActor); #53 built
 the outbound chat bridge on top of it — sending an Aria message to Open
 WebUI and turning its reply into a local entry — described in "Outbound
 turn bridge (Issue #53)" below. Owner recovery tooling for a link that
-gets stuck `ambiguous` is Issue #53's still-unimplemented final PR; see
-that section's own note.
+gets stuck `ambiguous` — `internal/openwebui/recovery.go`'s owner-only
+methods and the `cmd/openwebuictl` CLI built on them — is that section's
+own closing note; see `docs/operations/runbook.md` for the operational
+procedure.
 
 ### Feature flag and startup seeding
 
@@ -1090,11 +1092,11 @@ doc comments):
 | Continuation: rate limit / server error / transport / timeout | `ambiguous` on the last attempt | `ambiguous` on the last attempt | Yes, via a fresh lookup first, until the last attempt |
 | Success | `succeeded` | `ready`, current pointer advanced | — |
 
-An `ambiguous` link accepts no further automatic attempt at all (Issue
-#53's still-unimplemented final PR is the only way out —
-`internal/openwebui/recovery.go` and `cmd/openwebuictl`, tracked as this
-issue's remaining PR); until it lands, an owner-visible stuck link has no
-resolution path but leaving it be.
+An `ambiguous` link accepts no further automatic attempt at all —
+`internal/openwebui/recovery.go`'s five owner-only methods (`ListLinks`,
+`DescribeLink`, `ConfirmLink`, `AbandonLink`, `FreezeLink`) and the
+`cmd/openwebuictl` CLI built on them are the only way out; see
+`docs/operations/runbook.md` for the operational procedure.
 
 **Notification (ADR-0005 D6).** A succeeded turn's reply records a Note-
 style "reply" notification, the same owner-facing shape Issue #9's
