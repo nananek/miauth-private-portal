@@ -752,10 +752,16 @@ header block, followed by a sanitized snippet of the message's text
 body (`text/plain` preferred; `text/html` sanitized the same way RSS
 bodies are, via `internal/textsanitize.StripHTML`, when no `text/plain`
 part exists). This header-in-body placement is deliberate:
-`internal/ingest.FetchedItem.Title` is written by the RSS adapter but
-never actually read by `internal/ingest.Service.Handle` (only `Body`
-reaches `CreateExternalEntry`), so folding sender/subject/date into
-`Body` itself is the only way they are actually preserved.
+`internal/mailfetch` builds the block itself and never sets
+`internal/ingest.FetchedItem.Title`, so `internal/ingest.Service.Handle`'s
+`composeExternalBody` — which prepends a
+`[<entry kind>[: <source display name>]] <title>` provenance header (and
+the item's `ProvenanceURL` on its own line) only to an item whose `Title`
+is non-empty, the RSS/Atom case — is a no-op for mail and never
+double-prefixes it. Sender/subject/date are preserved because they are
+already part of `Body` by the time it reaches `CreateExternalEntry`. See
+"Adding a source adapter" below for the boundary this draws for a new
+adapter, and `docs/compat/aria-v1.5.11.md` for the per-kind `Body` shapes.
 
 - `IMAP_STORE_FULL_BODY=false` (the default) stores only a bounded
   snippet (`IMAP_SNIPPET_MAX_CHARS`); `true` raises the bound to
@@ -800,6 +806,158 @@ reaches `CreateExternalEntry`), so folding sender/subject/date into
   ideally under its own low-privilege OS user, with
   `MAILFETCH_SOCKET_PATH` pointing at a directory both it and `bin/server`
   (via `IMAP_MAILFETCH_SOCKET`) can reach.
+
+## Adding a source adapter
+
+Issue #17's contract for every ingestion adapter after the first two. RSS
+(above) and IMAP (above) are the two worked examples this section
+generalizes from; read one of them alongside this checklist rather than
+instead of it.
+
+### Approval gate
+
+**Do not add a provider-specific adapter until the tracker issue (#1) has
+approved that specific adapter's value.** "The framework supports it" is
+not a reason to add one: every adapter is a new outbound network
+dependency, a new untrusted parser surface, and (usually) a new
+credential to hold for a single-owner deployment. Once an adapter is
+approved, add it as **one adapter per pull request**, so its safety
+boundaries can be reviewed on their own.
+
+### Adapter contract
+
+Fill the last column in for the new adapter, in its own
+`## <Kind> ingestion` section of this document (step 5 of "Wiring a new
+kind into `cmd/server`" below). Every row is a decision the operator has
+to be able to look up later.
+
+| Property | `rss` (`internal/ingest/rss`) | `imap` (`internal/ingest/imap` + `cmd/mailfetch`) | New adapter |
+| --- | --- | --- | --- |
+| Source owner | Public feeds the operator lists in `RSS_FEED_URLS`. No account, no per-source identity. | The single owner's own mailbox (`IMAP_HOST`/`IMAP_USERNAME`); exactly one mailbox. | |
+| API / format | HTTP `GET`; RSS 2.0 / Atom XML parsed with `encoding/xml`. | IMAP4rev1 `EXAMINE` + `UID FETCH` + `BODY.PEEK`; RFC 5322 / MIME, parsed in the separate `cmd/mailfetch` process (ADR-0003). | |
+| Auth | None. Authenticated feeds are not supported; if one is ever added, its credential goes in a request header, never in a query string. | `LOGIN` with `IMAP_USERNAME`/`IMAP_PASSWORD` over TLS (`implicit` or `starttls`; no plaintext mode exists). The credential never enters a job payload — it lives in the adapter's config and travels only in the per-request socket payload. | |
+| Rate limit | One fetch per source per `RSS_POLL_INTERVAL` (default `15m`), bounded by `RSS_FETCH_TIMEOUT` (default `15s`). No additional per-host limiter; each kind has its own `Scheduler`. | One fetch per `IMAP_POLL_INTERVAL` (default `5m`), bounded by `IMAP_FETCH_TIMEOUT` (default `30s`), at most 200 messages per fetch (a fixed internal bound). A rejected `LOGIN` is classified permanent, so a bad password costs one login attempt per poll rather than a `JOBS_MAX_ATTEMPTS`-deep retry burst each time; nothing disables the source, so the scheduler keeps polling every `IMAP_POLL_INTERVAL` until the credential is fixed. | |
+| Retention | Indefinite; no automatic purge (a dedicated retention policy is its own future issue). | Same. | |
+| Dedupe key | `external_id` from the item's `guid`/Atom `id`, falling back to its link, and to the item's own `dedupe_key` when it has neither (`external_id` is `UNIQUE` per source, so it can never be left empty). `dedupe_key` hashes the source ID with that identifier, or with title+body+date for an item that has no identifier at all. | `external_id` from the message's `Message-ID`, stable across a `UIDVALIDITY` reset; when absent, a hash of source+`UIDVALIDITY`+UID, stable only until the next reset. | |
+| Sanitization | `internal/textsanitize.StripHTML`, bounded by `RSS_SUMMARY_MAX_CHARS`. | `text/plain` preferred, `text/html` run through the same `StripHTML`; bounded by `IMAP_SNIPPET_MAX_CHARS` / `IMAP_FULL_BODY_MAX_CHARS`. | |
+| Failure classification | `classifyDoError` / `categorizeStatus` in `internal/ingest/rss/adapter.go`. | `classifyConnError` / `classifyFetchError` in `internal/mailfetch/fetch.go`. | |
+
+### Safety boundaries
+
+A new adapter's pull request has to satisfy all of these. They are the
+properties the framework itself cannot enforce for you.
+
+- **Outbound HTTP goes through `internal/ingest/safehttp.Client`.** Never
+  construct a bare `http.Client`: the SSRF address policy, the redirect
+  bound, and the `https`→`http` downgrade refusal all live there.
+  `safehttp.Config.AllowIPForTesting` stays a Go-level constructor
+  argument — never expose it as an `internal/config` key, or a production
+  deployment could configure its way past the protection.
+- **Bound every fetch in both time and size.** A `context.WithTimeout`
+  around the round trip, and `safehttp.ReadLimited` (or an equivalent
+  explicit octet bound, as `IMAP_MAX_MESSAGE_BYTES` is) on anything read
+  into memory. Return failures as `ingest.NewFetchError(category, err)`
+  so `Service` can tell retryable from permanent.
+- **Never put credentials or raw server response text in an error
+  message.** `internal/logging` redacts by attribute *key* against a
+  fixed allowlist (see "Redaction" above) — it does not scan values, so a
+  secret concatenated into a free-text message is not caught anywhere
+  downstream. Classify the failure and return a *fixed* string, the way
+  `classifyConnError` does for a rejected `LOGIN`
+  ([`internal/mailfetch/fetch.go`](../../internal/mailfetch/fetch.go));
+  [`TestFetch_WrongPasswordFails`](../../internal/mailfetch/fetch_test.go)
+  pins it. When an adapter is split across processes, the fixed message
+  is built on the side that holds the credential — the RPC client half
+  passes through whatever it receives and does no redaction of its own.
+- **Sanitize in the adapter, not in `Service`.** Reuse
+  `internal/textsanitize.StripHTML` to reduce a fetched body to plain
+  text before putting it in `ingest.FetchedItem.Body`.
+  `internal/ingest.Service` never parses, sanitizes, or executes `Body`
+  (pinned by
+  [`TestHandle_TitlelessItem_BodyIsStoredVerbatimAsInertText`](../../internal/ingest/service_test.go)).
+  Its one edit to `Body` is `composeExternalBody`, which prepends a
+  `[<entry kind>[: <source display name>]] <title>` provenance header —
+  and the item's `ProvenanceURL` on its own line, when it has one — to an
+  item whose `Title` is non-empty, and is a no-op for an item that sets
+  no `Title`. That header is composed from `Service`'s own fields, never
+  from anything `Body` says, so apart from it whatever the adapter
+  returns is what a reader sees.
+- **Keep ingested content out of LLM prompts.** `Service` enqueues no
+  `llm_generation`/`llm_classification` job for an ingested entry, and
+  the new adapter must not add one. Should a future feature deliberately
+  include such an entry as thread context, `internal/llmreply`'s
+  `roleForKind` still confines every non-LLM entry kind to the `user`
+  role (`internal/llmreply/promptbuilder_test.go`,
+  `TestBuildMessages_NonUserPostContextBecomesUserRole`) — instruction-like
+  text in a feed or a mail body is data, never a system instruction.
+- **Isolate a large untrusted parser in its own process.** A non-HTTP
+  protocol with a substantial attacker-influenced parsing surface (MIME
+  was the first) follows ADR-0003: the parsing library lives in a
+  separate binary reached over a Unix socket, never linked into
+  `cmd/server`.
+
+### Required tests
+
+The framework-level guarantees are already pinned once, for every
+adapter, in `internal/ingest`. **Do not re-test them per adapter**; do
+read them, because they define what your adapter is allowed to assume.
+
+| Guarantee | Where it is already pinned |
+| --- | --- |
+| Duplicate delivery creates no second entry | `TestHandle_DuplicateDeliveryDoesNotDuplicateEntries` (`internal/ingest/service_test.go`) |
+| A mid-batch failure leaves the cursor unadvanced | `TestHandle_PartialBatchFailureKeepsCursorAndCommittedItems` (same file) |
+| One source's failure does not affect another source | `TestHandle_FailingSourceDoesNotAffectAnotherSource` (same file) |
+| An ingested body is stored inert and enqueues no job | `TestHandle_TitlelessItem_BodyIsStoredVerbatimAsInertText`, `TestHandle_ImapItem_NeverEnqueuesLLMJobs` (same file) |
+| A crashed worker's in-flight job is recovered | `TestManagerRecoversExpiredLeaseAfterCrash` (`internal/jobs/manager_test.go`) |
+| A restart or duplicate tick does not double-enqueue a poll | `TestScheduler_TickWithinSameWindowDoesNotDoubleEnqueue` (`internal/ingest/scheduler_test.go`) |
+| The SSRF/redirect/downgrade address policy holds | `internal/ingest/safehttp/client_test.go` |
+
+What the new adapter's own test file has to cover — model it on
+[`internal/ingest/rss/adapter_test.go`](../../internal/ingest/rss/adapter_test.go)
+or [`internal/ingest/imap/adapter_test.go`](../../internal/ingest/imap/adapter_test.go):
+
+- A successful fetch returns the expected items **and** a cursor, and
+  passing that cursor back changes what the next fetch requests.
+- A "nothing new" response (HTTP 304 or the protocol's equivalent) sets
+  `FetchResult.NotModified` without returning items.
+- A malformed or unparseable stored cursor is treated as absent, not as
+  an error — a cursor written by an older version must never wedge a
+  source permanently.
+- A malformed response returns `ingest.CategoryMalformed`; an oversized
+  one, `CategoryTooLarge`; a timeout, `CategoryTimeout`; and, for an
+  HTTP-based adapter, a blocked address returns `CategoryPolicy`.
+- A rejected authentication returns a permanent category and a message
+  containing neither the credential nor the server's own response text.
+
+### Wiring a new kind into `cmd/server`
+
+1. Add an `XxxConfig` to `internal/config` (an `XXX_ENABLED` gate
+   defaulting to `false`, plus the adapter's own keys), list every one of
+   its `Key…` constants in `knownKeyOrder` — the single list both
+   `isKnownKey` and `KnownKeys()` read, so a key left out of it fails
+   startup as an unknown key the moment it appears in a config file — and
+   reflect every secret in `Config.Redacted()` as set/not-set, never as
+   its value.
+2. In `cmd/server/main.go`, add the new gate to the
+   `if cfg.RSS.Enabled || cfg.IMAP.Enabled` condition that constructs
+   `ingestSvc` — it is nil when every ingestion feature is off, so a
+   deployment that enables only the new kind would otherwise panic on the
+   first `RegisterAdapter`. Then, behind the new kind's own gate:
+   construct the adapter, `ingestSvc.RegisterAdapter(adapter)`, build one
+   `ingest.NewScheduler` for the kind, and run it in the goroutine block
+   alongside `rssScheduler`/`imapScheduler`. There is deliberately no
+   second `jobsManager.Register`: `ingest.JobType` is shared by every
+   kind, `Service.Handle` dispatches on `source.Kind` itself, and a
+   second registration would silently overwrite the first.
+3. Seed the source rows with
+   `db.ExternalSources.EnsureFromConfig(ctx, sources)`, which leaves an
+   existing `(kind, uri)` pair — and its cursor and failure counters —
+   untouched.
+4. If the new kind's entries are not `EntryNews`, extend
+   `entryKindForSourceKind` in `internal/ingest/service.go` (today only
+   `"imap"` maps to `EntryMail`).
+5. Add this document's `## <Kind> ingestion` section and the new keys'
+   rows to "Known configuration keys" above.
 
 ## Health and readiness
 

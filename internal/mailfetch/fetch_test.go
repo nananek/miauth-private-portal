@@ -278,7 +278,9 @@ func TestFetch_WrongPasswordFails(t *testing.T) {
 	ts := startTestServer(t, true)
 	req := baseRequest(ts.addr)
 	req.TLSMode = "implicit"
-	req.Password = "wrong"
+	// Long enough to never collide with unrelated substrings of the
+	// response, so the credential-leak assertion below is meaningful.
+	req.Password = "wrong-password-hunter2-9f3a"
 
 	resp := Fetch(context.Background(), req)
 	if resp.Error == nil {
@@ -293,6 +295,24 @@ func TestFetch_WrongPasswordFails(t *testing.T) {
 	// tick risks tripping the mail provider's own failed-login lockout.
 	if resp.Error.Category != string(ingest.CategoryClientError) {
 		t.Errorf("Error.Category = %q, want %q", resp.Error.Category, ingest.CategoryClientError)
+	}
+	// AGENTS.md forbids ever logging or echoing credentials, and
+	// internal/logging redacts by attribute *key*, not by scanning
+	// values: a secret concatenated into a free-text message is not
+	// caught anywhere downstream. classifyConnError therefore returns a
+	// fixed string for ErrLoginFailed instead of the server's own NO/BAD
+	// text (which some servers echo the submitted account name back in)
+	// or err.Error(). This guards against a future change that starts
+	// concatenating either into the RPC response.
+	if strings.Contains(resp.Error.Message, req.Password) {
+		t.Errorf("Error.Message = %q contains the submitted password", resp.Error.Message)
+	}
+	// The test account's name is the generic word "username", so this
+	// check is deliberately strict: it also trips on a message that
+	// merely quotes the server's "Bad username or password" text, which
+	// is exactly the wholesale-echo regression being guarded against.
+	if strings.Contains(resp.Error.Message, req.Username) {
+		t.Errorf("Error.Message = %q contains the submitted username", resp.Error.Message)
 	}
 }
 
