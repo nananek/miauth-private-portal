@@ -536,7 +536,12 @@ exists.
   continuation selection (including the same-head-twice and re-ask-after-
   failure cases), duplicate delivery, response-loss ambiguity on both
   creation and continuation, orphaned/ineligible path nodes, concurrent
-  same-thread turns (single-flight), and auth failure are covered
+  same-thread turns (single-flight), auth failure, and `ambiguous`/`failed`/
+  `dead`-link state-transition guards (`TestTurnJob_LinkStateGuard_
+  AmbiguousFailedDeadNeverCallProvider`: a pending turn whose link is in any
+  of those three states fails closed as `link_not_ready`, `Permanent`,
+  through `TurnJob.Handle`'s `switch link.State` default case, without the
+  provider ever being called) are covered
   (`internal/openwebui/{path,bridge,turnjob}_test.go`,
   `internal/httpserver/openwebui_{enqueue,e2e}_test.go`). A genuine reply-
   tree cycle cannot be constructed through any legitimate repository write
@@ -544,13 +549,14 @@ exists.
   a parent after creation — see `path_test.go`'s comment on
   `ErrPathCycle`), so that guard stays defense-in-depth, untested here.
   Still open for a later PR: an explicit stale-branch-isolation test (that a
-  turn's completion only ever moves its own link's `remote_current_id`),
-  explicit `ambiguous`/`failed`/`dead`-link state-transition-guard and mid-
-  call-cancellation tests at the `TurnJob` layer (the code paths exist —
-  `TurnJob.Handle`'s `switch link.State` default case, and `ctx.Err() != nil`
-  being left retryable without a state change — but PR3 did not add
-  dedicated tests for them), and malformed/schema-drift responses reaching
-  `TurnJob` itself rather than only `internal/provider/openwebui`'s own
+  turn's completion only ever moves its own link's `remote_current_id`), an
+  explicit mid-call-cancellation test at the `TurnJob` layer (the code path
+  exists — `isLastAttempt` treats an already-cancelled `ctx` as never the
+  job's last attempt, so a `jobs.Manager` shutdown or a lost lease never
+  freezes a link ambiguous merely because it happened to land on what would
+  otherwise have been the final attempt — but PR3 did not add a dedicated
+  test for it), and malformed/schema-drift responses reaching `TurnJob`
+  itself rather than only `internal/provider/openwebui`'s own
   (already-covered) classification of them.
 
 Terminology settled during implementation (four PRs, tracked against this

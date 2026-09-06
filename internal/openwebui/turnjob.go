@@ -255,7 +255,7 @@ func (j *TurnJob) handleCreationPending(
 	if err != nil {
 		return j.handleCreateError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, workspace, model, entry, result)
+	return j.complete(ctx, turn, link, model, entry, result, false)
 }
 
 // handleCreateError classifies a StartChat failure per the plan's
@@ -334,7 +334,7 @@ func (j *TurnJob) handleReady(
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, domain.OpenWebUIWorkspace{}, model, entry, result)
+	return j.complete(ctx, turn, link, model, entry, result, true)
 }
 
 // handleReadyRetry resolves a continuation whose previous attempt's
@@ -348,24 +348,55 @@ func (j *TurnJob) handleReadyRetry(
 	ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
 	model domain.OpenWebUIModel, entry domain.Entry, path TurnPath,
 ) error {
-	outcome, err := j.provider.LookupTurnOutcome(ctx, *turn.RemoteChatID, *turn.RemoteAssistantMessageID)
+	turn, remoteChatID, ok := resolveRemoteChatID(turn, link)
+	if !ok {
+		return j.failPermanent(ctx, turn, link, domain.FailureCategoryLinkNotReady, "turn has no known remote chat id to look up")
+	}
+	outcome, err := j.provider.LookupTurnOutcome(ctx, remoteChatID, *turn.RemoteAssistantMessageID)
 	if err != nil {
 		return j.handleLookupError(ctx, job, turn, link, err)
 	}
 	switch {
 	case outcome.Found && outcome.Done && !outcome.HasError && outcome.Content != "":
-		return j.complete(ctx, turn, link, domain.OpenWebUIWorkspace{}, model, entry, TurnResult{
+		return j.complete(ctx, turn, link, model, entry, TurnResult{
 			Content: outcome.Content, RemoteCurrentID: outcome.RemoteCurrentID,
 			PromptTokens: outcome.PromptTokens, CompletionTokens: outcome.CompletionTokens,
-		})
+		}, true)
 	case outcome.HasError || !outcome.Found || (outcome.Done && outcome.Content == ""):
 		return j.resendContinue(ctx, job, turn, link, model, entry, path)
 	default: // Found && !Done && !HasError: still generating.
-		if j.isLastAttempt(job) {
+		if j.isLastAttempt(ctx, job) {
 			return j.failAmbiguous(ctx, turn, link, nil)
 		}
 		return errors.New("openwebui: turn: lookup: still generating")
 	}
+}
+
+// resolveRemoteChatID returns the remote chat id a lookup-or-resend
+// should target, preferring turn's own recorded correlation and falling
+// back to link's — a ready link's own remote_chat_id, which MarkReady
+// always sets — when the turn's own write for it was lost: OnChatCreated
+// can commit MarkReady and then fail or be interrupted before the
+// companion SetRemoteCorrelation on this same turn runs (a DB error, a
+// crash, an expired lease), leaving turn.attempt already at 1 and
+// turn.RemoteAssistantMessageID already recorded, but turn.RemoteChatID
+// still nil. Dereferencing turn.RemoteChatID unconditionally in that
+// state is a nil-pointer panic jobs.Manager does not recover from — it
+// takes the whole process down, not just the one job. When it falls
+// back, it also updates turn's in-memory copy so a later complete() call
+// persists the recovered id instead of writing NULL over it again (see
+// SetRemoteCorrelation's own doc comment on why that matters). ok is
+// false only when neither the turn nor its ready link knows a chat id,
+// which the caller must treat as link_not_ready.
+func resolveRemoteChatID(turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink) (domain.OpenWebUITurnLink, string, bool) {
+	if turn.RemoteChatID != nil {
+		return turn, *turn.RemoteChatID, true
+	}
+	if link.RemoteChatID == nil {
+		return turn, "", false
+	}
+	turn.RemoteChatID = link.RemoteChatID
+	return turn, *link.RemoteChatID, true
 }
 
 // resendContinue re-sends a continuation under the exact ids already
@@ -376,12 +407,21 @@ func (j *TurnJob) resendContinue(
 	ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
 	model domain.OpenWebUIModel, entry domain.Entry, path TurnPath,
 ) error {
+	// Guarded independently of handleReadyRetry's own call to
+	// resolveRemoteChatID (which already ran before this is reached, on
+	// resendContinue's only call path today): this stays safe on its own
+	// if another caller is ever added, rather than trusting the caller to
+	// have resolved it first.
+	turn, remoteChatID, ok := resolveRemoteChatID(turn, link)
+	if !ok {
+		return j.failPermanent(ctx, turn, link, domain.FailureCategoryLinkNotReady, "turn has no known remote chat id to resend against")
+	}
 	now := j.clock.Now().UTC()
 	if err := j.repos.OpenWebUITurnLinks.BeginAttempt(ctx, turn.ID, turn.Attempt+1, now); err != nil {
 		return fmt.Errorf("openwebui: turn: begin attempt: %w", err)
 	}
 	result, err := j.provider.ContinueTurn(ctx, ContinueTurnRequest{
-		RemoteChatID:  *turn.RemoteChatID,
+		RemoteChatID:  remoteChatID,
 		ModelID:       model.ExternalModelID,
 		Messages:      ProviderMessages(path),
 		NewTurn:       Message{Role: pathRoleUser, Content: entry.Body},
@@ -392,7 +432,7 @@ func (j *TurnJob) resendContinue(
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, domain.OpenWebUIWorkspace{}, model, entry, result)
+	return j.complete(ctx, turn, link, model, entry, result, true)
 }
 
 // handleTurnError classifies a ContinueTurn failure per the plan's
@@ -415,12 +455,12 @@ func (j *TurnJob) handleTurnError(ctx context.Context, job domain.Job, turn doma
 	case CategoryPolicyViolation:
 		return j.failPermanent(ctx, turn, link, domain.FailureCategoryPolicyViolation, "continuation refused by local policy")
 	case CategoryTurnFailed:
-		if j.isLastAttempt(job) {
+		if j.isLastAttempt(ctx, job) {
 			return j.failPermanent(ctx, turn, link, domain.FailureCategoryTurnFailed, "provider reported an error for this turn")
 		}
 		return fmt.Errorf("openwebui: turn: continue: %s", CategoryTurnFailed)
 	default: // rate_limited, server_error, transport, timeout, ambiguous
-		if j.isLastAttempt(job) {
+		if j.isLastAttempt(ctx, job) {
 			return j.failAmbiguous(ctx, turn, link, nil)
 		}
 		return fmt.Errorf("openwebui: turn: continue: %s", pe.Category)
@@ -439,7 +479,7 @@ func (j *TurnJob) handleLookupError(ctx context.Context, job domain.Job, turn do
 	if pe.Category == CategoryAuthFailed {
 		return j.failPermanent(ctx, turn, link, domain.FailureCategoryAuthFailed, "outcome lookup rejected the credential")
 	}
-	if j.isLastAttempt(job) {
+	if j.isLastAttempt(ctx, job) {
 		return j.failAmbiguous(ctx, turn, link, nil)
 	}
 	return fmt.Errorf("openwebui: turn: lookup: %s", pe.Category)
@@ -448,12 +488,17 @@ func (j *TurnJob) handleLookupError(ctx context.Context, job domain.Job, turn do
 // complete records a successful turn and creates the VirtualActor-
 // authored reply atomically alongside it (ADR-0005 D6's notification
 // policy: a reply notification only ever follows a genuine success).
-// workspace is used only to skip a redundant chat-continue capability
-// write when the caller already knows it (the create path); the ready
-// path passes the zero value and complete looks nothing up from it.
+// isContinuation marks a turn that succeeded through an actual
+// ContinueTurn call (handleReady's first attempt, resendContinue, or a
+// prior attempt's outcome adopted via handleReadyRetry's lookup) rather
+// than through StartChat's own bundled first turn: only then does
+// complete record the workspace's chat_continue capability as verified
+// (once, the same way handleCreationPending's OnChatCreated hook already
+// records chat_create) — plan §5.4 step 7's "初回なら
+// SetCapabilityStatus(chatContinue=verified)".
 func (j *TurnJob) complete(
 	ctx context.Context, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
-	_ domain.OpenWebUIWorkspace, model domain.OpenWebUIModel, entry domain.Entry, result TurnResult,
+	model domain.OpenWebUIModel, entry domain.Entry, result TurnResult, isContinuation bool,
 ) error {
 	now := j.clock.Now().UTC()
 	_, err := j.timeline.CreateGeneratedReplyBy(ctx, model.ActorID, entry.ID, result.Content,
@@ -474,6 +519,17 @@ func (j *TurnJob) complete(
 			}
 			if err := repos.OpenWebUILinks.SetRemoteCurrent(cctx, link.ID, result.RemoteCurrentID, now); err != nil {
 				return fmt.Errorf("set remote current: %w", err)
+			}
+			if isContinuation {
+				workspace, err := repos.OpenWebUIWorkspaces.Get(cctx, link.WorkspaceID)
+				if err != nil {
+					return fmt.Errorf("get workspace: %w", err)
+				}
+				if workspace.ChatContinueStatus != domain.CapabilityVerified {
+					if err := repos.OpenWebUIWorkspaces.SetCapabilityStatus(cctx, workspace.ID, workspace.ChatCreateStatus, domain.CapabilityVerified, now); err != nil {
+						return fmt.Errorf("record chat-continue capability: %w", err)
+					}
+				}
 			}
 			return repos.Notifications.Create(cctx, domain.Notification{
 				ID: domain.NewID(), Type: domain.NotificationReply, RelatedEntryID: assistantEntry.ID, CreatedAt: now,
@@ -518,9 +574,15 @@ func (j *TurnJob) setCorrelation(ctx context.Context, turn domain.OpenWebUITurnL
 
 // isLastAttempt reports whether job's next delivery, if any, would be
 // its final one — the same "will MaxAttempts be exhausted" check
-// internal/llmreply.Service.handleProviderFailure makes.
-func (j *TurnJob) isLastAttempt(job domain.Job) bool {
-	return job.Attempt+1 >= j.cfg.MaxAttempts
+// internal/llmreply.Service.handleProviderFailure makes, including its
+// ctx.Err() == nil guard (plan §5.4 step 8): a failure that surfaces
+// only because ctx was already cancelled (jobs.Manager shutting down, or
+// this job's lease expiring mid-call) must not consume the job's own
+// attempt budget by freezing a link ambiguous on what looks like the
+// last attempt — Manager redelivers it on its own restart schedule
+// instead, and that redelivery gets the ordinary attempt count.
+func (j *TurnJob) isLastAttempt(ctx context.Context, job domain.Job) bool {
+	return ctx.Err() == nil && job.Attempt+1 >= j.cfg.MaxAttempts
 }
 
 // failPermanent records turn as failed with category, freezes the link

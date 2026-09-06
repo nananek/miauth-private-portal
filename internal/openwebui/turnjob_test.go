@@ -485,6 +485,17 @@ func TestTurnJob_ContinueTurn_Success(t *testing.T) {
 	if finalLink.RemoteCurrentID == nil || *finalLink.RemoteCurrentID != "remote-msg-a1" {
 		t.Errorf("link.RemoteCurrentID = %v, want remote-msg-a1", finalLink.RemoteCurrentID)
 	}
+
+	// plan §5.4 step 7: a successful continuation is the only thing that
+	// verifies the chat_continue capability (chat_create is verified
+	// separately, by OnChatCreated — see the StartChat success test).
+	workspace, err := env.db.OpenWebUIWorkspaces.Get(t.Context(), env.workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.ChatContinueStatus != domain.CapabilityVerified {
+		t.Errorf("workspace.ChatContinueStatus = %q, want verified", workspace.ChatContinueStatus)
+	}
 }
 
 func TestTurnJob_ContinueRetry_LookupDoneAdoptsWithoutResend(t *testing.T) {
@@ -588,6 +599,73 @@ func TestTurnJob_ContinueRetry_LookupErrorResendsSameIDs(t *testing.T) {
 	}
 	if start, cont, lookup := provider.counts(); start != 0 || cont != 1 || lookup != 1 {
 		t.Errorf("provider calls = start:%d continue:%d lookup:%d, want 0/1/1", start, cont, lookup)
+	}
+}
+
+// TestTurnJob_ContinueRetry_MissingTurnChatIDFallsBackToLink guards
+// against a crash, not just a wrong result: if OnChatCreated's MarkReady
+// commits but the SetRemoteCorrelation that should immediately follow it
+// on the same turn fails or is interrupted first (a DB error, a crash, a
+// lost lease), storage is left with the link ready and its own
+// remote_chat_id set, but this turn's own remote_chat_id still NULL,
+// attempt already at 1, and remote_assistant_message_id already
+// recorded. The next delivery routes through handleReadyRetry, which
+// used to dereference turn.RemoteChatID unconditionally — a nil-pointer
+// panic that jobs.Manager does not recover from (it takes the whole
+// process down, not just this one job). It must fall back to the link's
+// own remote_chat_id instead.
+func TestTurnJob_ContinueRetry_MissingTurnChatIDFallsBackToLink(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "m0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+
+	turn := domain.OpenWebUITurnLink{
+		ID: domain.NewID(), LinkID: link.ID, BranchID: link.BranchID,
+		LocalMessageID: m0.ID,
+		RequestID:      domain.NewID(), Revision: 1, Attempt: 1, Status: domain.TurnPending,
+		RemoteMessageID: strPtr("remote-user-1"), RemoteAssistantMessageID: strPtr("remote-assistant-1"),
+		CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now(),
+	}
+	if turn.RemoteChatID != nil {
+		t.Fatal("test setup: turn.RemoteChatID must start nil")
+	}
+	if err := env.db.OpenWebUITurnLinks.Create(t.Context(), turn); err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	payload, _ := json.Marshal(turnJobPayload{TurnID: turn.ID, LinkID: link.ID, Revision: 1, ThreadID: m0.ThreadID})
+	job := domain.Job{ID: domain.NewID(), JobType: JobType, Payload: string(payload), PayloadVersion: 1, State: domain.JobPending, Attempt: 1, SourceEntryID: &m0.ID, NextRunAt: env.clock.Now(), CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now()}
+	if err := env.db.Jobs.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	provider := newFakeProvider(t)
+	provider.lookupOutcome = func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error) {
+		if link.RemoteChatID == nil || remoteChatID != *link.RemoteChatID {
+			t.Errorf("lookup remoteChatID = %q, want the link's own %v", remoteChatID, link.RemoteChatID)
+		}
+		if assistantMessageID != "remote-assistant-1" {
+			t.Errorf("lookup assistantMessageID = %q, want remote-assistant-1", assistantMessageID)
+		}
+		return TurnOutcome{Found: true, Done: true, Content: "recovered", RemoteCurrentID: strPtr("remote-assistant-1")}, nil
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if start, cont, lookup := provider.counts(); start != 0 || cont != 0 || lookup != 1 {
+		t.Errorf("provider calls = start:%d continue:%d lookup:%d, want 0/0/1 (adopted without resend)", start, cont, lookup)
+	}
+
+	got, err := env.db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.TurnSucceeded {
+		t.Errorf("turn.Status = %q, want succeeded", got.Status)
+	}
+	if got.RemoteChatID == nil || link.RemoteChatID == nil || *got.RemoteChatID != *link.RemoteChatID {
+		t.Errorf("turn.RemoteChatID = %v, want healed to the link's own %v", got.RemoteChatID, link.RemoteChatID)
 	}
 }
 
@@ -717,6 +795,100 @@ func TestTurnJob_ConcurrentHandle_SerializesPerThread(t *testing.T) {
 	}
 	if start, _, _ := provider.counts(); start != 2 {
 		t.Errorf("StartChat calls = %d, want 2 (both eventually ran)", start)
+	}
+}
+
+// TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider covers
+// plan §7.3's state-transition guard: a pending turn whose link has
+// already left creation_pending/ready (an owner recovery action, or a
+// prior job run, moved it to ambiguous/failed/dead) must fail closed as
+// link_not_ready without the provider ever being called. Handle's own
+// switch on link.State — its default case — is the only gate for this,
+// so this exercises it directly rather than through handleCreationPending
+// or handleReady.
+func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.T) {
+	for _, state := range []domain.LinkState{domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead} {
+		t.Run(string(state), func(t *testing.T) {
+			env := newTurnTestEnv(t)
+			root := env.mustCreateRoot(t, "hello")
+
+			now := env.clock.Now()
+			link := domain.OpenWebUIConversationLink{
+				ID: domain.NewID(), ThreadID: root.ThreadID, BranchID: domain.NewID(),
+				WorkspaceID: env.workspace.ID, ModelID: env.model.ID,
+				ClaimedAt: now, LastTransitionAt: now, CreatedAt: now, UpdatedAt: now,
+			}
+			if err := env.db.OpenWebUILinks.Claim(t.Context(), link); err != nil {
+				t.Fatalf("claim link: %v", err)
+			}
+			switch state {
+			case domain.LinkAmbiguous:
+				if err := env.db.OpenWebUILinks.MarkAmbiguous(t.Context(), link.ID, now); err != nil {
+					t.Fatalf("mark ambiguous: %v", err)
+				}
+			case domain.LinkFailed:
+				if err := env.db.OpenWebUILinks.MarkFailed(t.Context(), link.ID, domain.FailureCategoryClientRejected, now); err != nil {
+					t.Fatalf("mark failed: %v", err)
+				}
+			case domain.LinkDead:
+				if err := env.db.OpenWebUILinks.MarkAmbiguous(t.Context(), link.ID, now); err != nil {
+					t.Fatalf("mark ambiguous (pre-dead): %v", err)
+				}
+				if err := env.db.OpenWebUILinks.MarkDead(t.Context(), link.ID, domain.FailureCategoryOwnerAbandoned, now); err != nil {
+					t.Fatalf("mark dead: %v", err)
+				}
+			}
+			preLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preLink.State != state {
+				t.Fatalf("preLink.State = %q, want %q", preLink.State, state)
+			}
+
+			turn := domain.OpenWebUITurnLink{
+				ID: domain.NewID(), LinkID: link.ID, BranchID: link.BranchID,
+				LocalMessageID: root.ID,
+				RequestID:      domain.NewID(), Revision: 1, Attempt: 0, Status: domain.TurnPending,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if err := env.db.OpenWebUITurnLinks.Create(t.Context(), turn); err != nil {
+				t.Fatalf("create turn: %v", err)
+			}
+			payload, _ := json.Marshal(turnJobPayload{TurnID: turn.ID, LinkID: link.ID, Revision: 1, ThreadID: root.ThreadID})
+			job := domain.Job{ID: domain.NewID(), JobType: JobType, Payload: string(payload), PayloadVersion: 1, State: domain.JobPending, SourceEntryID: &root.ID, NextRunAt: now, CreatedAt: now, UpdatedAt: now}
+			if err := env.db.Jobs.Enqueue(t.Context(), job); err != nil {
+				t.Fatalf("enqueue job: %v", err)
+			}
+
+			provider := newFakeProvider(t) // no scripts: any call fails the test
+			turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+			err = turnJob.Handle(t.Context(), job)
+			var permanent *jobs.PermanentError
+			if !errors.As(err, &permanent) {
+				t.Fatalf("Handle error = %v, want a jobs.PermanentError", err)
+			}
+
+			gotTurn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotTurn.Status != domain.TurnFailed || gotTurn.FailureCategory == nil || *gotTurn.FailureCategory != domain.FailureCategoryLinkNotReady {
+				t.Errorf("turn = %+v, want failed/link_not_ready", gotTurn)
+			}
+
+			gotLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotLink.State != state {
+				t.Errorf("link.State = %q, want unchanged %q", gotLink.State, state)
+			}
+			if start, cont, lookup := provider.counts(); start != 0 || cont != 0 || lookup != 0 {
+				t.Errorf("provider calls = start:%d continue:%d lookup:%d, want none", start, cont, lookup)
+			}
+		})
 	}
 }
 
