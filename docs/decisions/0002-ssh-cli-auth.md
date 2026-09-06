@@ -28,8 +28,18 @@ Approval atomically transitions an unexpired session from `created` to
 and mints the local API token exactly once.
 
 The first successful approval creates the sole Owner actor. Later approvals
-reuse it. `actors.UNIQUE(actor_type)` is the compare-and-set boundary for
-concurrent first approvals; there is no public first-login-wins path.
+reuse it. A database uniqueness constraint on the Owner actor type is the
+compare-and-set boundary for concurrent first approvals; there is no public
+first-login-wins path.
+
+> Note (Issue #52, 2026-09-06): that constraint was
+> `actors.UNIQUE(actor_type)` when this ADR was accepted. Migration
+> `0016_actors_virtual_model.sql` replaced it with the partial unique index
+> `idx_actors_singleton_type`, which covers `owner`, `assistant` and
+> `system` only, so that Open WebUI VirtualActor rows may exist alongside
+> them. The decision above is unchanged: owner is still a singleton, still
+> enforced by the database, and VirtualActors are never accepted by MiAuth
+> (see `docs/operations/security-regression.md`).
 
 If Aria supplies an exact-match-allowlisted client callback, the start route
 redirects there immediately with the route session ID. Without a callback it

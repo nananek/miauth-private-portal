@@ -5,8 +5,10 @@ import (
 	"time"
 )
 
-// ActorType distinguishes the service's three fixed local actors. This is
-// a single-owner deployment: there is at most one Actor of each type.
+// ActorType distinguishes this service's local actors. It is still a
+// single-owner deployment — owner, assistant and system remain
+// singletons — but since Issue #52 an ActorOpenWebUIModel row may exist
+// once per projected Open WebUI model.
 type ActorType string
 
 const (
@@ -18,6 +20,15 @@ const (
 	// ActorSystem is a presentation actor for ingestion/status entries.
 	// It is never accepted by MiAuth.
 	ActorSystem ActorType = "system"
+	// ActorOpenWebUIModel is a presentation actor for one Open WebUI
+	// model (Issue #52, docs/roadmap/openwebui.md's "VirtualActor").
+	// Unlike the other three types it is not a singleton: there is one
+	// row per projected model. It is presented to Aria as a remote user
+	// (@<slug>@<presentation_host>) purely so a client can tell model
+	// replies apart from the assistant's; that host is a fixed
+	// presentation value, not federation, and the row is never accepted
+	// by MiAuth.
+	ActorOpenWebUIModel ActorType = "openwebui_model"
 )
 
 // Actor is a local identity: the single login-capable owner, or one of
@@ -36,6 +47,38 @@ type Actor struct {
 	DisplayName *string
 }
 
+// IsLoginable reports whether this actor can be bound to a local MiAuth
+// session and hold local API tokens. Only the owner can: every other
+// type exists to author entries, not to authenticate. internal/miauth
+// enforces this structurally (it only ever resolves ActorOwner), and
+// this predicate lets callers state the same rule without re-deriving
+// which types are presentation-only.
+func (a Actor) IsLoginable() bool { return a.Type == ActorOwner }
+
+// CanMiAuth reports whether a local MiAuth approval may bind to this
+// actor. It is deliberately a separate predicate from IsLoginable rather
+// than an alias: they answer to different rules (ADR-0002's host-local
+// approval versus token issuance), and a future actor type could
+// plausibly change one without the other.
+func (a Actor) CanMiAuth() bool { return a.Type == ActorOwner }
+
+// CanOwnSecret reports whether credentials may be attached to this actor
+// row. No actor type may: ADR-0005 D10 keeps every external credential
+// in configuration, and the database stores only the config key's name
+// (a secret_ref), never a secret value. The predicate exists so that
+// rule is asserted in one place instead of being an unstated property of
+// there simply being no column for it.
+func (a Actor) CanOwnSecret() bool { return false }
+
+// IsRemote reports whether this actor is projected to Aria with a
+// non-null UserLite.host. Only ActorOpenWebUIModel is; see its doc
+// comment for why that is presentation, not federation.
+func (a Actor) IsRemote() bool { return a.Type == ActorOpenWebUIModel }
+
+// IsPresentationOnly reports whether this actor exists solely to author
+// and label entries — the inverse of IsLoginable.
+func (a Actor) IsPresentationOnly() bool { return !a.IsLoginable() }
+
 // ActorRepository persists and looks up this service's local actors.
 type ActorRepository interface {
 	// EnsureReservedActors idempotently creates the Assistant and System
@@ -44,13 +87,21 @@ type ActorRepository interface {
 	// approves a local MiAuth session.
 	EnsureReservedActors(ctx context.Context) error
 	// Create inserts a new actor. It is the only way to create the Owner
-	// actor; the actors table's UNIQUE(actor_type) constraint rejects a
-	// second Owner row with ErrConflict, so a caller never needs a
-	// separate existence check before calling it inside an approval
-	// transaction.
+	// actor; the actors table's partial unique index over the singleton
+	// types (migration 0016) rejects a second Owner row with ErrConflict,
+	// so a caller never needs a separate existence check before calling
+	// it inside an approval transaction.
 	Create(ctx context.Context, a Actor) error
 	Get(ctx context.Context, id string) (Actor, error)
+	// GetByType returns the single actor of a singleton type (owner,
+	// assistant, system). It is not meaningful for ActorOpenWebUIModel,
+	// which may have many rows; use ListByType for that.
 	GetByType(ctx context.Context, actorType ActorType) (Actor, error)
+	// ListByType returns every actor of the given type in a stable
+	// (created_at, id) order. It exists for ActorOpenWebUIModel, the one
+	// non-singleton type. Having no actors of a type is not an error: it
+	// returns an empty result, not ErrNotFound.
+	ListByType(ctx context.Context, actorType ActorType) ([]Actor, error)
 	// SetDisplayName updates actorID's mutable display name, including
 	// clearing it back to empty. It returns ErrNotFound if actorID does
 	// not exist. Callers are responsible for restricting this to the

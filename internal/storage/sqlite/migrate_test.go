@@ -536,6 +536,154 @@ func TestMigrate_UpgradeAppliesNotificationsTable(t *testing.T) {
 	}
 }
 
+// TestMigrate_UpgradeRebuildsActorsForOpenWebUIModelType backs migration
+// 0016 (Issue #52 PR1), the first migration in this repository that
+// rebuilds an existing table rather than adding to it. Unlike the
+// new-table upgrades above, this one has real rows and real children to
+// preserve, so the test seeds one of every kind of row that references
+// actors before upgrading and checks all of them survive with foreign
+// keys still intact — the failure mode a rebuild done with foreign keys
+// simply switched off would otherwise hide.
+func TestMigrate_UpgradeRebuildsActorsForOpenWebUIModelType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	sqlDB, err := sql.Open("sqlite", "file:"+path+"?_foreign_keys=1&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+
+	ctx := t.Context()
+	if _, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations, err := loadMigrations(migrationsFS, migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 15 {
+			continue
+		}
+		if err := applyOne(ctx, sqlDB, m); err != nil {
+			t.Fatalf("apply migration %d: %v", m.version, err)
+		}
+	}
+
+	const (
+		ownerID     = "pre-existing-owner"
+		assistantID = "pre-existing-assistant"
+		systemID    = "pre-existing-system"
+		entryID     = "pre-existing-entry"
+		sessionID   = "pre-existing-session"
+		tokenID     = "pre-existing-token"
+	)
+	for _, seed := range []struct {
+		what string
+		sql  string
+		args []any
+	}{
+		{"owner actor", `INSERT INTO actors (id, actor_type, created_at, display_name) VALUES (?, 'owner', '2024-01-01T00:00:00Z', 'Owner Name')`, []any{ownerID}},
+		{"assistant actor", `INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'assistant', '2024-01-01T00:00:01Z')`, []any{assistantID}},
+		{"system actor", `INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'system', '2024-01-01T00:00:02Z')`, []any{systemID}},
+		{"thread", `INSERT INTO threads (id, created_at, updated_at) VALUES (?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, []any{entryID}},
+		{"entry", `INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES (?, ?, 'user_post', ?, 'body', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, []any{entryID, entryID, ownerID}},
+		{"reaction", `INSERT INTO reactions (id, entry_id, reactor_actor_id, emoji, created_at) VALUES ('r1', ?, ?, '👍', '2024-01-01T00:00:00Z')`, []any{entryID, ownerID}},
+		{"mention", `INSERT INTO mentions (id, entry_id, mentioned_actor_id, created_at) VALUES ('m1', ?, ?, '2024-01-01T00:00:00Z')`, []any{entryID, ownerID}},
+		{"local MiAuth session", `INSERT INTO miauth_local_sessions
+		 (route_session_id, state, status, requested_permissions, local_actor_id, created_at, expires_at)
+		 VALUES (?, 'legacy-state', 'consumed', 'read:account', ?, '2024-01-01T00:00:00Z', '2024-01-01T00:10:00Z')`, []any{sessionID, ownerID}},
+		{"API token", `INSERT INTO api_tokens (id, token_hash, local_actor_id, miauth_local_session_id, scopes, created_at)
+		 VALUES (?, 'existing-hash', ?, ?, 'read:account', '2024-01-01T00:01:00Z')`, []any{tokenID, ownerID, sessionID}},
+	} {
+		if _, err := sqlDB.ExecContext(ctx, seed.sql, seed.args...); err != nil {
+			t.Fatalf("seed %s: %v", seed.what, err)
+		}
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Every actor row survives, display_name included: a rebuild that
+	// forgot to carry a column across would still migrate "successfully".
+	var displayName sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT display_name FROM actors WHERE id = ?`, ownerID).Scan(&displayName); err != nil {
+		t.Fatalf("owner actor should survive the rebuild: %v", err)
+	}
+	if !displayName.Valid || displayName.String != "Owner Name" {
+		t.Errorf("owner display_name after rebuild = %v, want %q", displayName, "Owner Name")
+	}
+	for _, id := range []string{assistantID, systemID} {
+		var got string
+		if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM actors WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Errorf("actor %s should survive the rebuild: %v", id, err)
+		}
+	}
+
+	// Nothing that pointed at an actor row was orphaned by the DROP.
+	for _, child := range []struct {
+		what  string
+		query string
+		arg   string
+	}{
+		{"entry", `SELECT author_actor_id FROM entries WHERE id = ?`, entryID},
+		{"reaction", `SELECT reactor_actor_id FROM reactions WHERE id = ?`, "r1"},
+		{"mention", `SELECT mentioned_actor_id FROM mentions WHERE id = ?`, "m1"},
+		{"local MiAuth session", `SELECT local_actor_id FROM miauth_local_sessions WHERE route_session_id = ?`, sessionID},
+		{"API token", `SELECT local_actor_id FROM api_tokens WHERE id = ?`, tokenID},
+	} {
+		var actorID string
+		if err := sqlDB.QueryRowContext(ctx, child.query, child.arg).Scan(&actorID); err != nil {
+			t.Errorf("%s should survive the rebuild: %v", child.what, err)
+			continue
+		}
+		if actorID != ownerID {
+			t.Errorf("%s actor reference = %q, want %q", child.what, actorID, ownerID)
+		}
+	}
+
+	rows, err := sqlDB.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("PRAGMA foreign_key_check reported a violation after the actors rebuild")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES ('second-owner', 'owner', '2024-01-02T00:00:00Z')`,
+	); err == nil {
+		t.Error("a second owner must still be rejected by idx_actors_singleton_type after the rebuild")
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES ('bogus', 'openwebui_workspace', '2024-01-02T00:00:00Z')`,
+	); err == nil {
+		t.Error("an unknown actor_type must still be rejected by the rebuilt CHECK constraint")
+	}
+
+	// The point of the rebuild: openwebui_model rows are accepted, and
+	// unlike the reserved three they are not singletons.
+	for _, id := range []string{"virtual-1", "virtual-2"} {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'openwebui_model', '2024-01-02T00:00:00Z')`, id,
+		); err != nil {
+			t.Errorf("insert openwebui_model actor %s after upgrade: %v", id, err)
+		}
+	}
+}
+
 func TestMigrate_RejectsEditedAppliedMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := t.Context()

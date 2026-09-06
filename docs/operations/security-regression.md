@@ -20,6 +20,14 @@ Issue #28 (ADR-0002) replaced upstream-Misskey-account authorization with
 local, operator-approved MiAuth sessions; see that ADR for how each
 upstream AC3 bullet maps onto this design.
 
+The last three rows below are about actors rather than requests. They
+were added by Issue #52 PR1, which made `actors` able to hold rows other
+than the owner and the two reserved presentation actors (an Open WebUI
+model's VirtualActor). Since "the owner is the only row that exists" is
+no longer what keeps login single-owner, the rule that presentation
+actors are wire projections and never additional login-capable users
+(AGENTS.md) needs tests of its own.
+
 | Bullet | Evidence |
 | --- | --- |
 | Unapproved session never yields a token | `internal/miauth/service_test.go`: `TestApproveAndRejectUnavailableSessions`, `TestRejectAndListPendingSessions` |
@@ -27,6 +35,9 @@ upstream AC3 bullet maps onto this design.
 | Replayed `/api/miauth/{session}/check` consume is rejected | `internal/httpserver/miauth_handlers_test.go`: `TestHandleMiAuthCheck_ApprovalSuccessAndReplay`, `TestHandleMiAuthCheck_ConcurrentCallsHaveExactlyOneWinner` |
 | Wrong scope is rejected | `internal/httpserver/scope_middleware_test.go`: `TestRequireScope_RejectsInsufficientScope` |
 | Revoked token is rejected | `internal/httpserver/scope_middleware_test.go`: `TestRequireScope_RejectsRevokedToken`; `internal/miauth/service_test.go`: `TestCheckTokenListRevokeAndDescribeOwner` |
+| A presentation actor is never bound by a MiAuth approval and never holds a token | `internal/miauth/service_test.go`: `TestApproveSession_NeverBindsToOpenWebUIModelActor`, `TestCheckAndVerifyToken_NeverResolveToOpenWebUIModelActor` |
+| An owner-only write refuses a presentation actor's ID | `internal/miauth/service_test.go`: `TestUpdateOwnerDisplayName_RejectsNonOwnerActor`, `TestUpdateOwnerDisplayName_RejectsOpenWebUIModelActor`, `TestBackfillOwnerDisplayName_LeavesOpenWebUIModelActorAlone` |
+| Only the owner actor type reports login/MiAuth capability, and no actor type may hold a credential | `internal/domain/actor_test.go`: `TestActorCapabilityPredicates`, `TestActorCapabilityPredicates_UnknownTypeIsInert` |
 
 ## AC8: security regression tests
 

@@ -359,3 +359,163 @@ func TestBackfillOwnerDisplayName_NoOwnerYet(t *testing.T) {
 		t.Fatalf("BackfillOwnerDisplayName with no owner yet: %v", err)
 	}
 }
+
+// mustCreateVirtualActor inserts one Open WebUI VirtualActor row (Issue
+// #52 PR1). Migration 0016 made such a row possible; these tests exist to
+// prove that possibility never became a second way to log in.
+func mustCreateVirtualActor(t *testing.T, ts *testService) domain.Actor {
+	t.Helper()
+	displayName := "Model Display Name"
+	a := domain.Actor{
+		ID:          domain.NewID(),
+		Type:        domain.ActorOpenWebUIModel,
+		CreatedAt:   ts.clock.Now(),
+		DisplayName: &displayName,
+	}
+	if err := ts.db.Actors.Create(t.Context(), a); err != nil {
+		t.Fatalf("create openwebui_model actor: %v", err)
+	}
+	return a
+}
+
+// TestApproveSession_NeverBindsToOpenWebUIModelActor is the structural
+// half of Issue #52's "VirtualActors cannot log in" requirement: the
+// VirtualActor row exists before any owner does, and approval must still
+// create and bind the owner rather than adopting the actor that happens
+// to already be there.
+func TestApproveSession_NeverBindsToOpenWebUIModelActor(t *testing.T) {
+	ts := newTestService(t)
+	virtual := mustCreateVirtualActor(t, ts)
+
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := ts.db.LocalMiAuth.Get(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.LocalActorID == nil {
+		t.Fatal("approved session has no local actor")
+	}
+	if *session.LocalActorID == virtual.ID {
+		t.Fatal("approved session bound to the Open WebUI VirtualActor")
+	}
+	owner, err := ts.db.Actors.GetByType(t.Context(), domain.ActorOwner)
+	if err != nil {
+		t.Fatalf("approval should have created the owner actor: %v", err)
+	}
+	if *session.LocalActorID != owner.ID {
+		t.Fatalf("session actor = %q, want owner %q", *session.LocalActorID, owner.ID)
+	}
+	if bound, err := ts.db.Actors.Get(t.Context(), *session.LocalActorID); err != nil {
+		t.Fatal(err)
+	} else if !bound.CanMiAuth() {
+		t.Fatalf("session bound to an actor that cannot MiAuth: %+v", bound)
+	}
+}
+
+// TestCheckAndVerifyToken_NeverResolveToOpenWebUIModelActor covers the
+// token side of the same requirement: with a VirtualActor present, the
+// issued API token still resolves to the owner, and the VirtualActor
+// holds no token of its own.
+func TestCheckAndVerifyToken_NeverResolveToOpenWebUIModelActor(t *testing.T) {
+	ts := newTestService(t)
+	virtual := mustCreateVirtualActor(t, ts)
+
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ts.Check(t.Context(), "route-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OwnerActorID == virtual.ID {
+		t.Fatal("Check issued a token for the Open WebUI VirtualActor")
+	}
+
+	actorID, err := ts.VerifyToken(t.Context(), result.Token, ScopeReadAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ts.db.Actors.Get(t.Context(), actorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.IsLoginable() {
+		t.Fatalf("VerifyToken resolved to a non-loginable actor: %+v", resolved)
+	}
+
+	tokens, err := ts.ListAPITokens(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range tokens {
+		if tok.LocalActorID == virtual.ID {
+			t.Fatalf("an API token is bound to the Open WebUI VirtualActor: %+v", tok)
+		}
+	}
+}
+
+// TestUpdateOwnerDisplayName_RejectsOpenWebUIModelActor extends
+// TestUpdateOwnerDisplayName_RejectsNonOwnerActor to the new actor type:
+// a VirtualActor's display name belongs to the Open WebUI registry
+// (Issue #52 PR3), and POST /api/i/update must never reach it.
+func TestUpdateOwnerDisplayName_RejectsOpenWebUIModelActor(t *testing.T) {
+	ts := newTestService(t)
+	virtual := mustCreateVirtualActor(t, ts)
+
+	if _, err := ts.UpdateOwnerDisplayName(t.Context(), virtual.ID, "Should Not Apply"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("UpdateOwnerDisplayName on VirtualActor error = %v, want ErrNotOwner", err)
+	}
+	after, err := ts.db.Actors.Get(t.Context(), virtual.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DisplayName == nil || *after.DisplayName != "Model Display Name" {
+		t.Fatalf("VirtualActor DisplayName = %v, want unchanged %q", after.DisplayName, "Model Display Name")
+	}
+}
+
+// TestBackfillOwnerDisplayName_LeavesOpenWebUIModelActorAlone guards the
+// one remaining write in this package that finds an actor by type rather
+// than by ID: it must keep resolving the owner even when other actor
+// rows exist, and never write into a VirtualActor whose display name is
+// deliberately NULL until the registry sets it.
+func TestBackfillOwnerDisplayName_LeavesOpenWebUIModelActorAlone(t *testing.T) {
+	ts := newTestService(t)
+	virtual := domain.Actor{ID: domain.NewID(), Type: domain.ActorOpenWebUIModel, CreatedAt: ts.clock.Now()}
+	if err := ts.db.Actors.Create(t.Context(), virtual); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.db.Actors.Create(t.Context(), domain.Actor{
+		ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: ts.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ts.BackfillOwnerDisplayName(t.Context()); err != nil {
+		t.Fatalf("BackfillOwnerDisplayName: %v", err)
+	}
+
+	owner, err := ts.db.Actors.GetByType(t.Context(), domain.ActorOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.DisplayName == nil || *owner.DisplayName != "Test Owner" {
+		t.Fatalf("owner DisplayName = %v, want %q", owner.DisplayName, "Test Owner")
+	}
+	after, err := ts.db.Actors.Get(t.Context(), virtual.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DisplayName != nil {
+		t.Fatalf("VirtualActor DisplayName = %v, want unchanged nil", after.DisplayName)
+	}
+}
