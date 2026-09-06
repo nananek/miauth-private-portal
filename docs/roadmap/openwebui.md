@@ -572,8 +572,9 @@ workspace-scoped credential.
 Authentication authorizes enqueueing only. The durable job stores the local
 owner ID and correlation data, never the Aria token, MiAuth route/state, or raw
 Open WebUI credential. At execution time the worker resolves `secret_ref`
-through the adapter's secret store and rechecks that the workspace, model,
-feature flag, and owner policy still permit the turn.
+through config — the existing secret mechanism, not a new store (ADR-0005
+D10) — and rechecks that the workspace, model, feature flag, and owner policy
+still permit the turn.
 
 The completion bridge always uses the enabled workspace's configured
 `default_model_id`; no Aria request may select an arbitrary workspace, model,
@@ -583,7 +584,7 @@ before any provider call.
 
 Open WebUI uses a dedicated low-privilege workspace account/credential. Only a
 `secret_ref` crosses the domain/config boundary; the raw provider credential is
-isolated in the adapter/secret store and is never written to the database,
+isolated in config (ADR-0005 D10) and is never written to the database,
 fixtures, URL, error body, logs, traces, backups, or planning documents.
 Rotation/revocation and the responsible operator are documented before
 enabling the feature.
@@ -822,13 +823,14 @@ start condition is:
   accepted, and the local one-chat-per-branch policy independent of remote
   branch controls — **recorded.** Compat §"Opaque ID semantics"; ADR-0005 D2
   and D5.
-- credential provisioning, rotation, and revocation owner — **mechanism
-  recorded, ownership TBD (see #50).** Key issuance, the two settings that
-  gate it, and the no-overlap rotation behavior are recorded (compat
-  §"Authentication and credential lifecycle"); who provisions the account,
-  where the key lives, and who owns rotation are not decided. ADR-0005 D10
-  also asks the owner to confirm that `secret_ref` means a config key in this
-  repository's existing secret style rather than a separate secret store.
+- credential provisioning, rotation, and revocation owner — **mechanism and
+  storage recorded, ownership TBD (see #50).** Key issuance, the two settings
+  that gate it, and the no-overlap rotation behavior are recorded (compat
+  §"Authentication and credential lifecycle"), and on 2026-09-06 the owner
+  decided where the key lives: an ordinary config value such as
+  `OPENWEBUI_API_KEY`, handled like `LLM_API_KEY`, with no separate secret
+  store (ADR-0005 D10). Who provisions the account and who owns rotation are
+  still not decided.
 - fixed HTTPS base URL and presentation-host allowlist — **TBD (see #50).**
   The policy is decided (ADR-0005 D11); the values are not.
 - request/response/stream size, timeout, cancellation, and rate-limit bounds —
