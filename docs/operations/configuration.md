@@ -326,6 +326,42 @@ checksum from the embedded file and fails startup immediately if it no
 longer matches. Add a new, higher-numbered migration file instead of
 changing one that has already shipped.
 
+#### Table rebuilds (`-- migrate:rebuild`)
+
+SQLite cannot change a table's `CHECK` or table-level `UNIQUE`
+constraints, or drop a column covered by one, with `ALTER TABLE`. The
+only way is SQLite's documented twelve-step rebuild: create the
+replacement table, copy the rows across, drop the original, and rename.
+That sequence cannot run on the ordinary path, because dropping a table
+while foreign keys are enabled behaves like deleting every one of its
+rows and so fails against any child table, and `PRAGMA foreign_keys` is
+a no-op inside a transaction, so the migration file cannot turn them off
+itself.
+
+A migration that needs the rebuild declares it with the line
+
+```sql
+-- migrate:rebuild
+```
+
+in its leading comment block (only that block is scanned, so the marker
+cannot be buried among the statements). `Migrate` then applies that one
+migration on a dedicated connection: foreign keys off, the migration and
+its `schema_migrations` row inside a single transaction, `PRAGMA
+foreign_key_check` before committing, foreign keys back on afterwards.
+The `foreign_key_check` step is what keeps "foreign keys are off" from
+meaning "foreign keys are unenforced" — a rebuild that orphaned a child
+row rolls back whole and is not recorded, so the next startup retries it
+rather than proceeding on a corrupt schema.
+
+Use the directive only when a rebuild is genuinely required; adding a
+table or a nullable column never needs it. `0016_actors_virtual_model.sql`
+is the first and so far only migration that does: it widened
+`actors.actor_type`'s `CHECK` and replaced `UNIQUE(actor_type)` with a
+partial unique index over the singleton types, so an Open WebUI model's
+VirtualActor row (Issue #52) can exist alongside the owner, assistant,
+and system actors.
+
 ## Durable jobs
 
 `cmd/server` starts the HTTP server and durable worker against the same

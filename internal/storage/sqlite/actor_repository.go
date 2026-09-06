@@ -27,10 +27,12 @@ func (r *actorRepository) EnsureReservedActors(ctx context.Context) error {
 	return nil
 }
 
-// Create inserts a new actor. The actors table's UNIQUE(actor_type)
-// constraint is what makes this the safe, sole path for creating the
-// Owner actor: a second concurrent attempt collides on that constraint
-// and mapWriteError turns it into domain.ErrConflict.
+// Create inserts a new actor. The actors table's partial unique index
+// over the singleton types (idx_actors_singleton_type, migration 0016)
+// is what makes this the safe, sole path for creating the Owner actor: a
+// second concurrent attempt collides on that index and mapWriteError
+// turns it into domain.ErrConflict. domain.ActorOpenWebUIModel rows are
+// outside that index and may be created repeatedly, one per model.
 func (r *actorRepository) Create(ctx context.Context, a domain.Actor) error {
 	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO actors (id, actor_type, created_at, display_name) VALUES (?, ?, ?, ?)`,
@@ -47,6 +49,30 @@ func (r *actorRepository) Get(ctx context.Context, id string) (domain.Actor, err
 func (r *actorRepository) GetByType(ctx context.Context, actorType domain.ActorType) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
 		`SELECT id, actor_type, created_at, display_name FROM actors WHERE actor_type = ?`, string(actorType)))
+}
+
+// ListByType returns every actor of one type, ordered by (created_at,
+// id) so the tie-breaker is deterministic even for rows created inside
+// the same transaction (AGENTS.md: never infer ordering from an ID's
+// text).
+func (r *actorRepository) ListByType(ctx context.Context, actorType domain.ActorType) ([]domain.Actor, error) {
+	rows, err := r.q.QueryContext(ctx,
+		`SELECT id, actor_type, created_at, display_name FROM actors
+		 WHERE actor_type = ? ORDER BY created_at, id`, string(actorType))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var actors []domain.Actor
+	for rows.Next() {
+		a, err := scanActor(rows)
+		if err != nil {
+			return nil, err
+		}
+		actors = append(actors, a)
+	}
+	return actors, rows.Err()
 }
 
 // SetDisplayName always writes displayName as given (including ""),
