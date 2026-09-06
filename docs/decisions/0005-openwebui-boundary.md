@@ -229,8 +229,12 @@ bare host; the container's environment-variable source otherwise) and reported
 by `internal/config.Config.Redacted()` only as set/unset — the same treatment
 `LLM_API_KEY` and `IMAP_PASSWORD` get. The roadmap's `secret_ref` therefore
 means *"a reference to a config key"*, and **no separate secret store or
-secret-management subsystem is built**: #52 must not introduce one, and the
-raw key never reaches the database, a domain object, or a fixture.
+secret-management subsystem is built**: neither #52's schema nor #53's adapter
+introduces one, and the raw key never reaches the database, a domain object, or
+a fixture. The key referenced is one declared in `internal/config`'s schema,
+not a free-form environment-variable name — `Load` reads only the known keys,
+by name, and never scans the environment
+([`docs/operations/configuration.md`](../operations/configuration.md#why-environment-variable-scanning-is-scoped-to-known-keys)).
 
 Rotation follows the existing procedure in
 [`docs/operations/runbook.md`](../operations/runbook.md#secret-rotation) —
@@ -301,8 +305,9 @@ no placeholder value that could be mistaken for a decision.
   referenced. D10's `secret_ref` reading is now an owner decision (2026-09-06),
   so #52 can freeze the schema against it: the field holds a reference to a
   config key, and #52 builds no secret store of its own.
-- **#53 (OWUI-B)** gets its adapter and job inputs from D3, D6, D7, and D11,
-  and its fixtures from
+- **#53 (OWUI-B)** gets its adapter and job inputs from D3, D6, D7, D10, and
+  D11 — including that the worker resolves `secret_ref` from config, never a
+  store of its own — and its fixtures from
   [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/). The
   redaction test asserts on `sk-mock-upstream-secret`.
 - **#54 (OWUI-R)** inherits D14 as release evidence: the digest, the
