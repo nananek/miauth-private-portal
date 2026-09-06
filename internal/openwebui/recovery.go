@@ -111,6 +111,9 @@ func (r *Registry) DescribeLink(ctx context.Context, actorID, linkID string) (do
 // failure adopted, or the creation-lost branch) it returns a zero
 // domain.Entry and a nil error.
 func (r *Registry) ConfirmLink(ctx context.Context, actorID, linkID string, remoteChatID *string) (domain.Entry, error) {
+	if r.provider == nil || r.timeline == nil {
+		return domain.Entry{}, errors.New("openwebui: confirm requires a provider and timeline service")
+	}
 	if err := r.requireOwner(ctx, actorID); err != nil {
 		return domain.Entry{}, err
 	}
@@ -286,14 +289,22 @@ func (r *Registry) AbandonLink(ctx context.Context, actorID, linkID string) erro
 // lease would otherwise eventually force automatically (the roadmap's
 // "expired lease before a definitive result -> ambiguous"): a
 // creation_pending link whose claim job has already reached a terminal
-// state — dead, failed, or gone entirely (a very old row a retention
-// policy already swept, though this deployment keeps no such policy
-// today) — is frozen ambiguous, so ConfirmLink or AbandonLink can act on
-// it instead of it sitting unclaimable forever. A claim job still
-// pending or running (or one that succeeded, which — since a succeeded
-// StartChat always moves its link to ready — would mean this link's own
-// creation_pending state is itself inconsistent with its job) is left
-// alone: freezing it now could race, or paper over, a job that has not
+// state — dead, failed, succeeded, or gone entirely (a very old row a
+// retention policy already swept, though this deployment keeps no such
+// policy today) — is frozen ambiguous, so ConfirmLink or AbandonLink can
+// act on it instead of it sitting unclaimable forever. A succeeded claim
+// job usually means its StartChat already moved the link to ready, but
+// not always: if the turn's outcome was durably recorded
+// (RecordOutcome) and only the very next call — MarkAmbiguous or
+// MarkFailed — then failed for a non-conflict reason (a transient DB
+// error), the handler returns a retryable error, a later redelivery
+// finds the turn already terminal and returns nil, and the job ends up
+// succeeded while the link is left stuck creation_pending with no
+// automatic way out. Freezing that link is exactly as safe as freezing
+// one behind a dead/failed job — in every terminal state, the claim job
+// will never call the provider again. Only a claim job still pending or
+// running is left alone: it may yet confirm the chat on its own, and
+// freezing it now could race, or paper over, a job that has not
 // finished having its say.
 func (r *Registry) FreezeLink(ctx context.Context, actorID, linkID string) error {
 	return r.ownerOnly(ctx, actorID, func(ctx context.Context, repos domain.Repos, _ domain.OpenWebUIWorkspace, now time.Time) error {
@@ -311,7 +322,7 @@ func (r *Registry) FreezeLink(ctx context.Context, actorID, linkID string) error
 				// no claim job left to race against
 			case err != nil:
 				return fmt.Errorf("get claim job: %w", err)
-			case job.State == domain.JobDead || job.State == domain.JobFailed:
+			case job.State == domain.JobDead || job.State == domain.JobFailed || job.State == domain.JobSucceeded:
 				// terminal: safe to freeze
 			default:
 				return ErrClaimJobStillActive

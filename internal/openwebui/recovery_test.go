@@ -431,6 +431,55 @@ func TestFreezeLink_DeadClaimJobMarksAmbiguous(t *testing.T) {
 	}
 }
 
+// TestFreezeLink_SucceededClaimJobMarksAmbiguous covers the gap a
+// review found in the first cut of this method: a succeeded claim job
+// usually means its StartChat already moved the link to ready, but not
+// always — if RecordOutcome durably recorded the turn's outcome and only
+// the very next call (MarkAmbiguous/MarkFailed) then failed for a
+// transient, non-conflict reason, the job still finishes succeeded (a
+// later redelivery finds the turn already terminal and returns nil)
+// while the link is left stuck creation_pending with no automatic way
+// out. A succeeded claim job must be just as freezable as a dead or
+// failed one, since in every case it will never call the provider
+// again.
+func TestFreezeLink_SucceededClaimJobMarksAmbiguous(t *testing.T) {
+	env := newTurnTestEnv(t)
+	root := env.mustCreateRoot(t, "hello")
+	now := env.clock.Now()
+
+	job := domain.Job{ID: domain.NewID(), JobType: JobType, Payload: "{}", PayloadVersion: 1, State: domain.JobPending, NextRunAt: now, CreatedAt: now, UpdatedAt: now}
+	if err := env.db.Jobs.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := env.db.Jobs.Claim(t.Context(), "worker-1", 10, now, now.Add(time.Minute)); err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if err := env.db.Jobs.Succeed(t.Context(), job.ID, "worker-1", now); err != nil {
+		t.Fatalf("succeed job: %v", err)
+	}
+
+	link := domain.OpenWebUIConversationLink{
+		ID: domain.NewID(), ThreadID: root.ThreadID, BranchID: domain.NewID(),
+		WorkspaceID: env.workspace.ID, ModelID: env.model.ID, ClaimJobID: &job.ID,
+		ClaimedAt: now, LastTransitionAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.db.OpenWebUILinks.Claim(t.Context(), link); err != nil {
+		t.Fatalf("claim link: %v", err)
+	}
+
+	reg := newTestRecoveryRegistry(env, nil)
+	if err := reg.FreezeLink(t.Context(), env.ownerID, link.ID); err != nil {
+		t.Fatalf("FreezeLink: %v", err)
+	}
+	gotLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLink.State != domain.LinkAmbiguous {
+		t.Errorf("link.State = %q, want ambiguous", gotLink.State)
+	}
+}
+
 // TestFreezeLink_NoClaimJobMarksAmbiguous covers a link with no
 // ClaimJobID at all (a nil job id skips the FK the schema places on
 // claim_job_id, unlike a dangling id pointing at a row that was never
