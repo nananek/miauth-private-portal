@@ -172,7 +172,10 @@ Acceptance criteria:
   `parentId`/`currentId` correlation, user/assistant/system/tool metadata,
   401/429, malformed responses, finish events, duplicate/out-of-order
   chunks, and response-loss ambiguity —
-  [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/).
+  [`docs/compat/fixtures/openwebui/`](../compat/fixtures/openwebui/). System
+  and tool messages have no fixture: the target adds no system prompt of its
+  own and forwards `messages` exactly as sent, and tool execution is a
+  non-goal, so the capture produced neither role.
 - [x] Add an outbound-only ADR covering source of truth, new chat/continued
   turn lifecycle, branch policy, edit/delete policy, secret/notification
   boundary, and non-goals for existing-chat import/list/pull/reconciliation.

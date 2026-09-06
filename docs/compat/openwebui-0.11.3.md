@@ -153,10 +153,15 @@ FastAPI/pydantic validation entries for a 422. The status codes that matter:
 | Invalid/rotated-out key | 401 | `{"detail":"Your session has expired or the token is invalid. Please sign in again."}` | [`error_401_invalid_token.json`](fixtures/openwebui/error_401_invalid_token.json) (synthetic) |
 | Chat not visible to this account | 401 | `{"detail":"We could not find what you're looking for :/"}` | [`error_401_chat_not_found.json`](fixtures/openwebui/error_401_chat_not_found.json) |
 | Unknown or invisible model, or `model` omitted | 400 | `{"detail":"Model not found"}` | [`error_400_model_not_found.json`](fixtures/openwebui/error_400_model_not_found.json) |
-| Schema violation | 422 | `{"detail":[{type,loc,msg,input}, …]}` | [`error_422_validation.json`](fixtures/openwebui/error_422_validation.json) (synthetic) |
+| Schema violation on a typed body (e.g. `POST /api/v1/chats/new` without `chat`) | 422 | `{"detail":[{type,loc,msg,input}, …]}` | [`error_422_validation.json`](fixtures/openwebui/error_422_validation.json) (synthetic) |
 | Upstream model error, legacy path | **400** | `{"detail":"<upstream text, verbatim>"}` | [`error_legacy_upstream_500.json`](fixtures/openwebui/error_legacy_upstream_500.json), [`…_401.json`](fixtures/openwebui/error_legacy_upstream_401.json), [`…_429.json`](fixtures/openwebui/error_legacy_upstream_429.json) |
 | Upstream returns non-JSON, legacy path | **200** | a bare JSON *string* (no `choices`) | [`error_legacy_upstream_malformed.json`](fixtures/openwebui/error_legacy_upstream_malformed.json) |
 | Upstream model error, chat-managed path | **200** | `null` (4 bytes) | [`error_chat_managed_upstream_500_response.json`](fixtures/openwebui/error_chat_managed_upstream_500_response.json) |
+
+A 422 can only come from an endpoint with a typed body. `/api/chat/completions`
+declares a free-form object, so it never validates the fields this contract
+sends — an omitted or misspelled `model` surfaces as the 400 above, and every
+other malformed field is simply forwarded or ignored.
 
 Three consequences drive the adapter's error handling (ADR-0005 D6):
 
@@ -292,8 +297,10 @@ and that exact text is what the pre-existing assistant node
 child of the same user message `3447161d-…`
 ([`duplicate_delivery_chat.json`](fixtures/openwebui/duplicate_delivery_chat.json));
 the raw archive's earlier read of the same chat shows `"mock reply #4 …"` at
-that id. (The chat's total node count also grows across those two reads, but
-from an unrelated 429 experiment run in between, not from the duplicate.)
+that id. (That earlier read holds 4 nodes and this one holds 12, but the eight
+added nodes come from four unrelated experiments run between the two reads — a
+third turn, a sibling branch, and the two upstream-error turns — not from the
+duplicate.)
 Open WebUI has **no idempotency key**, so suppressing duplicates is local work
 (ADR-0005 D7).
 
@@ -439,12 +446,25 @@ adapter must therefore tolerate:
   possibly `null` where a parent was expected). `modelName` and `modelIdx`
   appear only when a client wrote them into the history itself; the server
   does not add them;
-- on a chat: `share_id`, `folder_id`, `tasks`, `summary`, `current_message_id`,
-  `context_usage`, `pinned`, `meta`, `variables`, and `models`;
-- on a model entry: `info` and `connection_type`;
+- on a chat response: `share_id`, `folder_id`, `tasks`, `summary`,
+  `current_message_id`, and `context_usage`;
+- inside the free-form `chat` object: `params`, which a completions-created
+  chat omits while carrying a `files` key the pre-created ones do not have
+  ([`completions_only_newchat_chat.json`](fixtures/openwebui/completions_only_newchat_chat.json)
+  against [`chat_after_start.json`](fixtures/openwebui/chat_after_start.json));
+- on a model entry: `info`, which the recorded `/api/models` shape gives as an
+  object or `null`. No `/api/models` response was captured as a fixture, so
+  that endpoint's field list is the weakest-evidenced part of this document;
 - whole-response `null`: both `POST /api/v1/chats/new` and
   `GET /api/v1/chats/{id}` declare `ChatResponse | null` as their 200 schema,
   and the chat-managed completions path returns a literal `null` on failure.
+
+Three more `ChatResponse` fields must be tolerated on the schema's authority
+rather than on a capture's: `pinned` is declared `boolean | null` (every
+capture has `false`), and `meta` and `variables` are optional with a `{}`
+default (every capture has `{}`). `models` is **not** a `ChatResponse` field
+at all — it lives inside the free-form `chat` object and was present in every
+capture.
 
 Fields named in the roadmap that this capture never produced — `followUps` and
 `selectedModelId` — are deliberately **not** listed above. They may exist in
@@ -528,8 +548,8 @@ All fixtures live in [`fixtures/openwebui/`](fixtures/openwebui/).
 | `error_401_invalid_token.json` | **synthetic**, from the recorded response text | Invalid/rotated-out key shape |
 | `error_401_chat_not_found.json` | observed | Another account's chat is 401, not 404 |
 | `error_400_model_not_found.json` | observed | Unknown/invisible model |
-| `error_422_validation.json` | **synthetic**, from the recorded response shape | Pydantic validation array |
-| `openapi-0.11.3.excerpt.json` | observed, filtered | The 13 relevant paths and the 21 schemas they reference, out of 485/314. `info.version` is FastAPI's default `0.1.0`, **not** the Open WebUI version |
+| `error_422_validation.json` | **synthetic**, from the recorded response shape | Pydantic validation array, shown for a typed body (`POST /api/v1/chats/new` without `chat`) — completions never returns one |
+| `openapi-0.11.3.excerpt.json` | observed, filtered | 13 paths and 21 schemas out of 485/314: the schemas those paths reference, plus the request bodies of the declined and unverified endpoints whose paths were left out (`ForkForm`, `EventForm`, `MessageForm`, `ModelForm`). `info.version` is FastAPI's default `0.1.0`, **not** the Open WebUI version |
 
 ## Non-goals and implementation boundary
 

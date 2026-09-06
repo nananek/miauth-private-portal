@@ -7,7 +7,7 @@
   "x-excerpt": {
     "source": "GET /openapi.json from ghcr.io/open-webui/open-webui@sha256:1a6399d237dc392a2313e0ca826020b3fd5d22536357840eb63393d18dc8b924 started with ENV=dev",
     "observed": "2026-09-06",
-    "note": "Excerpt only: the full document has 485 paths and 314 schemas. Only the paths this repository's Open WebUI bridge uses, operates, or explicitly declines to use are kept, plus the transitive closure of the schemas they reference. info.version is FastAPI's default \"0.1.0\" and is NOT the Open WebUI version; GET /api/version reports the real one (\"0.11.3\" for this digest)."
+    "note": "Excerpt only: the full document has 485 paths and 314 schemas. Kept here are 13 paths (the ones this repository's Open WebUI bridge calls at runtime or uses to provision the integration, plus GET /api/tasks/chat/{chat_id} and POST /api/v1/chats/{id} for reference) and 21 schemas: the transitive closure of the schemas those paths reference, plus the request bodies of endpoints the bridge declines to use or has not verified, whose paths were not extracted (ForkForm, EventForm, open_webui__routers__chats__MessageForm, and ModelForm with its ModelMeta/ModelParams). components.securitySchemes is copied verbatim so the HTTPBearer references in the kept paths resolve. info.version is FastAPI's default \"0.1.0\" and is NOT the Open WebUI version; GET /api/version reports the real one (\"0.11.3\" for this digest)."
   },
   "paths": {
     "/api/version": {
@@ -1962,6 +1962,12 @@
           "content"
         ],
         "title": "MessageForm"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }

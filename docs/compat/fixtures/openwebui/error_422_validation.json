@@ -4,7 +4,7 @@
       "type": "missing",
       "loc": [
         "body",
-        "model"
+        "chat"
       ],
       "msg": "Field required",
       "input": {}
