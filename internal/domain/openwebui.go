@@ -388,6 +388,78 @@ const (
 	TurnCancelled TurnProviderStatus = "cancelled"
 )
 
+// IsTerminal reports whether status is anything but TurnPending. Every
+// other status is a call this service has already made about the turn's
+// outcome — including TurnAmbiguous, which stops automatic retries even
+// though an owner may later resolve it (Issue #53's recovery path) — so
+// migration 0019's completed_at is recorded whenever a status this
+// method calls terminal is written.
+func (s TurnProviderStatus) IsTerminal() bool { return s != TurnPending }
+
+// Turn failure categories: a local classification recorded on a turn
+// (never provider error text — ADR-0005 D6 requires that text be
+// discarded, since the observed instance echoes upstream credentials
+// into it verbatim). There is deliberately no CHECK constraint pinning
+// this set in migration 0019, the same choice internal/jobs makes for
+// job types: new categories are a Go change, not a schema change.
+const (
+	// FailureCategoryAuthFailed is a rejected credential.
+	FailureCategoryAuthFailed = "auth_failed"
+	// FailureCategoryClientRejected is a definitive 4xx the provider gave
+	// for the request itself (not credentials), such as an unknown model.
+	FailureCategoryClientRejected = "client_rejected"
+	// FailureCategoryContractFailed is a response this service could not
+	// decode as the pinned contract.
+	FailureCategoryContractFailed = "contract_failed"
+	// FailureCategoryTurnFailed is a GET /api/v1/chats/{id} that reports
+	// an error node for this turn's assistant message.
+	FailureCategoryTurnFailed = "turn_failed"
+	// FailureCategoryRateLimited is a 429 response.
+	FailureCategoryRateLimited = "rate_limited"
+	// FailureCategoryServerError is a 5xx response.
+	FailureCategoryServerError = "server_error"
+	// FailureCategoryTransport is a network-level failure below HTTP
+	// status (connection refused, reset, DNS, ...).
+	FailureCategoryTransport = "transport"
+	// FailureCategoryTimeout is a request that exceeded its configured
+	// deadline.
+	FailureCategoryTimeout = "timeout"
+	// FailureCategoryPolicyViolation is a request this service refused to
+	// send at all — an SSRF-guarded address, a disallowed redirect, or a
+	// non-allowlisted origin.
+	FailureCategoryPolicyViolation = "policy_violation"
+	// FailureCategoryCreationLost is a chat-creation call whose response
+	// was lost or uncertain, discovered on a later attempt that must not
+	// retry it (D-2's absolute rule against re-creating a chat).
+	FailureCategoryCreationLost = "creation_lost"
+	// FailureCategoryLinkNotReady is a turn a job attempted against a
+	// link in a state that does not allow it (already spent, ambiguous,
+	// failed, or dead).
+	FailureCategoryLinkNotReady = "link_not_ready"
+	// FailureCategoryPolicyDenied is a job's runtime re-check of
+	// generation eligibility (workspace/model/author) failing after the
+	// turn was enqueued.
+	FailureCategoryPolicyDenied = "policy_denied"
+	// FailureCategoryPathIneligible is a reply-tree path node the job
+	// found ineligible (hidden, archived, or an unsupported kind).
+	FailureCategoryPathIneligible = "path_ineligible"
+	// FailureCategoryOrphan is a reply-tree walk that could not reach the
+	// thread root.
+	FailureCategoryOrphan = "orphan"
+	// FailureCategoryCycle is a reply-tree walk that revisited an entry,
+	// which local data must never produce.
+	FailureCategoryCycle = "cycle"
+	// FailureCategoryRequestTooLarge is a request this service refused to
+	// send because it exceeded the configured request-size bound.
+	FailureCategoryRequestTooLarge = "request_too_large"
+	// FailureCategoryLost is an owner recovery outcome: the provider
+	// could not confirm what happened to the turn.
+	FailureCategoryLost = "lost"
+	// FailureCategoryOwnerAbandoned is an explicit owner decision to give
+	// up on an uncertain turn rather than adopt it.
+	FailureCategoryOwnerAbandoned = "owner_abandoned"
+)
+
 // OpenWebUITurnLink records one owner message and the assistant reply it
 // asked for, plus the opaque provider correlation values for both.
 //
@@ -430,12 +502,47 @@ type OpenWebUITurnLink struct {
 	RemoteAssistantMessageID *string
 	RemoteParentID           *string
 	RemoteCurrentID          *string
+	// FailureCategory is a local classification of why this turn did not
+	// succeed (see the FailureCategory* constants above), nil while the
+	// turn is pending or once it has succeeded. Never provider error
+	// text.
+	FailureCategory *string
+	// PromptTokens and CompletionTokens are the provider's own usage
+	// counts for a succeeded turn, nil otherwise. They are accounting
+	// metadata only: nothing here orders, bounds, or authorizes by them.
+	PromptTokens     *int
+	CompletionTokens *int
+	// FinishReason is the provider's own completion-reason string for a
+	// succeeded turn (for example "stop" or "length"), nil otherwise.
+	FinishReason *string
+	// LastAttemptAt is when the most recent provider attempt for this
+	// turn was recorded as started (Issue #53's TurnJob calls
+	// BeginAttempt before making the call, per ADR-0005 D-3's "durably
+	// record the attempt before calling out"), nil before any attempt.
+	LastAttemptAt *time.Time
+	// CompletedAt is when this turn's status last became terminal
+	// (TurnProviderStatus.IsTerminal), nil while still pending.
+	CompletedAt *time.Time
 	// TombstonedAt marks a turn superseded by a later revision. The
 	// entries themselves are unaffected: hiding a note is ADR-0004's
 	// separate concern.
 	TombstonedAt *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// TurnOutcomeRecord is what RecordOutcome writes about a turn's outcome
+// in one call: the status and, when it applies, the local failure
+// category, the provider's usage/finish-reason metadata, or both. It is a
+// parameter object for the same reason OpenWebUITurnCorrelation is: every
+// field here is optional and turn-outcome-shaped, which is exactly what a
+// positional argument list gets wrong.
+type TurnOutcomeRecord struct {
+	Status           TurnProviderStatus
+	FailureCategory  *string
+	PromptTokens     *int
+	CompletionTokens *int
+	FinishReason     *string
 }
 
 // OpenWebUITurnCorrelation carries the opaque provider ids recorded for
@@ -517,6 +624,15 @@ type OpenWebUIModelRepository interface {
 	SetActive(ctx context.Context, modelID string, active bool, at time.Time) error
 }
 
+// OpenWebUILinkFilter narrows OpenWebUIConversationLinkRepository.List.
+// A nil field means "do not filter on this"; Limit <= 0 means "no
+// limit".
+type OpenWebUILinkFilter struct {
+	State    *LinkState
+	ThreadID *string
+	Limit    int
+}
+
 // OpenWebUIConversationLinkRepository persists branch-to-remote-chat
 // links. Its four Mark* methods are compare-and-set writes whose WHERE
 // clause encodes the state machine's allowed sources, so an illegal
@@ -538,10 +654,24 @@ type OpenWebUIConversationLinkRepository interface {
 	// ListByThread returns a thread's links in a stable (created_at, id)
 	// order.
 	ListByThread(ctx context.Context, threadID string) ([]OpenWebUIConversationLink, error)
+	// List returns links matching filter in a stable (created_at, id)
+	// order, for owner-facing recovery tooling (Issue #53's
+	// openwebuictl) rather than any request path.
+	List(ctx context.Context, filter OpenWebUILinkFilter) ([]OpenWebUIConversationLink, error)
 	// MarkReady records a confirmed remote chat. It applies to a
 	// creation_pending link (LinkEventConfirmed) or an ambiguous one an
 	// owner has resolved (LinkEventOwnerConfirmed), and returns
 	// ErrConflict from any other state.
+	//
+	// It also refuses to move a link onto a *different* remote chat than
+	// the one it already recorded: if the link already has a
+	// remote_chat_id, remoteChatID must match it exactly, or the call is
+	// ErrConflict. A pending link normally has none yet (the ordinary
+	// creation-confirmed path), but an ambiguous link owner recovery
+	// (Issue #53) resolves may already carry one from an earlier partial
+	// attempt, and this is what stops that recovery from silently
+	// re-pointing the link at a second chat instead of confirming the
+	// one it actually has.
 	MarkReady(ctx context.Context, id, remoteChatID string, remoteCurrentID *string, at time.Time) error
 	// MarkAmbiguous freezes a link whose remote outcome is unknown, from
 	// either creation_pending or ready.
@@ -575,7 +705,24 @@ type OpenWebUITurnLinkRepository interface {
 	ListByLink(ctx context.Context, linkID string) ([]OpenWebUITurnLink, error)
 	// SetRemoteCorrelation records the opaque provider ids for a turn.
 	SetRemoteCorrelation(ctx context.Context, id string, corr OpenWebUITurnCorrelation, at time.Time) error
+	// BeginAttempt records that a provider attempt for this turn is
+	// starting, before the call is made: it advances Attempt and
+	// LastAttemptAt in the same write. ADR-0005 D-3's durability
+	// requirement is what this exists for — a lease expiry or crash
+	// after this write but before a result is known must be
+	// distinguishable, on the next run, from a turn that never attempted
+	// anything.
+	BeginAttempt(ctx context.Context, id string, attempt int, at time.Time) error
 	SetProviderStatus(ctx context.Context, id string, status TurnProviderStatus, attempt int, at time.Time) error
+	// RecordOutcome writes a turn's status together with the outcome
+	// metadata that goes with it (failure category, provider usage,
+	// finish reason) in one call, so a caller can never update the
+	// status while forgetting the category that explains it. CompletedAt
+	// is written only when o.Status.IsTerminal(); an update that leaves
+	// the turn pending (which RecordOutcome permits, since a turn's
+	// status is a record rather than a machine) leaves any existing
+	// CompletedAt untouched rather than clearing it.
+	RecordOutcome(ctx context.Context, id string, o TurnOutcomeRecord, at time.Time) error
 	// SetAssistantEntry attaches the VirtualActor-authored reply entry
 	// once the turn has produced one.
 	SetAssistantEntry(ctx context.Context, id, assistantEntryID string, at time.Time) error

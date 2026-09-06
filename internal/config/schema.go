@@ -85,6 +85,16 @@ const (
 	KeyOpenWebUIModelDisplayName = "OPENWEBUI_MODEL_DISPLAY_NAME"
 	KeyOpenWebUIModelSlug        = "OPENWEBUI_MODEL_SLUG"
 	KeyOpenWebUIPresentationHost = "OPENWEBUI_PRESENTATION_HOST"
+
+	// The five keys below are Issue #53's (OWUI-B) client-side bounds and
+	// generation gate. They exist from this migration on, but nothing
+	// reads them yet: no bridge, job, or provider adapter is wired up
+	// until Issue #53's later PRs build one.
+	KeyOpenWebUIGenerationEnabled  = "OPENWEBUI_GENERATION_ENABLED"
+	KeyOpenWebUITimeout            = "OPENWEBUI_TIMEOUT"
+	KeyOpenWebUIMaxResponseBytes   = "OPENWEBUI_MAX_RESPONSE_BYTES"
+	KeyOpenWebUIMaxRequestBytes    = "OPENWEBUI_MAX_REQUEST_BYTES"
+	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -162,6 +172,11 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIModelDisplayName,
 	KeyOpenWebUIModelSlug,
 	KeyOpenWebUIPresentationHost,
+	KeyOpenWebUIGenerationEnabled,
+	KeyOpenWebUITimeout,
+	KeyOpenWebUIMaxResponseBytes,
+	KeyOpenWebUIMaxRequestBytes,
+	KeyOpenWebUIMaxContextMessages,
 }
 
 func isKnownKey(key string) bool {

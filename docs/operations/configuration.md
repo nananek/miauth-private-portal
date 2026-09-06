@@ -126,6 +126,11 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MODEL_DISPLAY_NAME` | no | `OPENWEBUI_DEFAULT_MODEL_ID`'s value | The seeded model's display name. |
 | `OPENWEBUI_MODEL_SLUG` | no | `model` | 1-32 lowercase ASCII letters, digits, or underscores. The local half of the VirtualActor handle `@<slug>@<presentation host>`. Must not collide (case-insensitively) with `OWNER_USERNAME` or the reserved `assistant`/`system` names. |
 | `OPENWEBUI_PRESENTATION_HOST` | required if `OPENWEBUI_ENABLED=true` | `""` | A bare lowercase DNS hostname (no scheme, port, path, or trailing dot) — a fixed, deployment-provisioned presentation value, never inferred from `OPENWEBUI_BASE_URL`. Must differ from `LOCAL_ORIGIN`'s host: a `UserLite` with a null host means "local to this service", so reusing the local host here would make a VirtualActor indistinguishable from a local actor. |
+| `OPENWEBUI_GENERATION_ENABLED` | no | `false` | Issue #53's outbound-generation gate, independent of `OPENWEBUI_ENABLED` the same way `LLM_CLASSIFICATION_ENABLED` is independent of `LLM_ENABLED`. `Registry.Seed` reconciles it onto the enabled workspace's `generation_enabled` column on every run (both directions — turning it back off clears a previous `true`), but as of this issue nothing reads that column: there is no bridge yet to gate. |
+| `OPENWEBUI_TIMEOUT` | no | `120s` | Issue #53's per-HTTP-call bound for the outbound adapter. Larger than `LLM_TIMEOUT`'s default because a buffered (non-streaming) chat completion can run considerably longer than an ordinary reply generation. Not yet consumed by anything. |
+| `OPENWEBUI_MAX_RESPONSE_BYTES` | no | `4194304` (4 MiB) | Issue #53's response-size bound. Larger than `RSS_MAX_RESPONSE_BYTES`/`IMAP_MAX_MESSAGE_BYTES` because `GET /api/v1/chats/{id}` returns the whole chat, not one message. Minimum `65536`. Not yet consumed by anything. |
+| `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
+| `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -972,6 +977,40 @@ AllowsInitialStartChat` checks the claiming job id); `ambiguous`/
 `failed`/`dead` permit no automatic retry at all
 (`AllowsAutoRetry() == false` unconditionally). See ADR-0005 for the
 full provider-contract reasoning this machine encodes.
+
+### Turn outcome columns and client bounds (for Issue #53)
+
+Migration `0019` adds `openwebui_turn_links.failure_category`,
+`prompt_tokens`, `completion_tokens`, `finish_reason`, `last_attempt_at`,
+and `completed_at`, plus an `idx_openwebui_links_state` index, so #53 has
+somewhere to record a turn's outcome and owner-facing recovery tooling can
+list links by state without a table scan. `failure_category` is a local
+classification (`internal/domain`'s `FailureCategory*` constants — for
+example `auth_failed`, `contract_failed`, `request_too_large`), never
+provider error text (ADR-0005 D6); there is deliberately no `CHECK`
+pinning the set of values, the same choice already made for
+`provider_status` and `jobs.job_type`. `OpenWebUITurnLinkRepository`
+gained `BeginAttempt` (records an attempt starting, before the provider is
+ever called — ADR-0005 D-3) and `RecordOutcome` (writes a terminal or
+non-terminal status together with the category/usage/finish-reason that
+explains it); `OpenWebUIConversationLinkRepository` gained `List`
+(filterable by state/thread, for the CLI) and `MarkReady` now refuses to
+move a link already carrying a `remote_chat_id` onto a *different* one.
+
+`OPENWEBUI_GENERATION_ENABLED`/`OPENWEBUI_TIMEOUT`/
+`OPENWEBUI_MAX_RESPONSE_BYTES`/`OPENWEBUI_MAX_REQUEST_BYTES`/
+`OPENWEBUI_MAX_CONTEXT_MESSAGES` (table above) are this issue's
+generation gate and the outbound adapter's client-side bounds. Their
+defaults are this service's own conservative starting points, not values
+observed from a real Open WebUI deployment — the compat contract
+(`docs/compat/openwebui-0.11.3.md`) leaves "rate limits, sizes, and
+timeouts" as to-be-determined by Issue #50's live-instance testing.
+`Registry.Seed` reconciles `OPENWEBUI_GENERATION_ENABLED` onto the
+enabled workspace on every run; the other four are parsed and validated
+but read by nothing yet. None of this changes runtime behavior while
+Issue #53's bridge, job, and provider adapter do not exist: every
+existing `OPENWEBUI_*`-flag-off code path is unchanged, and no new HTTP
+call or job type is registered by this migration alone.
 
 ### Table rebuild note
 

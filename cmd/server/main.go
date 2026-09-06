@@ -100,14 +100,15 @@ func run() error {
 	var virtualActors httpserver.VirtualActorResolver
 	if cfg.OpenWebUI.Enabled {
 		registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
-			Enabled:          cfg.OpenWebUI.Enabled,
-			BaseURL:          cfg.OpenWebUI.BaseURL,
-			SecretRef:        config.KeyOpenWebUIAPIKey,
-			WorkspaceName:    cfg.OpenWebUI.WorkspaceName,
-			PresentationHost: cfg.OpenWebUI.PresentationHost,
-			ModelDisplayName: cfg.OpenWebUI.ModelDisplayNameOrDefault(),
-			ModelSlug:        cfg.OpenWebUI.ModelSlug,
-			DefaultModelID:   cfg.OpenWebUI.DefaultModelID,
+			Enabled:           cfg.OpenWebUI.Enabled,
+			BaseURL:           cfg.OpenWebUI.BaseURL,
+			SecretRef:         config.KeyOpenWebUIAPIKey,
+			WorkspaceName:     cfg.OpenWebUI.WorkspaceName,
+			PresentationHost:  cfg.OpenWebUI.PresentationHost,
+			ModelDisplayName:  cfg.OpenWebUI.ModelDisplayNameOrDefault(),
+			ModelSlug:         cfg.OpenWebUI.ModelSlug,
+			DefaultModelID:    cfg.OpenWebUI.DefaultModelID,
+			GenerationEnabled: cfg.OpenWebUI.GenerationEnabled,
 		}, nil)
 		if err := registry.Seed(ctx); err != nil {
 			return fmt.Errorf("seed openwebui registry: %w", err)

@@ -93,6 +93,45 @@ func (r *openWebUIConversationLinkRepository) ListByThread(ctx context.Context, 
 	return links, rows.Err()
 }
 
+// List returns links matching filter in a stable (created_at, id) order,
+// backing owner-facing recovery tooling (Issue #53's openwebuictl)
+// rather than any request path — the reason it is a general filter
+// rather than another Get-by-something, unlike every other lookup in
+// this file.
+func (r *openWebUIConversationLinkRepository) List(ctx context.Context, filter domain.OpenWebUILinkFilter) ([]domain.OpenWebUIConversationLink, error) {
+	query := openWebUIConversationLinkSelectColumns + ` WHERE 1 = 1`
+	var args []any
+	if filter.State != nil {
+		query += ` AND state = ?`
+		args = append(args, string(*filter.State))
+	}
+	if filter.ThreadID != nil {
+		query += ` AND thread_id = ?`
+		args = append(args, *filter.ThreadID)
+	}
+	query += ` ORDER BY created_at, id`
+	if filter.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, filter.Limit)
+	}
+
+	rows, err := r.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var links []domain.OpenWebUIConversationLink
+	for rows.Next() {
+		l, err := scanOpenWebUIConversationLink(rows)
+		if err != nil {
+			return nil, err
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
 // MarkReady records a confirmed remote chat, from either a pending link
 // (the claimed StartChat succeeded) or an ambiguous one an owner has
 // resolved onto the same chat. Every other state is domain.ErrConflict.
@@ -105,13 +144,22 @@ func (r *openWebUIConversationLinkRepository) ListByThread(ctx context.Context, 
 // the provider reports a turn done (ADR-0005 D3), so "I do not have one
 // to give you" must not erase one that was already earned. Clearing it
 // deliberately is SetRemoteCurrent's job.
+//
+// The WHERE clause's remote_chat_id pin is the domain doc comment's
+// "refuses to move a link onto a different remote chat than the one it
+// already recorded": a link with no remote_chat_id yet accepts any
+// value (the ordinary creation-confirmed path), but a link that already
+// has one only accepts being confirmed onto that same value again, so
+// owner recovery (Issue #53) confirming an ambiguous link cannot
+// silently re-point it at a second chat.
 func (r *openWebUIConversationLinkRepository) MarkReady(ctx context.Context, id, remoteChatID string, remoteCurrentID *string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE openwebui_conversation_links
 		 SET state = 'ready', remote_chat_id = ?, remote_current_id = COALESCE(?, remote_current_id),
 			ready_at = COALESCE(ready_at, ?), last_transition_at = ?, updated_at = ?
-		 WHERE id = ? AND state IN ('creation_pending', 'ambiguous')`,
-		remoteChatID, nullableString(remoteCurrentID), formatTime(at), formatTime(at), formatTime(at), id,
+		 WHERE id = ? AND state IN ('creation_pending', 'ambiguous')
+			AND (remote_chat_id IS NULL OR remote_chat_id = ?)`,
+		remoteChatID, nullableString(remoteCurrentID), formatTime(at), formatTime(at), formatTime(at), id, remoteChatID,
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -229,6 +277,7 @@ type openWebUITurnLinkRepository struct{ q querier }
 const openWebUITurnLinkSelectColumns = `SELECT id, link_id, branch_id, local_message_id, local_parent_id,
 	assistant_entry_id, request_id, revision, attempt, provider_status,
 	remote_chat_id, remote_message_id, remote_assistant_message_id, remote_parent_id, remote_current_id,
+	failure_category, prompt_tokens, completion_tokens, finish_reason, last_attempt_at, completed_at,
 	tombstoned_at, created_at, updated_at
 	FROM openwebui_turn_links`
 
@@ -321,6 +370,52 @@ func (r *openWebUITurnLinkRepository) SetProviderStatus(ctx context.Context, id 
 	return requireRowAffected(res)
 }
 
+// BeginAttempt records that a provider attempt for this turn is starting,
+// before the call is made (ADR-0005 D-3): it advances attempt and
+// last_attempt_at in the same write, so a crash or lease expiry after
+// this point but before a result is known is distinguishable, on the
+// next run, from a turn that never attempted anything.
+func (r *openWebUITurnLinkRepository) BeginAttempt(ctx context.Context, id string, attempt int, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE openwebui_turn_links SET attempt = ?, last_attempt_at = ?, updated_at = ? WHERE id = ?`,
+		attempt, formatTime(at), formatTime(at), id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
+// RecordOutcome writes a turn's status together with the outcome
+// metadata that explains it — failure category, provider usage,
+// finish reason — in one statement, so a caller can never update the
+// status while leaving a stale category or usage figure from a previous
+// attempt behind. completed_at is written only when o.Status.IsTerminal
+// (via COALESCE(?, completed_at): the parameter is nil for a non-terminal
+// write), and once written is overwritten by any later terminal write
+// rather than kept at its first value — unlike a link's ready_at, a
+// turn's completion time is meant to reflect its most recent
+// determination, including one an owner recovery action changes after an
+// earlier ambiguous outcome.
+func (r *openWebUITurnLinkRepository) RecordOutcome(ctx context.Context, id string, o domain.TurnOutcomeRecord, at time.Time) error {
+	var completedAt any
+	if o.Status.IsTerminal() {
+		completedAt = formatTime(at)
+	}
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE openwebui_turn_links
+		 SET provider_status = ?, failure_category = ?, prompt_tokens = ?, completion_tokens = ?,
+			finish_reason = ?, completed_at = COALESCE(?, completed_at), updated_at = ?
+		 WHERE id = ?`,
+		string(o.Status), nullableString(o.FailureCategory), nullableInt(o.PromptTokens), nullableInt(o.CompletionTokens),
+		nullableString(o.FinishReason), completedAt, formatTime(at), id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
 func (r *openWebUITurnLinkRepository) SetAssistantEntry(ctx context.Context, id, assistantEntryID string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE openwebui_turn_links SET assistant_entry_id = ?, updated_at = ? WHERE id = ?`,
@@ -355,9 +450,12 @@ func scanOpenWebUITurnLink(row rowScanner) (domain.OpenWebUITurnLink, error) {
 	var providerStatus, createdAt, updatedAt string
 	var localParentID, assistantEntryID, remoteChatID, remoteMessageID sql.NullString
 	var remoteAssistantMessageID, remoteParentID, remoteCurrentID, tombstonedAt sql.NullString
+	var failureCategory, finishReason, lastAttemptAt, completedAt sql.NullString
+	var promptTokens, completionTokens sql.NullInt64
 	if err := row.Scan(&t.ID, &t.LinkID, &t.BranchID, &t.LocalMessageID, &localParentID,
 		&assistantEntryID, &t.RequestID, &t.Revision, &t.Attempt, &providerStatus,
 		&remoteChatID, &remoteMessageID, &remoteAssistantMessageID, &remoteParentID, &remoteCurrentID,
+		&failureCategory, &promptTokens, &completionTokens, &finishReason, &lastAttemptAt, &completedAt,
 		&tombstonedAt, &createdAt, &updatedAt,
 	); err != nil {
 		return domain.OpenWebUITurnLink{}, mapReadError(err)
@@ -370,8 +468,18 @@ func scanOpenWebUITurnLink(row rowScanner) (domain.OpenWebUITurnLink, error) {
 	t.RemoteAssistantMessageID = stringPtr(remoteAssistantMessageID)
 	t.RemoteParentID = stringPtr(remoteParentID)
 	t.RemoteCurrentID = stringPtr(remoteCurrentID)
+	t.FailureCategory = stringPtr(failureCategory)
+	t.PromptTokens = intPtr(promptTokens)
+	t.CompletionTokens = intPtr(completionTokens)
+	t.FinishReason = stringPtr(finishReason)
 
 	var err error
+	if t.LastAttemptAt, err = parseTimePtr(lastAttemptAt); err != nil {
+		return domain.OpenWebUITurnLink{}, err
+	}
+	if t.CompletedAt, err = parseTimePtr(completedAt); err != nil {
+		return domain.OpenWebUITurnLink{}, err
+	}
 	if t.TombstonedAt, err = parseTimePtr(tombstonedAt); err != nil {
 		return domain.OpenWebUITurnLink{}, err
 	}
