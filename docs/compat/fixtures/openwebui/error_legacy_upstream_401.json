@@ -1,0 +1,3 @@
+{
+  "detail": "simulated upstream error 401; token sk-mock-upstream-secret must not leak"
+}

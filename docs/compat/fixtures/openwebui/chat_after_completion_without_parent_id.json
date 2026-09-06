@@ -1,0 +1,104 @@
+{
+  "id": "72343fab-9862-473c-adf0-ce63e22ca08c",
+  "user_id": "user-redacted",
+  "title": "New Chat",
+  "chat": {
+    "id": "",
+    "title": "New Chat",
+    "models": [
+      "mock-model"
+    ],
+    "params": {},
+    "history": {
+      "messages": {
+        "4982f510-2f7d-4b61-b91e-966084bd438a": {
+          "id": "4982f510-2f7d-4b61-b91e-966084bd438a",
+          "parentId": null,
+          "childrenIds": [
+            "70077092-2b84-4ca4-8b83-0bc67dcaeae5"
+          ],
+          "role": "user",
+          "content": "turn-1 hello from aria",
+          "timestamp": 1788671962,
+          "models": [
+            "mock-model"
+          ]
+        },
+        "70077092-2b84-4ca4-8b83-0bc67dcaeae5": {
+          "id": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+          "parentId": null,
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)",
+          "model": "mock-model",
+          "modelName": "mock-model",
+          "modelIdx": 0,
+          "timestamp": 1788671962,
+          "done": true,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_08a58f1d1e0040f48f70bb60",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #6 (received 1 messages; last user: turn-1 hello from aria)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        }
+      },
+      "currentId": "70077092-2b84-4ca4-8b83-0bc67dcaeae5"
+    },
+    "messages": [
+      {
+        "id": "4982f510-2f7d-4b61-b91e-966084bd438a",
+        "parentId": null,
+        "childrenIds": [
+          "70077092-2b84-4ca4-8b83-0bc67dcaeae5"
+        ],
+        "role": "user",
+        "content": "turn-1 hello from aria",
+        "timestamp": 1788671962,
+        "models": [
+          "mock-model"
+        ]
+      },
+      {
+        "id": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+        "parentId": "4982f510-2f7d-4b61-b91e-966084bd438a",
+        "childrenIds": [],
+        "role": "assistant",
+        "content": "",
+        "model": "mock-model",
+        "modelName": "mock-model",
+        "modelIdx": 0,
+        "timestamp": 1788671962
+      }
+    ],
+    "tags": [],
+    "timestamp": 1788671962000
+  },
+  "updated_at": 1788671962,
+  "created_at": 1788671962,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {},
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": "70077092-2b84-4ca4-8b83-0bc67dcaeae5",
+  "context_usage": null
+}

@@ -1,0 +1,1974 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Open WebUI",
+    "version": "0.1.0"
+  },
+  "x-excerpt": {
+    "source": "GET /openapi.json from ghcr.io/open-webui/open-webui@sha256:1a6399d237dc392a2313e0ca826020b3fd5d22536357840eb63393d18dc8b924 started with ENV=dev",
+    "observed": "2026-09-06",
+    "note": "Excerpt only: the full document has 485 paths and 314 schemas. Kept here are 13 paths (the ones this repository's Open WebUI bridge calls at runtime or uses to provision the integration, plus GET /api/tasks/chat/{chat_id} and POST /api/v1/chats/{id} for reference) and 21 schemas: the transitive closure of the schemas those paths reference, plus the request bodies of endpoints the bridge declines to use or has not verified, whose paths were not extracted (ForkForm, EventForm, open_webui__routers__chats__MessageForm, and ModelForm with its ModelMeta/ModelParams). components.securitySchemes is copied verbatim so the HTTPBearer references in the kept paths resolve. info.version is FastAPI's default \"0.1.0\" and is NOT the Open WebUI version; GET /api/version reports the real one (\"0.11.3\" for this digest)."
+  },
+  "paths": {
+    "/api/version": {
+      "get": {
+        "summary": "Get App Version",
+        "operationId": "get_app_version_api_version_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auths/": {
+      "get": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Get Session User",
+        "operationId": "get_session_user_api_v1_auths__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUserInfoResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/models": {
+      "get": {
+        "summary": "Get Models",
+        "operationId": "get_models_api_models_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Refresh"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/base": {
+      "get": {
+        "summary": "Get Base Models",
+        "operationId": "get_base_models_api_models_base_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/chat/completions": {
+      "post": {
+        "summary": "Chat Completion",
+        "operationId": "chat_completion_api_chat_completions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Form Data"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/tasks/chat/{chat_id}": {
+      "get": {
+        "summary": "List Tasks By Chat Id Endpoint",
+        "operationId": "list_tasks_by_chat_id_endpoint_api_tasks_chat__chat_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chat Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chats/new": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Create New Chat",
+        "operationId": "create_new_chat_api_v1_chats_new_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ChatResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Create New Chat Api V1 Chats New Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chats/{id}": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Get Chat By Id",
+        "operationId": "get_chat_by_id_api_v1_chats__id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ChatResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Chat By Id Api V1 Chats  Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Update Chat By Id",
+        "operationId": "update_chat_by_id_api_v1_chats__id__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatForm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ChatResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Update Chat By Id Api V1 Chats  Id  Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Delete Chat By Id",
+        "operationId": "delete_chat_by_id_api_v1_chats__id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "title": "Response Delete Chat By Id Api V1 Chats  Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "summary": "Get Models",
+        "operationId": "get_models_api_v1_models_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Refresh"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/configs/models": {
+      "get": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Get Models Config",
+        "operationId": "get_models_config_api_v1_configs_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsConfigForm"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Set Models Config",
+        "operationId": "set_models_config_api_v1_configs_models_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelsConfigForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsConfigForm"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auths/api_key": {
+      "get": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Get Api Key",
+        "operationId": "get_api_key_api_v1_auths_api_key_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Generate Api Key",
+        "operationId": "generate_api_key_api_v1_auths_api_key_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKey"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Delete Api Key",
+        "operationId": "delete_api_key_api_v1_auths_api_key_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "title": "Response Delete Api Key Api V1 Auths Api Key Delete"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auths/admin/config": {
+      "get": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Get Admin Config",
+        "operationId": "get_admin_config_api_v1_auths_admin_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auths"
+        ],
+        "summary": "Update Admin Config",
+        "operationId": "update_admin_config_api_v1_auths_admin_config_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/default/permissions": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Get Default User Permissions",
+        "operationId": "get_default_user_permissions_api_v1_users_default_permissions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPermissions"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Update Default User Permissions",
+        "operationId": "update_default_user_permissions_api_v1_users_default_permissions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPermissions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccessGrantsPermissions": {
+        "properties": {
+          "allow_users": {
+            "type": "boolean",
+            "title": "Allow Users",
+            "default": true
+          },
+          "allow_groups": {
+            "type": "boolean",
+            "title": "Allow Groups",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "AccessGrantsPermissions"
+      },
+      "AdminConfig": {
+        "properties": {
+          "SHOW_ADMIN_DETAILS": {
+            "type": "boolean",
+            "title": "Show Admin Details"
+          },
+          "ADMIN_EMAIL": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Email"
+          },
+          "WEBUI_URL": {
+            "type": "string",
+            "title": "Webui Url"
+          },
+          "ENABLE_SIGNUP": {
+            "type": "boolean",
+            "title": "Enable Signup"
+          },
+          "ENABLE_API_KEYS": {
+            "type": "boolean",
+            "title": "Enable Api Keys"
+          },
+          "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS": {
+            "type": "boolean",
+            "title": "Enable Api Keys Endpoint Restrictions"
+          },
+          "API_KEYS_ALLOWED_ENDPOINTS": {
+            "type": "string",
+            "title": "Api Keys Allowed Endpoints"
+          },
+          "DEFAULT_USER_ROLE": {
+            "type": "string",
+            "title": "Default User Role"
+          },
+          "DEFAULT_GROUP_ID": {
+            "type": "string",
+            "title": "Default Group Id"
+          },
+          "DEFAULT_INTERFACE_SETTINGS": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Interface Settings"
+          },
+          "JWT_EXPIRES_IN": {
+            "type": "string",
+            "title": "Jwt Expires In"
+          },
+          "ENABLE_COMMUNITY_SHARING": {
+            "type": "boolean",
+            "title": "Enable Community Sharing"
+          },
+          "ENABLE_MESSAGE_RATING": {
+            "type": "boolean",
+            "title": "Enable Message Rating"
+          },
+          "ENABLE_FOLDERS": {
+            "type": "boolean",
+            "title": "Enable Folders"
+          },
+          "FOLDER_MAX_FILE_COUNT": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Max File Count"
+          },
+          "AUTOMATION_MAX_COUNT": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Automation Max Count"
+          },
+          "AUTOMATION_MIN_INTERVAL": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Automation Min Interval"
+          },
+          "ENABLE_AUTOMATIONS": {
+            "type": "boolean",
+            "title": "Enable Automations"
+          },
+          "ENABLE_CHANNELS": {
+            "type": "boolean",
+            "title": "Enable Channels"
+          },
+          "CHANNEL_MODEL_RESPONSE_MODE": {
+            "type": "string",
+            "title": "Channel Model Response Mode",
+            "default": "thread"
+          },
+          "ENABLE_CALENDAR": {
+            "type": "boolean",
+            "title": "Enable Calendar"
+          },
+          "ENABLE_MEMORIES": {
+            "type": "boolean",
+            "title": "Enable Memories"
+          },
+          "ENABLE_MEMORY_SYSTEM_CONTEXT": {
+            "type": "boolean",
+            "title": "Enable Memory System Context"
+          },
+          "ENABLE_NOTES": {
+            "type": "boolean",
+            "title": "Enable Notes"
+          },
+          "ENABLE_USER_WEBHOOKS": {
+            "type": "boolean",
+            "title": "Enable User Webhooks"
+          },
+          "ENABLE_USER_STATUS": {
+            "type": "boolean",
+            "title": "Enable User Status"
+          },
+          "PENDING_USER_OVERLAY_TITLE": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending User Overlay Title"
+          },
+          "PENDING_USER_OVERLAY_CONTENT": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending User Overlay Content"
+          },
+          "RESPONSE_WATERMARK": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Watermark"
+          }
+        },
+        "type": "object",
+        "required": [
+          "SHOW_ADMIN_DETAILS",
+          "WEBUI_URL",
+          "ENABLE_SIGNUP",
+          "ENABLE_API_KEYS",
+          "ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS",
+          "API_KEYS_ALLOWED_ENDPOINTS",
+          "DEFAULT_USER_ROLE",
+          "DEFAULT_GROUP_ID",
+          "JWT_EXPIRES_IN",
+          "ENABLE_COMMUNITY_SHARING",
+          "ENABLE_MESSAGE_RATING",
+          "ENABLE_FOLDERS",
+          "ENABLE_AUTOMATIONS",
+          "ENABLE_CHANNELS",
+          "ENABLE_CALENDAR",
+          "ENABLE_MEMORIES",
+          "ENABLE_MEMORY_SYSTEM_CONTEXT",
+          "ENABLE_NOTES",
+          "ENABLE_USER_WEBHOOKS",
+          "ENABLE_USER_STATUS"
+        ],
+        "title": "AdminConfig"
+      },
+      "ApiKey": {
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          }
+        },
+        "type": "object",
+        "title": "ApiKey"
+      },
+      "ChatForm": {
+        "properties": {
+          "chat": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Chat"
+          },
+          "variables": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variables"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chat"
+        ],
+        "title": "ChatForm"
+      },
+      "ChatPermissions": {
+        "properties": {
+          "controls": {
+            "type": "boolean",
+            "title": "Controls",
+            "default": true
+          },
+          "valves": {
+            "type": "boolean",
+            "title": "Valves",
+            "default": true
+          },
+          "system_prompt": {
+            "type": "boolean",
+            "title": "System Prompt",
+            "default": true
+          },
+          "params": {
+            "type": "boolean",
+            "title": "Params",
+            "default": true
+          },
+          "file_upload": {
+            "type": "boolean",
+            "title": "File Upload",
+            "default": true
+          },
+          "web_upload": {
+            "type": "boolean",
+            "title": "Web Upload",
+            "default": true
+          },
+          "delete": {
+            "type": "boolean",
+            "title": "Delete",
+            "default": true
+          },
+          "delete_message": {
+            "type": "boolean",
+            "title": "Delete Message",
+            "default": true
+          },
+          "continue_response": {
+            "type": "boolean",
+            "title": "Continue Response",
+            "default": true
+          },
+          "regenerate_response": {
+            "type": "boolean",
+            "title": "Regenerate Response",
+            "default": true
+          },
+          "rate_response": {
+            "type": "boolean",
+            "title": "Rate Response",
+            "default": true
+          },
+          "edit": {
+            "type": "boolean",
+            "title": "Edit",
+            "default": true
+          },
+          "share": {
+            "type": "boolean",
+            "title": "Share",
+            "default": true
+          },
+          "export": {
+            "type": "boolean",
+            "title": "Export",
+            "default": true
+          },
+          "import": {
+            "type": "boolean",
+            "title": "Import",
+            "default": true
+          },
+          "stt": {
+            "type": "boolean",
+            "title": "Stt",
+            "default": true
+          },
+          "tts": {
+            "type": "boolean",
+            "title": "Tts",
+            "default": true
+          },
+          "call": {
+            "type": "boolean",
+            "title": "Call",
+            "default": true
+          },
+          "multiple_models": {
+            "type": "boolean",
+            "title": "Multiple Models",
+            "default": true
+          },
+          "temporary": {
+            "type": "boolean",
+            "title": "Temporary",
+            "default": true
+          },
+          "temporary_enforced": {
+            "type": "boolean",
+            "title": "Temporary Enforced",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "ChatPermissions"
+      },
+      "ChatResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "chat": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Chat"
+          },
+          "updated_at": {
+            "type": "integer",
+            "title": "Updated At"
+          },
+          "created_at": {
+            "type": "integer",
+            "title": "Created At"
+          },
+          "share_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Share Id"
+          },
+          "archived": {
+            "type": "boolean",
+            "title": "Archived"
+          },
+          "pinned": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pinned",
+            "default": false
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta",
+            "default": {}
+          },
+          "variables": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Variables",
+            "default": {}
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "tasks": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "current_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Message Id"
+          },
+          "context_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Usage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "title",
+          "chat",
+          "updated_at",
+          "created_at",
+          "archived"
+        ],
+        "title": "ChatResponse"
+      },
+      "EventForm": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "data"
+        ],
+        "title": "EventForm"
+      },
+      "FeaturesPermissions": {
+        "properties": {
+          "api_keys": {
+            "type": "boolean",
+            "title": "Api Keys",
+            "default": false
+          },
+          "notes": {
+            "type": "boolean",
+            "title": "Notes",
+            "default": true
+          },
+          "channels": {
+            "type": "boolean",
+            "title": "Channels",
+            "default": true
+          },
+          "folders": {
+            "type": "boolean",
+            "title": "Folders",
+            "default": true
+          },
+          "direct_tool_servers": {
+            "type": "boolean",
+            "title": "Direct Tool Servers",
+            "default": false
+          },
+          "web_search": {
+            "type": "boolean",
+            "title": "Web Search",
+            "default": true
+          },
+          "image_generation": {
+            "type": "boolean",
+            "title": "Image Generation",
+            "default": true
+          },
+          "code_interpreter": {
+            "type": "boolean",
+            "title": "Code Interpreter",
+            "default": true
+          },
+          "memories": {
+            "type": "boolean",
+            "title": "Memories",
+            "default": true
+          },
+          "automations": {
+            "type": "boolean",
+            "title": "Automations",
+            "default": false
+          },
+          "calendar": {
+            "type": "boolean",
+            "title": "Calendar",
+            "default": true
+          },
+          "webhooks": {
+            "type": "boolean",
+            "title": "Webhooks",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "FeaturesPermissions"
+      },
+      "ForkForm": {
+        "properties": {
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          }
+        },
+        "type": "object",
+        "title": "ForkForm"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ModelForm": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "base_model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Model Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ModelMeta"
+          },
+          "params": {
+            "$ref": "#/components/schemas/ModelParams"
+          },
+          "access_grants": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Grants"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "meta",
+          "params"
+        ],
+        "title": "ModelForm"
+      },
+      "ModelMeta": {
+        "properties": {
+          "profile_image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Image Url"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "User-facing description of the model."
+          },
+          "capabilities": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "knowledge": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ModelMeta",
+        "description": "Metadata for a workspace model entry (profile, description, tags, capabilities)."
+      },
+      "ModelParams": {
+        "properties": {},
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ModelParams",
+        "description": "Parameters for model inference (temperature, top_p, etc.)."
+      },
+      "ModelsConfigForm": {
+        "properties": {
+          "DEFAULT_MODELS": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Models"
+          },
+          "DEFAULT_PINNED_MODELS": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Pinned Models"
+          },
+          "MODEL_ORDER_LIST": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Order List"
+          },
+          "DEFAULT_MODEL_METADATA": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model Metadata"
+          },
+          "DEFAULT_MODEL_PARAMS": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model Params"
+          }
+        },
+        "type": "object",
+        "required": [
+          "DEFAULT_MODELS",
+          "DEFAULT_PINNED_MODELS",
+          "MODEL_ORDER_LIST"
+        ],
+        "title": "ModelsConfigForm"
+      },
+      "SessionUserInfoResponse": {
+        "properties": {
+          "status_emoji": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Emoji"
+          },
+          "status_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Message"
+          },
+          "status_expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Expires At"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "profile_image_url": {
+            "type": "string",
+            "title": "Profile Image Url"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "permissions": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permissions"
+          },
+          "bio": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bio"
+          },
+          "gender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender"
+          },
+          "date_of_birth": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Of Birth"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role",
+          "email",
+          "profile_image_url",
+          "token",
+          "token_type"
+        ],
+        "title": "SessionUserInfoResponse"
+      },
+      "SettingsPermissions": {
+        "properties": {
+          "interface": {
+            "type": "boolean",
+            "title": "Interface",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "SettingsPermissions"
+      },
+      "SharingPermissions": {
+        "properties": {
+          "models": {
+            "type": "boolean",
+            "title": "Models",
+            "default": false
+          },
+          "public_models": {
+            "type": "boolean",
+            "title": "Public Models",
+            "default": false
+          },
+          "knowledge": {
+            "type": "boolean",
+            "title": "Knowledge",
+            "default": false
+          },
+          "public_knowledge": {
+            "type": "boolean",
+            "title": "Public Knowledge",
+            "default": false
+          },
+          "prompts": {
+            "type": "boolean",
+            "title": "Prompts",
+            "default": false
+          },
+          "public_prompts": {
+            "type": "boolean",
+            "title": "Public Prompts",
+            "default": false
+          },
+          "tools": {
+            "type": "boolean",
+            "title": "Tools",
+            "default": false
+          },
+          "public_tools": {
+            "type": "boolean",
+            "title": "Public Tools",
+            "default": false
+          },
+          "skills": {
+            "type": "boolean",
+            "title": "Skills",
+            "default": false
+          },
+          "public_skills": {
+            "type": "boolean",
+            "title": "Public Skills",
+            "default": false
+          },
+          "notes": {
+            "type": "boolean",
+            "title": "Notes",
+            "default": false
+          },
+          "public_notes": {
+            "type": "boolean",
+            "title": "Public Notes",
+            "default": false
+          },
+          "folders": {
+            "type": "boolean",
+            "title": "Folders",
+            "default": false
+          },
+          "public_chats": {
+            "type": "boolean",
+            "title": "Public Chats",
+            "default": false
+          },
+          "open_chats": {
+            "type": "boolean",
+            "title": "Open Chats",
+            "default": false
+          },
+          "public_calendars": {
+            "type": "boolean",
+            "title": "Public Calendars",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "SharingPermissions"
+      },
+      "UserPermissions": {
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspacePermissions"
+          },
+          "sharing": {
+            "$ref": "#/components/schemas/SharingPermissions"
+          },
+          "access_grants": {
+            "$ref": "#/components/schemas/AccessGrantsPermissions"
+          },
+          "chat": {
+            "$ref": "#/components/schemas/ChatPermissions"
+          },
+          "features": {
+            "$ref": "#/components/schemas/FeaturesPermissions"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/SettingsPermissions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "workspace",
+          "sharing",
+          "access_grants",
+          "chat",
+          "features",
+          "settings"
+        ],
+        "title": "UserPermissions"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WorkspacePermissions": {
+        "properties": {
+          "models": {
+            "type": "boolean",
+            "title": "Models",
+            "default": false
+          },
+          "knowledge": {
+            "type": "boolean",
+            "title": "Knowledge",
+            "default": false
+          },
+          "prompts": {
+            "type": "boolean",
+            "title": "Prompts",
+            "default": false
+          },
+          "tools": {
+            "type": "boolean",
+            "title": "Tools",
+            "default": false
+          },
+          "skills": {
+            "type": "boolean",
+            "title": "Skills",
+            "default": false
+          },
+          "models_import": {
+            "type": "boolean",
+            "title": "Models Import",
+            "default": false
+          },
+          "models_export": {
+            "type": "boolean",
+            "title": "Models Export",
+            "default": false
+          },
+          "prompts_import": {
+            "type": "boolean",
+            "title": "Prompts Import",
+            "default": false
+          },
+          "prompts_export": {
+            "type": "boolean",
+            "title": "Prompts Export",
+            "default": false
+          },
+          "tools_import": {
+            "type": "boolean",
+            "title": "Tools Import",
+            "default": false
+          },
+          "tools_export": {
+            "type": "boolean",
+            "title": "Tools Export",
+            "default": false
+          },
+          "skills_import": {
+            "type": "boolean",
+            "title": "Skills Import",
+            "default": false
+          },
+          "skills_export": {
+            "type": "boolean",
+            "title": "Skills Export",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "WorkspacePermissions"
+      },
+      "open_webui__routers__chats__MessageForm": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "MessageForm"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

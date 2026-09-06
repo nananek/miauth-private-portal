@@ -1,0 +1,78 @@
+{
+  "id": "c6491992-e99a-41c2-ba3c-232bdf6ae549",
+  "user_id": "user-redacted",
+  "title": "api-created turn 1",
+  "chat": {
+    "id": "c6491992-e99a-41c2-ba3c-232bdf6ae549",
+    "title": "api-created turn 1",
+    "models": [
+      "mock-model"
+    ],
+    "history": {
+      "currentId": "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22",
+      "messages": {
+        "facda306-4fe0-419d-ab08-289c520026fe": {
+          "id": "facda306-4fe0-419d-ab08-289c520026fe",
+          "role": "user",
+          "content": "api-created turn 1",
+          "timestamp": 1788672279,
+          "childrenIds": [
+            "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22"
+          ]
+        },
+        "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22": {
+          "id": "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22",
+          "parentId": "facda306-4fe0-419d-ab08-289c520026fe",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #3 (received 1 messages; last user: api-created turn 1)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672279,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_4c2f5f1a17f847d18ab19177",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #3 (received 1 messages; last user: api-created turn 1)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        }
+      }
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "api-created turn 1"
+      }
+    ],
+    "files": [],
+    "tags": [],
+    "timestamp": 1788672279854
+  },
+  "updated_at": 1788672279,
+  "created_at": 1788672279,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {},
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22",
+  "context_usage": null
+}

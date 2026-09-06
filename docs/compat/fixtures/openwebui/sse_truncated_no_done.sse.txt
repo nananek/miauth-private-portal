@@ -1,0 +1,27 @@
+: synthetic — derived from sse_passthrough_finish.sse.txt
+: the stream ends after a content chunk with no finish_reason event and no 'data: [DONE]' sentinel (response loss / disconnect)
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "mock "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "reply "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "#9 "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "(received "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "1 "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "messages; "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "last "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "user: "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "stream "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "no "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-9", "object": "chat.completion.chunk", "created": 1788672041, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "chat) "}, "finish_reason": null}]}
+

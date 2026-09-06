@@ -1,0 +1,28 @@
+{
+  "model": "mock-model",
+  "stream": false,
+  "chat_id": "76f89a52-6ff6-423f-9a4a-adaa9370b687",
+  "parent_id": null,
+  "id": "bf927bbf-3055-4844-bda2-d12ff775f618",
+  "user_message": {
+    "id": "7e9cee65-cc92-45ef-911f-16ab2bbca306",
+    "parentId": null,
+    "childrenIds": [
+      "bf927bbf-3055-4844-bda2-d12ff775f618"
+    ],
+    "role": "user",
+    "content": "precreated turn 1",
+    "timestamp": 1788672375
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "precreated turn 1"
+    }
+  ],
+  "background_tasks": {
+    "title_generation": false,
+    "tags_generation": false,
+    "follow_up_generation": false
+  }
+}

@@ -1,0 +1,247 @@
+{
+  "id": "c6491992-e99a-41c2-ba3c-232bdf6ae549",
+  "user_id": "user-redacted",
+  "title": "api-created turn 1",
+  "chat": {
+    "id": "c6491992-e99a-41c2-ba3c-232bdf6ae549",
+    "title": "api-created turn 1",
+    "models": [
+      "mock-model"
+    ],
+    "history": {
+      "currentId": "9637eeef-033d-4e88-bb2f-52d380207857",
+      "messages": {
+        "facda306-4fe0-419d-ab08-289c520026fe": {
+          "id": "facda306-4fe0-419d-ab08-289c520026fe",
+          "role": "user",
+          "content": "api-created turn 1",
+          "timestamp": 1788672279,
+          "childrenIds": [
+            "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22"
+          ]
+        },
+        "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22": {
+          "id": "7f73e20b-1ee8-439d-9bb2-97d9e56a0d22",
+          "parentId": "facda306-4fe0-419d-ab08-289c520026fe",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #3 (received 1 messages; last user: api-created turn 1)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672279,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_4c2f5f1a17f847d18ab19177",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #3 (received 1 messages; last user: api-created turn 1)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "3447161d-0c9a-4e96-b74f-fe8922168a54": {
+          "id": "3447161d-0c9a-4e96-b74f-fe8922168a54",
+          "role": "user",
+          "content": "api turn 2",
+          "timestamp": 1788672280,
+          "parentId": null,
+          "childrenIds": [
+            "e8676c52-557e-4e4b-a92d-bc029c2d3be4"
+          ]
+        },
+        "e8676c52-557e-4e4b-a92d-bc029c2d3be4": {
+          "id": "e8676c52-557e-4e4b-a92d-bc029c2d3be4",
+          "parentId": "3447161d-0c9a-4e96-b74f-fe8922168a54",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #13 (received 1 messages; last user: api turn 2)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672280,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_21ada0dafe5446ceabc54185",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #13 (received 1 messages; last user: api turn 2)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "573fe62a-4755-465d-887b-2615b514c360": {
+          "id": "573fe62a-4755-465d-887b-2615b514c360",
+          "role": "user",
+          "content": "api turn 3 no messages",
+          "timestamp": 1788672280,
+          "parentId": null,
+          "childrenIds": [
+            "7480dbff-f5fb-47b8-b288-7dc5e6600a84"
+          ]
+        },
+        "7480dbff-f5fb-47b8-b288-7dc5e6600a84": {
+          "id": "7480dbff-f5fb-47b8-b288-7dc5e6600a84",
+          "parentId": "573fe62a-4755-465d-887b-2615b514c360",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #5 (received 1 messages; last user: api turn 3 no messages)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672280,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_2ffb032dc486460fb5514a1a",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #5 (received 1 messages; last user: api turn 3 no messages)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "a52cd714-f26d-4df4-ac2c-77915640d480": {
+          "id": "a52cd714-f26d-4df4-ac2c-77915640d480",
+          "role": "user",
+          "content": "api branch turn 2b",
+          "timestamp": 1788672280,
+          "parentId": null,
+          "childrenIds": [
+            "fca7d7de-db48-4477-9bee-ece3d5edb7bc"
+          ]
+        },
+        "fca7d7de-db48-4477-9bee-ece3d5edb7bc": {
+          "id": "fca7d7de-db48-4477-9bee-ece3d5edb7bc",
+          "parentId": "a52cd714-f26d-4df4-ac2c-77915640d480",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "mock reply #6 (received 1 messages; last user: api branch turn 2b)",
+          "done": true,
+          "model": "mock-model",
+          "timestamp": 1788672280,
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_c928c9f531504d0a96874683",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "mock reply #6 (received 1 messages; last user: api branch turn 2b)"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+            "input_tokens": 10,
+            "output_tokens": 12
+          }
+        },
+        "95807eb7-6302-41f3-9c61-e5781462197d": {
+          "id": "95807eb7-6302-41f3-9c61-e5781462197d",
+          "role": "user",
+          "content": "[[status:500]]",
+          "timestamp": 1788672280,
+          "parentId": null,
+          "childrenIds": [
+            "5407e890-7df7-4879-ae06-cdb1a49950c6"
+          ]
+        },
+        "5407e890-7df7-4879-ae06-cdb1a49950c6": {
+          "id": "5407e890-7df7-4879-ae06-cdb1a49950c6",
+          "parentId": "95807eb7-6302-41f3-9c61-e5781462197d",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "",
+          "done": false,
+          "model": "mock-model",
+          "timestamp": 1788672280,
+          "error": {
+            "content": "simulated upstream error 500; token sk-mock-upstream-secret must not leak"
+          }
+        },
+        "f5139211-d068-4f40-9256-94ddd59a7b81": {
+          "id": "f5139211-d068-4f40-9256-94ddd59a7b81",
+          "role": "user",
+          "content": "[[retry-after]]",
+          "timestamp": 1788672280,
+          "parentId": null,
+          "childrenIds": [
+            "9637eeef-033d-4e88-bb2f-52d380207857"
+          ]
+        },
+        "9637eeef-033d-4e88-bb2f-52d380207857": {
+          "id": "9637eeef-033d-4e88-bb2f-52d380207857",
+          "parentId": "f5139211-d068-4f40-9256-94ddd59a7b81",
+          "childrenIds": [],
+          "role": "assistant",
+          "content": "",
+          "done": false,
+          "model": "mock-model",
+          "timestamp": 1788672280,
+          "error": {
+            "content": "simulated rate limit"
+          }
+        }
+      }
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "api-created turn 1"
+      }
+    ],
+    "files": [],
+    "tags": [],
+    "timestamp": 1788672279854
+  },
+  "updated_at": 1788672280,
+  "created_at": 1788672279,
+  "share_id": null,
+  "archived": false,
+  "pinned": false,
+  "meta": {},
+  "variables": {},
+  "folder_id": null,
+  "tasks": null,
+  "summary": null,
+  "current_message_id": "9637eeef-033d-4e88-bb2f-52d380207857",
+  "context_usage": null
+}
