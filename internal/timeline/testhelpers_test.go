@@ -108,6 +108,44 @@ func newTestGeneration(targetEntryID string, kind domain.GenerationKind, at time
 	}
 }
 
+// mustCreateVirtualActor seeds a minimal, active, enabled Open WebUI
+// workspace/model pair and returns the actor id of the resulting
+// domain.ActorOpenWebUIModel row, for CreateGeneratedReplyBy's
+// eligibility tests. It writes the same shape internal/openwebui.
+// Registry.Seed would, but directly through the repositories: this
+// package does not import internal/openwebui (AGENTS.md's narrow
+// use-case boundary applies both ways).
+func mustCreateVirtualActor(t *testing.T, db *sqlite.DB, at time.Time) domain.Actor {
+	t.Helper()
+	actor := domain.Actor{ID: domain.NewID(), Type: domain.ActorOpenWebUIModel, CreatedAt: at}
+	if err := db.Actors.Create(t.Context(), actor); err != nil {
+		t.Fatalf("create model actor: %v", err)
+	}
+	workspace := domain.OpenWebUIWorkspace{
+		ID: domain.NewID(), Name: "Open WebUI", BaseURL: "https://openwebui.example.net",
+		SecretRef: "OPENWEBUI_API_KEY", PresentationHost: "openwebui.example.net",
+		Enabled:            true,
+		ChatCreateStatus:   domain.CapabilityUnverified,
+		ChatContinueStatus: domain.CapabilityUnverified,
+		CreatedAt:          at, UpdatedAt: at,
+	}
+	if err := db.OpenWebUIWorkspaces.Create(t.Context(), workspace); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	model := domain.OpenWebUIModel{
+		ID: domain.NewID(), WorkspaceID: workspace.ID, ExternalModelID: "gpt-oss:20b",
+		DisplayName: "GPT-OSS 20B", ActorSlug: "model", ActorID: actor.ID, Active: true,
+		CreatedAt: at, UpdatedAt: at,
+	}
+	if err := db.OpenWebUIModels.Create(t.Context(), model); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if err := db.OpenWebUIWorkspaces.SetDefaultModel(t.Context(), workspace.ID, model.ID, at); err != nil {
+		t.Fatalf("set default model: %v", err)
+	}
+	return actor
+}
+
 func requireEntryBody(t *testing.T, db *sqlite.DB, entryID, want string) domain.Entry {
 	t.Helper()
 	entry, err := db.Entries.Get(t.Context(), entryID)

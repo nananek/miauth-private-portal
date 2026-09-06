@@ -478,6 +478,13 @@ type OpenWebUIWorkspaceRepository interface {
 	// UnitOfWork transaction, which is the roadmap's "workspace disable
 	// and related actor behavior must be one transaction".
 	SetEnabled(ctx context.Context, workspaceID string, enabled bool, at time.Time) error
+	// SetGenerationEnabled flips the outbound-generation gate,
+	// independent of SetEnabled. Issue #52 creates the column and this
+	// method but never calls it: there is no config key for it yet and
+	// no bridge to gate (that is Issue #53's). It exists now so #53's
+	// use-case code has a write to call rather than needing a schema or
+	// interface change of its own.
+	SetGenerationEnabled(ctx context.Context, workspaceID string, enabled bool, at time.Time) error
 	// SetCapabilityStatus records evidence about one provider operation.
 	SetCapabilityStatus(ctx context.Context, workspaceID string, chatCreate, chatContinue CapabilityStatus, at time.Time) error
 }

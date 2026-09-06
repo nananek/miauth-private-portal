@@ -64,6 +64,17 @@ type Options struct {
 	// defaultStreamPingInterval (streaming_handlers.go); tests shorten it
 	// to observe a ping/pong cycle without waiting 30+ seconds.
 	StreamPingInterval time.Duration
+
+	// VirtualActors resolves an Open WebUI model actor to the
+	// VirtualActor projection Aria sees (Issue #52). A nil value (the
+	// safe default, OPENWEBUI_ENABLED off) means resolveUserLite's
+	// existing fallback projection applies to every actor, unchanged
+	// from before this field existed. It is the narrow
+	// VirtualActorResolver interface, not internal/openwebui.Registry
+	// itself, so this package still never imports that use-case package
+	// directly — cmd/server passes its concrete *openwebui.Registry in,
+	// which already satisfies the interface structurally.
+	VirtualActors VirtualActorResolver
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

@@ -25,6 +25,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/llmreply"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/provider/openai"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
@@ -88,6 +89,32 @@ func run() error {
 	}
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{OwnerUsername: cfg.Auth.OwnerUsername})
 
+	// Constructed and seeded only when the feature is on: no
+	// openwebui_workspaces/openwebui_models row is ever written, and
+	// httpserver's VirtualActors resolver stays nil (its safe default),
+	// while OPENWEBUI_ENABLED is false. openwebui.SecretRefAPIKey is
+	// duplicated from config.KeyOpenWebUIAPIKey rather than imported
+	// (internal/openwebui depends only on internal/domain), so passing
+	// the config constant here is what keeps the two checked against
+	// each other at every startup instead of silently drifting apart.
+	var virtualActors httpserver.VirtualActorResolver
+	if cfg.OpenWebUI.Enabled {
+		registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
+			Enabled:          cfg.OpenWebUI.Enabled,
+			BaseURL:          cfg.OpenWebUI.BaseURL,
+			SecretRef:        config.KeyOpenWebUIAPIKey,
+			WorkspaceName:    cfg.OpenWebUI.WorkspaceName,
+			PresentationHost: cfg.OpenWebUI.PresentationHost,
+			ModelDisplayName: cfg.OpenWebUI.ModelDisplayNameOrDefault(),
+			ModelSlug:        cfg.OpenWebUI.ModelSlug,
+			DefaultModelID:   cfg.OpenWebUI.DefaultModelID,
+		}, nil)
+		if err := registry.Seed(ctx); err != nil {
+			return fmt.Errorf("seed openwebui registry: %w", err)
+		}
+		virtualActors = registry
+	}
+
 	opts := httpserver.Options{
 		Addr:                     cfg.HTTP.Addr(),
 		ReadTimeout:              cfg.HTTP.ReadTimeout,
@@ -101,6 +128,7 @@ func run() error {
 		TimelineService:          timelineSvc,
 		LLMEnabled:               cfg.LLM.Enabled,
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
+		VirtualActors:            virtualActors,
 	}
 
 	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)

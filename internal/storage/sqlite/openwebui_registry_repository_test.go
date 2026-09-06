@@ -315,6 +315,54 @@ func TestOpenWebUIWorkspaceRepository_SetCapabilityStatus(t *testing.T) {
 	}
 }
 
+// TestOpenWebUIWorkspaceRepository_SetGenerationEnabled backs the
+// column Issue #52 creates but never turns on: the write itself is
+// exercised here so #53 can rely on it without a schema or interface
+// change, even though no config key reaches it yet.
+func TestOpenWebUIWorkspaceRepository_SetGenerationEnabled(t *testing.T) {
+	db := newTestDB(t)
+	w, _ := mustSeedWorkspaceWithDefaultModel(t, db)
+	if err := db.OpenWebUIWorkspaces.SetEnabled(t.Context(), w.ID, true, testTime); err != nil {
+		t.Fatal(err)
+	}
+	later := testTime.Add(time.Hour)
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), w.ID, true, later); err != nil {
+		t.Fatalf("SetGenerationEnabled: %v", err)
+	}
+	got, err := db.OpenWebUIWorkspaces.Get(t.Context(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.GenerationEnabled {
+		t.Error("GenerationEnabled = false after SetGenerationEnabled(true)")
+	}
+	if !got.UpdatedAt.Equal(later) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, later)
+	}
+	if !got.Enabled {
+		t.Error("SetGenerationEnabled should not touch the independent workspace-wide Enabled gate")
+	}
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), w.ID, false, later.Add(time.Hour)); err != nil {
+		t.Fatalf("SetGenerationEnabled(false): %v", err)
+	}
+	got, err = db.OpenWebUIWorkspaces.Get(t.Context(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GenerationEnabled {
+		t.Error("GenerationEnabled = true after SetGenerationEnabled(false)")
+	}
+	if !got.Enabled {
+		t.Error("SetGenerationEnabled(false) should not disable the independent workspace-wide Enabled gate")
+	}
+
+	if err := db.OpenWebUIWorkspaces.SetGenerationEnabled(t.Context(), "does-not-exist", true, later); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("SetGenerationEnabled on an unknown workspace error = %v, want ErrNotFound", err)
+	}
+}
+
 // TestOpenWebUIRegistry_DisableWorkspaceAndModelsInOneTransaction is the
 // roadmap's "workspace disable and related actor behavior must be one
 // transaction". The repositories are per-statement; what makes the pair

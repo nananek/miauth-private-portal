@@ -26,6 +26,13 @@ var (
 	// ErrNotEditable reports an attempt to edit anything other than the
 	// owner actor's own user-authored post.
 	ErrNotEditable = errors.New("timeline: only the author's own user_post can be edited")
+	// ErrAuthorNotEligible reports that CreateGeneratedReplyBy's
+	// caller-supplied authorActorID may not author a generated reply:
+	// it is neither the assistant actor nor an active Open WebUI model
+	// actor whose workspace is enabled (Issue #52). Unlike
+	// ErrInvalidKind, this is about who is asking, not what kind of
+	// entry was requested.
+	ErrAuthorNotEligible = errors.New("timeline: actor is not eligible to author a generated reply")
 )
 
 var authorActorTypeForKind = map[domain.EntryKind]domain.ActorType{
@@ -249,6 +256,122 @@ func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string
 		return domain.Entry{}, err
 	}
 	return entry, nil
+}
+
+// CreateGeneratedReplyBy atomically creates a new llm_reply entry
+// replying to targetEntryID, authored by authorActorID rather than the
+// fixed assistant actor CreateGeneratedReply always resolves. It exists
+// for Issue #52/#53's Open WebUI bridge, whose completions are authored
+// by a VirtualActor (a per-model presentation actor, not the shared
+// assistant) and whose own turn-link bookkeeping — not an
+// internal/domain.LLMGeneration row — is what needs completing
+// atomically alongside the entry; complete is that hook, invoked inside
+// the same transaction as the entry's own creation and thread touch, and
+// may be nil.
+//
+// authorActorID must resolve to the assistant actor or to an Open WebUI
+// model actor (domain.ActorOpenWebUIModel) whose model is active and
+// whose workspace is enabled; anything else, including the owner or the
+// system actor, is ErrAuthorNotEligible. The three VirtualActor gates
+// mirror internal/openwebui.Registry.ResolveVirtualActor's — this
+// package does not import that one (AGENTS.md: use-case packages stay
+// narrow), so the check is repeated here against the same domain
+// repositories rather than shared.
+//
+// Unlike CreateGeneratedReply, this method records no self-mention (a
+// generated reply is never the owner's own post) and no Issue #23 PR6
+// "reply" notification: whether an Open WebUI-authored reply notifies is
+// Issue #53's call to make, not this one's.
+func (s *Service) CreateGeneratedReplyBy(
+	ctx context.Context, authorActorID, targetEntryID, body string,
+	complete func(ctx context.Context, repos domain.Repos, entry domain.Entry) error,
+) (domain.Entry, error) {
+	now := s.clock.Now().UTC()
+	var entry domain.Entry
+
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		author, err := repos.Actors.Get(ctx, authorActorID)
+		if err != nil {
+			return fmt.Errorf("resolve reply author: %w", err)
+		}
+		if err := checkGeneratedReplyAuthorEligible(ctx, repos, author); err != nil {
+			return err
+		}
+
+		parent, err := repos.Entries.Get(ctx, targetEntryID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return ErrParentNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("get parent entry: %w", err)
+		}
+
+		entry = domain.Entry{
+			ID:               domain.NewID(),
+			ThreadID:         parent.ThreadID,
+			ParentEntryID:    &targetEntryID,
+			Kind:             domain.EntryLLMReply,
+			AuthorActorID:    author.ID,
+			Body:             body,
+			ProcessingStatus: domain.ProcessingNone,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if err := repos.Entries.Create(ctx, entry); err != nil {
+			return err
+		}
+		if err := repos.Threads.Touch(ctx, entry.ThreadID, now); err != nil {
+			return err
+		}
+		if complete == nil {
+			return nil
+		}
+		return complete(ctx, repos, entry)
+	})
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	return entry, nil
+}
+
+// checkGeneratedReplyAuthorEligible enforces CreateGeneratedReplyBy's
+// author eligibility rule. The assistant actor is always eligible (the
+// same actor CreateGeneratedReply itself resolves); an Open WebUI model
+// actor is eligible only while its model is active and its workspace is
+// enabled — the same two gates internal/openwebui.Registry.
+// ResolveVirtualActor checks before projecting a VirtualActor, so an
+// entry is never authored by an identity the wire layer could not also
+// present. Every other actor type, including the owner and the system
+// actor, is never eligible.
+func checkGeneratedReplyAuthorEligible(ctx context.Context, repos domain.Repos, author domain.Actor) error {
+	switch author.Type {
+	case domain.ActorAssistant:
+		return nil
+	case domain.ActorOpenWebUIModel:
+		model, err := repos.OpenWebUIModels.GetByActor(ctx, author.ID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return ErrAuthorNotEligible
+			}
+			return fmt.Errorf("resolve model for reply author: %w", err)
+		}
+		if !model.Active {
+			return ErrAuthorNotEligible
+		}
+		workspace, err := repos.OpenWebUIWorkspaces.Get(ctx, model.WorkspaceID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return ErrAuthorNotEligible
+			}
+			return fmt.Errorf("resolve workspace for reply author: %w", err)
+		}
+		if !workspace.Enabled {
+			return ErrAuthorNotEligible
+		}
+		return nil
+	default:
+		return ErrAuthorNotEligible
+	}
 }
 
 // CreateExternalEntry atomically dedupes an ingested item and, only when

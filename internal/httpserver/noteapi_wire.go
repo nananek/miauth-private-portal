@@ -11,12 +11,28 @@ import (
 // userLite is the Misskey-compatible minimal user projection embedded in
 // every Note.user (docs/compat/aria-v1.5.11.md's "Minimum Note contract":
 // UserLite requires only id and username; host is nullable). host is
-// always null: this service has no federation and every actor it can
-// project is local (AGENTS.md: no federation).
+// null for every actor except one: an Open WebUI model's VirtualActor
+// (Issue #52), which resolveUserLite projects with a non-null,
+// deployment-configured presentation host. That is a fixed presentation
+// value, not federation — AGENTS.md's "no federation" is unchanged; this
+// service still does not discover, resolve, or deliver to any remote
+// host. See docs/compat/aria-v1.5.11.md's note on this one exception.
 type userLite struct {
 	ID       string  `json:"id"`
 	Username string  `json:"username"`
 	Host     *string `json:"host"`
+}
+
+// VirtualActorResolver projects an Open WebUI model actor into the
+// VirtualActor Aria sees, or reports it as not currently projectable
+// (not that actor type at all, its model deactivated, or its workspace
+// disabled). resolveUserLite treats any error identically — "fall back
+// to the plain projection" — so this package needs no internal/openwebui
+// error sentinel and, by taking this narrow interface rather than that
+// package's concrete Registry type, never imports internal/openwebui at
+// all.
+type VirtualActorResolver interface {
+	ResolveVirtualActor(ctx context.Context, actorID string) (domain.VirtualActor, error)
 }
 
 // note is the Misskey-compatible projection of one domain.Entry. Fields
@@ -139,11 +155,19 @@ func newUserLiteFromOwner(owner miauth.OwnerProfile) userLite {
 // AuthorActorID. The common case (an entry authored by the requesting
 // owner) is resolved from the already-fetched owner profile with no
 // extra lookup; any other author (the reserved assistant/system
-// presentation actors — AGENTS.md forbids any other login-capable
-// local user) falls back to one ResolveAuthor lookup to tell them apart,
-// and finally to the actor ID itself as username if even that fails,
-// so a wire projection is always produced rather than an internal error
-// surfacing mid-response.
+// presentation actors, or since Issue #52 an Open WebUI model actor —
+// AGENTS.md forbids any other login-capable local user) falls back to
+// one ResolveAuthor lookup to tell them apart, and finally to the actor
+// ID itself as username if even that fails, so a wire projection is
+// always produced rather than an internal error surfacing mid-response.
+//
+// An Open WebUI model actor additionally needs s.virtualActors to
+// resolve successfully (its model active, its workspace enabled) before
+// it gets the remote-looking projection; if either check fails — most
+// commonly s.virtualActors being nil because OPENWEBUI_ENABLED is off —
+// it falls through to the same actor-ID-as-username fallback every
+// unresolvable author gets, never a host that names a disabled or
+// nonexistent workspace.
 func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owner miauth.OwnerProfile) userLite {
 	if authorActorID == owner.ActorID {
 		return newUserLiteFromOwner(owner)
@@ -155,6 +179,13 @@ func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owne
 				return userLite{ID: authorActorID, Username: "assistant"}
 			case domain.ActorSystem:
 				return userLite{ID: authorActorID, Username: "system"}
+			case domain.ActorOpenWebUIModel:
+				if s.virtualActors != nil {
+					if virtual, err := s.virtualActors.ResolveVirtualActor(ctx, authorActorID); err == nil {
+						host := virtual.Host
+						return userLite{ID: authorActorID, Username: virtual.Slug, Host: &host}
+					}
+				}
 			}
 		}
 	}

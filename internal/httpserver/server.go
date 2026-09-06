@@ -41,6 +41,11 @@ type Server struct {
 	localOrigin              string
 	llmEnabled               bool
 	llmClassificationEnabled bool
+	// virtualActors resolves an Open WebUI model actor to the
+	// VirtualActor Aria sees (Issue #52). A nil value (the default,
+	// OPENWEBUI_ENABLED off) leaves resolveUserLite's existing fallback
+	// projection untouched for every actor.
+	virtualActors VirtualActorResolver
 
 	// streamSem bounds concurrent GET /streaming connections; see
 	// maxConcurrentStreamConnections (streaming_handlers.go).
@@ -83,6 +88,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		localOrigin:              opts.LocalOrigin,
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
+		virtualActors:            opts.VirtualActors,
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
 	}

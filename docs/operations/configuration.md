@@ -117,6 +117,15 @@ catch that class of mistake during local development.
 | `IMAP_STORE_FULL_BODY` | no | `false` | When `false` (the default), only a bounded snippet (`IMAP_SNIPPET_MAX_CHARS`) is stored per message, not the full body. |
 | `IMAP_FULL_BODY_MAX_CHARS` | no | `20000` | 1-1000000. Upper bound on a stored body's length when `IMAP_STORE_FULL_BODY=true`; ignored otherwise. |
 | `IMAP_MAILFETCH_SOCKET` | no | `/run/mailfetch/mailfetch.sock` | Unix domain socket path `internal/ingest/imap` dials and `cmd/mailfetch` listens on (`MAILFETCH_SOCKET_PATH`, `cmd/mailfetch`'s own, separate environment variable — see below). Both default to the same path so a deployment that overrides neither still lines up. |
+| `OPENWEBUI_ENABLED` | no | `false` | Gates Issue #52's Open WebUI registry and identity projection entirely. While `false`, no `openwebui_workspaces`/`openwebui_models` row is ever seeded, no actor projects as a remote user, and no other `OPENWEBUI_*` value is validated. |
+| `OPENWEBUI_BASE_URL` | required if `OPENWEBUI_ENABLED=true` | `""` | The Open WebUI instance's origin: `https` only, in every environment (not only production), scheme+host only (no userinfo, path, query, or fragment — the same shape `LOCAL_ORIGIN` enforces, minus the `http` option). Must appear verbatim in `OPENWEBUI_ALLOWED_ORIGINS`. |
+| `OPENWEBUI_ALLOWED_ORIGINS` | required if `OPENWEBUI_ENABLED=true` | `""` | Comma-separated fixed HTTPS origin allowlist (ADR-0005 D11); same splitting rule as `ARIA_CLIENT_CALLBACKS`/`RSS_FEED_URLS`. `OPENWEBUI_BASE_URL` must be an exact-match member. A Tailnet origin belongs here only if listed explicitly — nothing is inferred. |
+| `OPENWEBUI_API_KEY` | required if `OPENWEBUI_ENABLED=true` | `""` | Bearer credential for `OPENWEBUI_BASE_URL` (ADR-0005 D10). Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. The registry stores only this key's *name* (`secret_ref`), never its value. |
+| `OPENWEBUI_WORKSPACE_NAME` | no | `Open WebUI` | The seeded workspace's display name. |
+| `OPENWEBUI_DEFAULT_MODEL_ID` | required if `OPENWEBUI_ENABLED=true` | `""` | The provider's own opaque model id (ADR-0005 D9: a `GET /api/models` `data[].id`, or a workspace custom-model id from `GET /api/v1/models`). Trimmed of surrounding whitespace only — never case-folded, split, or otherwise reshaped; it is never regenerated from a display name. |
+| `OPENWEBUI_MODEL_DISPLAY_NAME` | no | `OPENWEBUI_DEFAULT_MODEL_ID`'s value | The seeded model's display name. |
+| `OPENWEBUI_MODEL_SLUG` | no | `model` | 1-32 lowercase ASCII letters, digits, or underscores. The local half of the VirtualActor handle `@<slug>@<presentation host>`. Must not collide (case-insensitively) with `OWNER_USERNAME` or the reserved `assistant`/`system` names. |
+| `OPENWEBUI_PRESENTATION_HOST` | required if `OPENWEBUI_ENABLED=true` | `""` | A bare lowercase DNS hostname (no scheme, port, path, or trailing dot) — a fixed, deployment-provisioned presentation value, never inferred from `OPENWEBUI_BASE_URL`. Must differ from `LOCAL_ORIGIN`'s host: a `UserLite` with a null host means "local to this service", so reusing the local host here would make a VirtualActor indistinguishable from a local actor. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -842,6 +851,131 @@ adapter, and `docs/compat/aria-v1.5.11.md` for the per-kind `Body` shapes.
   ideally under its own low-privilege OS user, with
   `MAILFETCH_SOCKET_PATH` pointing at a directory both it and `bin/server`
   (via `IMAP_MAILFETCH_SOCKET`) can reach.
+
+## Open WebUI bridge (registry and identity projection)
+
+Issue #52 (OWUI-P, `docs/roadmap/openwebui.md`). Unlike RSS/IMAP, Open
+WebUI is an **outbound** provider this service talks to, not an inbound
+source it ingests from — it has no `## <Kind> ingestion` adapter-contract
+row in the table above, and it is not wired through `cmd/server`'s
+ingestion scheduler at all. What exists as of this issue is the registry
+(one configured Open WebUI instance and model) and the identity
+projection (that model presented to Aria as a VirtualActor); the actual
+outbound chat bridge — sending an Aria message to Open WebUI and turning
+its reply into a local entry — is Issue #53's, not implemented yet.
+
+### Feature flag and startup seeding
+
+`OPENWEBUI_ENABLED` gates the feature entirely, the same safe-default
+shape as `LLM_ENABLED`/`RSS_ENABLED`/`IMAP_ENABLED`. While `false`, the
+`openwebui_workspaces`/`openwebui_models` tables (added by migration
+`0017`) stay empty and no actor ever projects as a VirtualActor.
+
+When `true`, `cmd/server` constructs an `internal/openwebui.Registry` and
+calls `Seed` once at startup, right after `EnsureReservedActors`. `Seed`
+reconciles the configured workspace and model into the registry in one
+transaction, idempotently:
+
+1. Find or create the workspace by `OPENWEBUI_BASE_URL` (its unique key);
+   update its name/presentation host/secret ref if it already exists.
+2. Find or create the model by `OPENWEBUI_DEFAULT_MODEL_ID` within that
+   workspace, minting its `actors` row (`actor_type='openwebui_model'`,
+   migration `0016`) the first time it is seen; update its display
+   name/handle slug if it already exists.
+3. Point the workspace's `default_model_id` at that model.
+4. Deactivate every other model in the workspace: the MVP publishes only
+   the configured default model as an actor.
+5. Enable the workspace.
+
+Re-running `Seed` with a changed `OPENWEBUI_MODEL_DISPLAY_NAME` or
+`OPENWEBUI_MODEL_SLUG` updates those presentation fields without
+disturbing the workspace id, the model id, or the model's `actor_id` —
+the roadmap's "a model actor's stable local ID must survive display-name
+or handle changes" requirement. Startup fails closed (the server does
+not start) if `Seed` returns an error, which includes every
+`OPENWEBUI_*` validation `Config.Validate` already performs before
+`Seed` ever runs, plus `internal/openwebui.ErrInvalidSecretRef` if the
+stored `secret_ref` is ever anything other than the one credential key
+this service knows how to resolve (`OPENWEBUI_API_KEY`).
+
+### Owner-only
+
+There is no HTTP endpoint or CLI for changing a workspace or a model.
+Configuration is the only interface, in exactly the sense ADR-0002 means
+"owner-only": only someone with host access to edit the config file and
+restart the process can change it — the same principle
+`OWNER_USERNAME`/`OWNER_DISPLAY_NAME` and RSS's `RSS_FEED_URLS` startup
+seeding already rely on. `internal/openwebui.Registry`'s few change
+methods used by later issues (`SetGenerationEnabled`,
+`SetCapabilityStatus`, `RenameModel`) additionally re-check their caller
+against the database (`actor.IsLoginable()`), returning `ErrNotOwner`
+otherwise — a second, structural lock behind the "no endpoint exists"
+lock, for whenever a future issue does add one.
+
+### VirtualActor
+
+The seeded model is presented to Aria as `@<slug>@<presentation
+host>` — a `userLite` with a non-null `host`, the one exception to "host
+is always null" now noted on that type's own doc comment
+(`internal/httpserver/noteapi_wire.go`). This is a fixed presentation
+value, not federation: the host is never discovered, resolved, or
+delivered to (AGENTS.md's "no federation" is unchanged). Structurally, a
+VirtualActor:
+
+- is **never login-capable**: `domain.Actor.IsLoginable()`/`CanMiAuth()`
+  are `false` for `actor_type='openwebui_model'`, and `internal/miauth`
+  only ever binds a session or issues a token to the owner actor
+  (`docs/operations/security-regression.md`'s VirtualActor-exclusion
+  tests are the mechanical evidence).
+- **cannot own a credential**: `domain.Actor.CanOwnSecret()` is `false`
+  for every actor type — `OPENWEBUI_API_KEY` lives in configuration, and
+  the database stores only its key name (ADR-0005 D10).
+- **can author a reply**: `internal/timeline.Service.
+  CreateGeneratedReplyBy` accepts either the assistant actor or an
+  active Open WebUI model actor whose workspace is enabled as an entry's
+  author, which is Issue #53's hook for completing an Open WebUI
+  generation the same atomic way `CreateGeneratedReply` completes an
+  `LLMGeneration` — but records no self-mention and no "reply"
+  notification itself (Issue #53's call to make, not this one's).
+- **falls back cleanly when not resolvable**: if the model is
+  deactivated or its workspace disabled after an entry already exists,
+  `resolveUserLite` falls back to the same actor-ID-as-username
+  projection any other unresolvable author gets, rather than presenting
+  a stale or partially-filled remote identity.
+
+### Conversation-link state machine (for Issue #53)
+
+Migration `0018` and `internal/domain`'s `LinkState`/`LinkTransition`
+already exist so #53 has a schema and a tested state machine to build
+its bridge on; #52 stores no row that reaches any state but `unlinked`
+(no row at all — nothing ever calls `Claim` yet). The machine itself,
+reproduced from `docs/roadmap/openwebui.md`:
+
+```text
+unlinked --claim--> creation_pending --confirmed--> ready
+                         |                         |
+                         |                         +--uncertain continuation--> ambiguous
+                         +--definitive failure--> failed
+                         +--uncertain/lost response or lease expiry--> ambiguous
+
+ambiguous --owner confirms the same chat--> ready
+ambiguous --owner abandons branch-------> dead
+```
+
+A `creation_pending` link's single claimed `StartChat` is the only
+create call it may ever make (`OpenWebUIConversationLink.
+AllowsInitialStartChat` checks the claiming job id); `ambiguous`/
+`failed`/`dead` permit no automatic retry at all
+(`AllowsAutoRetry() == false` unconditionally). See ADR-0005 for the
+full provider-contract reasoning this machine encodes.
+
+### Table rebuild note
+
+Migration `0016` (widening `actors.actor_type` to admit
+`openwebui_model`) is this repository's first migration to use the
+`-- migrate:rebuild` directive documented under "Migrations" above; read
+that subsection for what the directive does and why it was necessary
+here specifically.
 
 ## Adding a source adapter
 

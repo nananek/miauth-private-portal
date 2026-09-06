@@ -128,6 +128,17 @@ func (r *openWebUIWorkspaceRepository) SetEnabled(ctx context.Context, workspace
 	return requireRowAffected(res)
 }
 
+func (r *openWebUIWorkspaceRepository) SetGenerationEnabled(ctx context.Context, workspaceID string, enabled bool, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE openwebui_workspaces SET generation_enabled = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(enabled), formatTime(at), workspaceID,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
 func (r *openWebUIWorkspaceRepository) SetCapabilityStatus(
 	ctx context.Context, workspaceID string, chatCreate, chatContinue domain.CapabilityStatus, at time.Time,
 ) error {

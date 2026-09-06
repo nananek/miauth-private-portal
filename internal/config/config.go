@@ -39,6 +39,9 @@ type Config struct {
 	LLM  LLMConfig
 	RSS  RSSConfig
 	IMAP IMAPConfig
+	// OpenWebUI configures Issue #52's Open WebUI registry and identity
+	// projection. Like LLM/RSS/IMAP it is off by default.
+	OpenWebUI OpenWebUIConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -259,6 +262,75 @@ type IMAPConfig struct {
 	// MailfetchSocket is the Unix domain socket path cmd/mailfetch
 	// listens on and internal/ingest/imap dials.
 	MailfetchSocket string
+}
+
+// OpenWebUIConfig configures Issue #52's Open WebUI registry and
+// VirtualActor projection. Enabled defaults to false, the same safe
+// default LLMConfig/RSSConfig/IMAPConfig use: with it off, no registry
+// row is seeded, no VirtualActor is projected, and every Note this
+// service returns is byte-for-byte what it was before the feature
+// existed.
+//
+// This is the whole configuration surface for the feature. There is no
+// HTTP endpoint and no CLI for changing a workspace or a model: the
+// values below are the owner-only path, in exactly the sense ADR-0002
+// means it — only someone with host access can edit them (see
+// docs/operations/configuration.md's Open WebUI section).
+type OpenWebUIConfig struct {
+	// Enabled gates registry seeding and the VirtualActor projection
+	// entirely. False is the safe default.
+	Enabled bool
+	// BaseURL is the Open WebUI instance's HTTPS origin (scheme and host
+	// only). It must appear verbatim in AllowedOrigins: the allowlist is
+	// the boundary, and the configured target is checked against it
+	// rather than being trusted for being configured (ADR-0005 D11).
+	//
+	// Unlike LOCAL_ORIGIN and LLM_BASE_URL, https is required in every
+	// environment, not only production. A development deployment
+	// pointing at a plaintext instance would send the API key in the
+	// clear over whatever network sits between them.
+	BaseURL string
+	// AllowedOrigins is the fixed HTTPS origin allowlist. A tailnet
+	// origin belongs here only if an operator lists it explicitly;
+	// nothing is inferred.
+	AllowedOrigins []string
+	// APIKey authenticates against BaseURL (ADR-0005 D10). Never logged
+	// or returned to a client; see Redacted. What the database stores is
+	// the *name* of this key, never its value.
+	APIKey string
+	// WorkspaceName is the workspace's display name.
+	WorkspaceName string
+	// DefaultModelID is the provider's own opaque model id. It is used
+	// verbatim apart from trimming surrounding whitespace: ADR-0005 D9
+	// makes it opaque, so nothing here lowercases, splits, or otherwise
+	// reshapes it.
+	DefaultModelID string
+	// ModelDisplayName is the model's display name. Empty falls back to
+	// DefaultModelID; see ModelDisplayNameOrDefault.
+	ModelDisplayName string
+	// ModelSlug is the local half of the VirtualActor handle
+	// (@<slug>@<presentation host>). It must not collide with
+	// OWNER_USERNAME or with the reserved assistant/system presentation
+	// names, all of which already appear as a UserLite username.
+	ModelSlug string
+	// PresentationHost is the host half of that handle. It is a fixed
+	// deployment-provisioned value, never inferred from BaseURL, and it
+	// must differ from LOCAL_ORIGIN's host: a UserLite whose host is
+	// null means "local to this service", so reusing the local host for
+	// a remote-presented actor would make the two indistinguishable.
+	PresentationHost string
+}
+
+// ModelDisplayNameOrDefault returns ModelDisplayName, falling back to
+// the opaque provider model id when unset. The same shape as
+// LLMConfig.ClassificationModelOrDefault: a deployment that has not
+// bothered to name the model still gets something meaningful rather than
+// an empty display name.
+func (c OpenWebUIConfig) ModelDisplayNameOrDefault() string {
+	if c.ModelDisplayName != "" {
+		return c.ModelDisplayName
+	}
+	return c.DefaultModelID
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -506,6 +578,18 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.IMAP.FullBodyMaxChars = parseOptionalInt(values, KeyIMAPFullBodyMaxChars, 20_000, imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax, &errs)
 	cfg.IMAP.MailfetchSocket = parseOptionalString(values, KeyIMAPMailfetchSocket, "/run/mailfetch/mailfetch.sock")
 
+	cfg.OpenWebUI.Enabled = parseOptionalBool(values, KeyOpenWebUIEnabled, false, &errs)
+	cfg.OpenWebUI.BaseURL = strings.TrimRight(parseOptionalString(values, KeyOpenWebUIBaseURL, ""), "/")
+	cfg.OpenWebUI.AllowedOrigins = splitOptionalURLList(values, KeyOpenWebUIAllowedOrigins)
+	cfg.OpenWebUI.APIKey = parseOptionalString(values, KeyOpenWebUIAPIKey, "")
+	cfg.OpenWebUI.WorkspaceName = parseOptionalString(values, KeyOpenWebUIWorkspaceName, "Open WebUI")
+	// Trimmed but otherwise untouched: the provider's model id is opaque
+	// (ADR-0005 D9), so this must not case-fold or otherwise reshape it.
+	cfg.OpenWebUI.DefaultModelID = strings.TrimSpace(parseOptionalString(values, KeyOpenWebUIDefaultModelID, ""))
+	cfg.OpenWebUI.ModelDisplayName = parseOptionalString(values, KeyOpenWebUIModelDisplayName, "")
+	cfg.OpenWebUI.ModelSlug = parseOptionalString(values, KeyOpenWebUIModelSlug, "model")
+	cfg.OpenWebUI.PresentationHost = parseOptionalString(values, KeyOpenWebUIPresentationHost, "")
+
 	return cfg, errs
 }
 
@@ -638,6 +722,26 @@ func (c Config) Validate() error {
 		validateIntBounds(&errs, KeyIMAPFullBodyMaxChars, c.IMAP.FullBodyMaxChars, imapFullBodyMaxCharsMin, imapFullBodyMaxCharsMax)
 	}
 
+	// Open WebUI fields are only required/checked when the feature is
+	// actually enabled, the same shape LLM/RSS/IMAP use: OPENWEBUI_ENABLED
+	// defaults to false, and a disabled deployment must not fail startup
+	// over a setting it will never read.
+	if c.OpenWebUI.Enabled {
+		validateOpenWebUIOrigins(&errs, KeyOpenWebUIAllowedOrigins, c.OpenWebUI.AllowedOrigins)
+		validateOpenWebUIBaseURL(&errs, KeyOpenWebUIBaseURL, c.OpenWebUI.BaseURL, c.OpenWebUI.AllowedOrigins)
+		if c.OpenWebUI.APIKey == "" {
+			errs = append(errs, FieldError{Key: KeyOpenWebUIAPIKey, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
+		}
+		if c.OpenWebUI.WorkspaceName == "" {
+			errs = append(errs, FieldError{Key: KeyOpenWebUIWorkspaceName, Reason: "must not be empty"})
+		}
+		if c.OpenWebUI.DefaultModelID == "" {
+			errs = append(errs, FieldError{Key: KeyOpenWebUIDefaultModelID, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
+		}
+		validateOpenWebUIModelSlug(&errs, KeyOpenWebUIModelSlug, c.OpenWebUI.ModelSlug, c.Auth.OwnerUsername)
+		validateOpenWebUIPresentationHost(&errs, KeyOpenWebUIPresentationHost, c.OpenWebUI.PresentationHost, c.Auth.LocalOrigin)
+	}
+
 	if c.Env == EnvProduction {
 		if c.Log.Format != "json" {
 			errs = append(errs, FieldError{Key: KeyLogFormat, Reason: "must be json in production"})
@@ -726,6 +830,21 @@ func (c Config) Redacted() map[string]string {
 		KeyIMAPStoreFullBody:    strconv.FormatBool(c.IMAP.StoreFullBody),
 		KeyIMAPFullBodyMaxChars: strconv.Itoa(c.IMAP.FullBodyMaxChars),
 		KeyIMAPMailfetchSocket:  c.IMAP.MailfetchSocket,
+
+		KeyOpenWebUIEnabled:        strconv.FormatBool(c.OpenWebUI.Enabled),
+		KeyOpenWebUIBaseURL:        c.OpenWebUI.BaseURL,
+		KeyOpenWebUIAllowedOrigins: strings.Join(c.OpenWebUI.AllowedOrigins, ","),
+		// OPENWEBUI_API_KEY is a secret credential for a third-party
+		// endpoint, treated exactly like LLM_API_KEY: only whether it is
+		// set is shown. The database stores this key's *name* as a
+		// workspace's secret_ref (ADR-0005 D10), never the value shown
+		// here as <set>.
+		KeyOpenWebUIAPIKey:           redactedSetOrUnset(c.OpenWebUI.APIKey),
+		KeyOpenWebUIWorkspaceName:    c.OpenWebUI.WorkspaceName,
+		KeyOpenWebUIDefaultModelID:   c.OpenWebUI.DefaultModelID,
+		KeyOpenWebUIModelDisplayName: c.OpenWebUI.ModelDisplayName,
+		KeyOpenWebUIModelSlug:        c.OpenWebUI.ModelSlug,
+		KeyOpenWebUIPresentationHost: c.OpenWebUI.PresentationHost,
 	}
 }
 
@@ -1015,6 +1134,118 @@ var ownerUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 func validateOwnerUsername(errs *[]FieldError, key, v string) bool {
 	if !ownerUsernamePattern.MatchString(v) {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must be a non-empty string of ASCII letters, digits, and underscores"})
+		return false
+	}
+	return true
+}
+
+// openWebUIModelSlugPattern bounds OPENWEBUI_MODEL_SLUG to the local
+// half of a Misskey-style handle: lowercase ASCII letters, digits and
+// underscores. It is deliberately narrower than ownerUsernamePattern
+// (which allows uppercase): the handle's host half is a DNS name, which
+// is case-insensitive, so allowing case here would let two visually
+// distinct handles mean the same thing.
+var openWebUIModelSlugPattern = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+
+// openWebUIPresentationHostPattern bounds OPENWEBUI_PRESENTATION_HOST to
+// a lowercase DNS hostname: labels of letters, digits and hyphens
+// separated by dots, with no scheme, port, path, or trailing dot. It is
+// a presentation value that appears verbatim in a UserLite's host field,
+// so anything a client might try to resolve or parse as a URL is
+// rejected here rather than surfacing in a wire payload.
+var openWebUIPresentationHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// validateOpenWebUIOrigins checks OPENWEBUI_ALLOWED_ORIGINS is a
+// non-empty list of HTTPS origins. Unlike validateOrigin (LOCAL_ORIGIN)
+// http is never accepted, in any environment: this list is what bounds
+// where an API key may be sent (ADR-0005 D11), so a plaintext entry
+// would defeat the point of having it.
+func validateOpenWebUIOrigins(errs *[]FieldError, key string, list []string) bool {
+	if len(list) == 0 {
+		*errs = append(*errs, FieldError{Key: key, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
+		return false
+	}
+	ok := true
+	for _, origin := range list {
+		if !isHTTPSOrigin(origin) {
+			*errs = append(*errs, FieldError{Key: key, Reason: "each entry must be an https origin URL with no userinfo, path, query, or fragment"})
+			ok = false
+		}
+	}
+	return ok
+}
+
+// validateOpenWebUIBaseURL checks OPENWEBUI_BASE_URL is an HTTPS origin
+// that the allowlist actually permits. The exact-match membership test
+// is the point: an allowlist the configured target is not required to
+// satisfy would be documentation rather than a control.
+func validateOpenWebUIBaseURL(errs *[]FieldError, key, v string, allowed []string) bool {
+	if v == "" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
+		return false
+	}
+	if !isHTTPSOrigin(v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be an https origin URL with no userinfo, path, query, or fragment"})
+		return false
+	}
+	if !slices.Contains(allowed, v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must appear verbatim in " + KeyOpenWebUIAllowedOrigins})
+		return false
+	}
+	return true
+}
+
+// isHTTPSOrigin reports whether v is an absolute https URL naming only a
+// scheme and a host, the same origin shape validateOrigin enforces for
+// LOCAL_ORIGIN minus the http option.
+func isHTTPSOrigin(v string) bool {
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return false
+	}
+	return u.User == nil && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == ""
+}
+
+// validateOpenWebUIModelSlug checks OPENWEBUI_MODEL_SLUG's character set
+// and that it does not collide with a username this service already
+// projects. The owner's username and the reserved assistant/system names
+// all appear in a UserLite.username, so a VirtualActor reusing one would
+// present two different actors under one handle.
+func validateOpenWebUIModelSlug(errs *[]FieldError, key, v, ownerUsername string) bool {
+	if !openWebUIModelSlugPattern.MatchString(v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be 1-32 lowercase ASCII letters, digits, or underscores"})
+		return false
+	}
+	// Compared case-insensitively against the owner's username, which
+	// may contain uppercase: "Owner" and "owner" would read as the same
+	// handle to a person even though the bytes differ.
+	if strings.EqualFold(v, ownerUsername) || v == "assistant" || v == "system" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must not collide with " + KeyOwnerUsername + " or the reserved names assistant/system"})
+		return false
+	}
+	return true
+}
+
+// validateOpenWebUIPresentationHost checks OPENWEBUI_PRESENTATION_HOST
+// is a bare lowercase hostname and is not this service's own host.
+//
+// The second check is what keeps the projection honest: a UserLite with
+// a null host means "local to this service", and every actor but a
+// VirtualActor projects that way. If the VirtualActor's presentation
+// host were this service's own host, a client would have two different
+// spellings for the same place and no way to tell a local actor from a
+// presented one.
+func validateOpenWebUIPresentationHost(errs *[]FieldError, key, v, localOrigin string) bool {
+	if v == "" {
+		*errs = append(*errs, FieldError{Key: key, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
+		return false
+	}
+	if !openWebUIPresentationHostPattern.MatchString(v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be a lowercase DNS hostname with no scheme, port, path, or trailing dot"})
+		return false
+	}
+	if u, err := url.Parse(localOrigin); err == nil && u.Hostname() != "" && strings.EqualFold(u.Hostname(), v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must differ from " + KeyLocalOrigin + "'s host"})
 		return false
 	}
 	return true
