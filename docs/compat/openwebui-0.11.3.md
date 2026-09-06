@@ -251,10 +251,11 @@ unset, the stored user message keeps `parentId: null` and the previous
 assistant's `childrenIds` is not updated, so each turn lands as its own
 disconnected pair instead of extending the chain.
 [`duplicate_delivery_chat.json`](fixtures/openwebui/duplicate_delivery_chat.json)
-is that failure preserved: six follow-ups were sent to one chat with
-`parent_id` set, and all six user messages still have `parentId: null`, giving
-six orphan pairs rather than one branch. The client must set both fields —
-which is what [`chat_after_continue.json`](fixtures/openwebui/chat_after_continue.json)
+is that failure preserved: none of that chat's six turns set
+`user_message.parentId`, and the five follow-ups among them each named an
+existing assistant message in `parent_id`, yet all six user messages still sit
+at `parentId: null` — six orphan pairs rather than one branch. The client must
+set both fields — which is what [`chat_after_continue.json`](fixtures/openwebui/chat_after_continue.json)
 shows working.
 
 **(c) `messages` is entirely caller-supplied.** The server does not rebuild
@@ -302,8 +303,11 @@ buffered response is a bare completion with no `chat_id` in the body or headers
 ([`completions_only_newchat_response.json`](fixtures/openwebui/completions_only_newchat_response.json)
 vs. the chat it silently created,
 [`completions_only_newchat_chat.json`](fixtures/openwebui/completions_only_newchat_chat.json)).
-The only way to recover the id would be to diff the chat list, which this
-integration refuses to do. This is why the chat is pre-created (ADR-0005 D3).
+The only way to recover the id from a buffered call would be to diff the chat
+list, which this integration refuses to do. (The `stream:true` + `session_id`
+form in (h) *does* return the new chat's id in-band, but it delivers no content
+over HTTP, so it is not an alternative.) This is why the chat is pre-created
+(ADR-0005 D3).
 
 **(g) `background_tasks`** accepts
 `{title_generation, tags_generation, follow_up_generation}`; setting all three
@@ -316,7 +320,7 @@ chunks usefully over plain HTTP:
 | Request | Response | Persistence |
 | --- | --- | --- |
 | no `chat_id` | 200 `text/event-stream`, the upstream SSE passed straight through ([`sse_passthrough_finish.sse.txt`](fixtures/openwebui/sse_passthrough_finish.sse.txt)) | none |
-| `chat_id` + `id` + `session_id` | 200 JSON `{"status":true,"task_ids":["…"],"chat_id":"…"}` returned immediately ([`streaming_task_response.json`](fixtures/openwebui/streaming_task_response.json)) | generated in the background and saved |
+| `id` + `session_id`, with or without `chat_id` | 200 JSON `{"status":true,"task_ids":["…"],"chat_id":"…"}` returned immediately ([`streaming_task_response.json`](fixtures/openwebui/streaming_task_response.json), captured from the no-`chat_id` variant, so its `chat_id` is the id of the chat the call had just created) | generated in the background and saved |
 | `chat_id` + `id`, no `session_id` | 200 JSON `null` ([`streaming_no_session_response.json`](fixtures/openwebui/streaming_no_session_response.json)) | generated in the background and saved |
 
 The chunks for the latter two go out over socket.io, not HTTP. The passed-
@@ -349,7 +353,14 @@ Returns the same `ChatResponse` shape. The tree lives in
   object ([`error_chat_managed_message_state.json`](fixtures/openwebui/error_chat_managed_message_state.json)).
   The **user** message never carries `done` at all.
 - `chat.history.currentId` and the top-level `current_message_id` both point at
-  the newest assistant message and stay in sync in every capture.
+  the newest assistant message and stay in sync in every capture. They advance
+  to a **failed** message as well: in
+  [`duplicate_delivery_chat.json`](fixtures/openwebui/duplicate_delivery_chat.json)
+  both fields name the upstream-429 turn's assistant node, which carries
+  `done: false` and an `error`. So `currentId` is "the newest turn", never "the
+  newest *successful* turn" — it may be adopted as `remote_current_id`, and
+  used as the next turn's `parent_id`, only after the `done: true` check
+  below.
 - `chat.messages` (the flat array) is **not** maintained by the server — it
   stays `[]` for a bridge-created chat. Only `chat.history` is authoritative.
 - This is the endpoint that turns the chat-managed path's ambiguous HTTP 200
@@ -410,7 +421,7 @@ an ordering key, or an authorization input (ADR-0005 D2).
 | `ChatResponse.id` | server-assigned at `POST /api/v1/chats/new` | `remote_chat_id` | UUID; known before the first generation |
 | completions `user_message.id` / `id` | **client-generated UUIDs** in the request | `remote_message_id` | The server stores them verbatim as the user/assistant message ids |
 | `message.parentId` | client-supplied | `remote_parent_id` | Not validated by the server |
-| `history.currentId` = `current_message_id` | server-maintained | `remote_current_id` | Points at the newest assistant message |
+| `history.currentId` = `current_message_id` | server-maintained | `remote_current_id` | Points at the newest assistant message, including a failed one — only adopt it after confirming `done: true` |
 | completion `id` (`chatcmpl-…`) | the upstream model provider | *not stored as an id* | Keep at most as provenance; it is not an Open WebUI identifier |
 
 Because message ids are client-generated, a turn's correlation keys exist
@@ -510,7 +521,7 @@ All fixtures live in [`fixtures/openwebui/`](fixtures/openwebui/).
 | `sse_duplicate_chunk.sse.txt` | **synthetic**, derived from the above | A repeated chunk, indistinguishable on the wire |
 | `sse_out_of_order_chunk.sse.txt` | **synthetic**, derived from the above | Transposed chunks, silently corrupting naive concatenation |
 | `sse_truncated_no_done.sse.txt` | **synthetic**, derived from the above | Response loss: no finish event, no `[DONE]` |
-| `streaming_task_response.json` | observed | `{"status":true,"task_ids":[…],"chat_id":…}` for `stream:true` + `session_id` |
+| `streaming_task_response.json` | observed | `{"status":true,"task_ids":[…],"chat_id":…}` for `stream:true` + `session_id`, here creating a new chat, whose id therefore does come back in-band |
 | `streaming_no_session_response.json` | observed | Literal `null` for `stream:true` without `session_id` |
 | `fork_response_reference.json` | observed | What `/fork` returns, and how a broken chain truncates it |
 | `error_401_not_authenticated.json` | **synthetic**, from the recorded response text | Missing-credential shape |

@@ -67,9 +67,9 @@ OWUI-R are separate child issue/PR units; they were filed on 2026-09-06 as
 #51, #52, #53, and #54 under Open WebUI umbrella issue #50. Each
 implementation PR must handle exactly one child, link the applicable parent
 requirement, use `Closes #<child>` for that child only, and never close #50,
-#1, or #2 as a side effect. The current Issue #2 contract-document PR is not one of those OWUI
-children. The outbound revision supersedes the former import-oriented OWUI-S
-label.
+#1, or #2 as a side effect. The current Issue #2 contract-document PR is not
+one of those OWUI children. The outbound revision supersedes the former
+import-oriented OWUI-S label.
 
 The existing #7 Misskey wire layer remains the transport consumer for any
 Aria-visible projection and keeps its original #2/#5/#6 dependency order.

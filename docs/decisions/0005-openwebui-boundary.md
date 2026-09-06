@@ -89,7 +89,9 @@ remote message id.
 Turn completion is confirmed by `GET /api/v1/chats/{id}` and reading
 `chat.history.messages[<assistant id>].done` and `.content`, with
 `chat.history.currentId` (mirrored by `current_message_id`) recorded as
-`remote_current_id`.
+`remote_current_id` **only once that `done` is true**. The server advances
+`currentId` onto a failed assistant message too, so recording it unconditionally
+would parent the next turn on a node that holds an error and no content.
 
 The alternative — letting a completions call create the chat implicitly — is
 rejected: it works, but the buffered response contains no `chat_id` anywhere,
