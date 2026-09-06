@@ -72,7 +72,7 @@ type Config struct {
 }
 
 // Client calls the three endpoints docs/compat/openwebui-0.11.3.md
-// classifies 必要: POST /api/v1/chats/new, POST /api/chat/completions,
+// classifies: POST /api/v1/chats/new, POST /api/chat/completions,
 // and GET /api/v1/chats/{id}.
 type Client struct {
 	baseURL          string
