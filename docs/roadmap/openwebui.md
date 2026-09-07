@@ -909,11 +909,18 @@ reclaimable; releasing a live lease could issue a duplicate remote turn.
 The feature must preserve #1's single-owner and non-federation boundaries,
 and this service's own non-tool-execution boundary (tool execution,
 including any MCP-backed tool, always happens inside the Open WebUI instance
-itself, never in this codebase — Issue #72). Shared provider code with #9
-may be reused, but outbound chat creation/continuation and VirtualActor
-remain behind a separate feature flag and release gate. Existing Open WebUI
-chat import and pull-sync code is deliberately not a deferred TODO; it is
-outside this track.
+itself, never in this codebase — Issue #72). Making that opt-in request
+actually complete (rather than leaving the assistant message wedged at
+`done:false` forever, or silently no-op'ing for `features.web_search`) turned
+out to need one more request-level flag, `params.function_calling: "legacy"`
+— Issue #74's fix, verified against a real locally run instance; see
+ADR-0005 D17 and `docs/compat/openwebui-0.11.3.md`'s Phase 0 observation
+record for the mechanism and the evidence. This did not move the scope
+boundary above; it only fixed how the already-in-scope request behaves.
+Shared provider code with #9 may be reused, but outbound chat
+creation/continuation and VirtualActor remain behind a separate feature
+flag and release gate. Existing Open WebUI chat import and pull-sync code
+is deliberately not a deferred TODO; it is outside this track.
 
 ## Issue #1/#2 traceability
 

@@ -49,6 +49,36 @@ func TestBuildTurnPath_LinearOwnerAndAssistantRoles(t *testing.T) {
 	}
 }
 
+// TestProviderMessages_NeverProducesSystemRole is Issue #74 Phase 3's
+// regression coverage for ADR-0005 D4's "no system prompt" rule: every
+// PathNode.Role ProviderMessages can ever see is pathRoleUser or
+// pathRoleAssistant (buildPathRole's only two return values), so a
+// locally assembled turn can never accidentally carry a role:"system"
+// message toward the provider — no code change was needed for this
+// (roadmap: "The sequence carries no local IDs, Misskey metadata,
+// credentials, system prompt"), only this explicit assertion that it
+// stays true.
+func TestProviderMessages_NeverProducesSystemRole(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "message 0")
+	a0 := env.mustCreateReplyAs(t, m0, env.assistantActorID(t), domain.EntryLLMReply, "assistant reply 0")
+	m1 := env.mustCreateReply(t, a0, "message 1")
+
+	path, err := BuildTurnPath(t.Context(), env.db.Repos, m1, PathBounds{MaxContextMessages: 100})
+	if err != nil {
+		t.Fatalf("BuildTurnPath: %v", err)
+	}
+
+	for _, m := range ProviderMessages(path) {
+		if m.Role == "system" {
+			t.Fatalf("ProviderMessages produced a role:%q message (%+v), want never \"system\"", m.Role, m)
+		}
+		if m.Role != pathRoleUser && m.Role != pathRoleAssistant {
+			t.Fatalf("ProviderMessages produced an unexpected role %q (%+v)", m.Role, m)
+		}
+	}
+}
+
 func TestBuildTurnPath_IneligibleKindFailsClosed(t *testing.T) {
 	env := newTurnTestEnv(t)
 	root := env.mustCreateRoot(t, "root")

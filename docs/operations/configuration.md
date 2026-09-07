@@ -132,7 +132,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | `false` | Issue #72's opt-in: when `true`, every outbound completions call sets `features.web_search=true`. This is independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly). The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
-| `OPENWEBUI_TOOL_IDS` | no | `""` (none) | Issue #72's opt-in: comma-separated Open WebUI tool ids (a builtin like `web_search`, or an MCP Tool Server's own `server:mcp:<id>`) sent verbatim as `tool_ids` on every outbound completions call. Not validated against the target instance's own tool registry — this service has no way to list it. |
+| `OPENWEBUI_TOOL_IDS` | no | `""` (unset) | Issue #72's opt-in, resolved at startup per Issue #74's three-state rule: **unset** defers to the configured model's own `toolIds` (`GET /api/models`); a **comma-separated list** (a builtin like `web_search`, or an MCP Tool Server's own `server:mcp:<id>`) overrides the model's default entirely; the literal single value `none` explicitly disables tools even though the model has its own `toolIds` configured. Whichever list results is then filtered fail-closed against `GET /api/v1/tools/` (ids this credential cannot actually invoke are dropped and logged, never sent as-is) before being sent verbatim as `tool_ids` on every outbound completions call. If either resolution call itself fails at startup (the target unreachable, say), `tool_ids`/`web_search` are both disabled for that run rather than blocking startup — see ADR-0005 D17. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1076,7 +1076,7 @@ thread waits for the first to finish rather than racing it. A future
 multi-worker deployment would need to replace this with a database-backed
 lease — a separate issue, not built here.
 
-**Web search / tool use (Issue #72).** `OPENWEBUI_WEB_SEARCH_ENABLED`
+**Web search / tool use (Issues #72, #74).** `OPENWEBUI_WEB_SEARCH_ENABLED`
 and `OPENWEBUI_TOOL_IDS` set request-level `features`/`tool_ids` flags on
 every completions call this bridge sends; when either is configured, any
 resulting tool call (web search or otherwise, MCP-backed or built in)
@@ -1088,6 +1088,18 @@ runs an MCP server, or interprets a tool call itself. A tool's output
 the same way any other upstream text does, so it is untrusted data by
 the same AGENTS.md rule that already applies to Open WebUI's own reply
 content, feeds, and mail.
+
+Making that buffered call actually complete additionally requires
+`"params": {"function_calling": "legacy"}` on the same request (sent
+automatically whenever `features` or `tool_ids` is set, never otherwise):
+Open WebUI's non-streaming response handler never processes a native
+`tool_calls` response, so without this flag a turn whose model decides to
+call a tool wedges the assistant message at `done:false` forever, and
+`features.web_search` alone silently does nothing at all (Issue #74; see
+ADR-0005 D17 for the mechanism and `docs/compat/openwebui-0.11.3.md`'s
+Phase 0 record for the real-instance evidence). `OPENWEBUI_TOOL_IDS`'s
+resolved list is also filtered fail-closed at startup against what this
+credential can actually invoke — see the key's own row above.
 
 **Outcome and retry.** Every provider call this bridge makes is
 classified into a `failure_category` (never provider error text — the

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "calculator",
+    "user_id": "phase0-admin",
+    "name": "Calculator",
+    "meta": {
+      "description": "Issue #74 Phase 0 verification tool",
+      "manifest": {
+        "title": "Calculator"
+      },
+      "has_user_valves": false
+    },
+    "access_grants": [],
+    "updated_at": 1788770165,
+    "created_at": 1788770165,
+    "specs": [
+      {
+        "name": "calculator",
+        "description": "Evaluate a basic arithmetic expression and return the numeric result.",
+        "parameters": {
+          "properties": {
+            "expression": {
+              "description": "The arithmetic expression to evaluate, e.g. \"12 * 7\".",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expression"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "has_user_valves": false
+  }
+]
