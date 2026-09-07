@@ -34,8 +34,17 @@ type Config struct {
 	// memory; a larger response fails the fetch as CategoryTooLarge.
 	MaxResponseBytes int64
 	// SummaryMaxChars bounds each item's normalized title/body length
-	// after HTML tags are stripped.
+	// after HTML tags are stripped. This is the *initial* value: Fetch
+	// reloads it on every call via ReloadSummaryMaxChars, if set.
 	SummaryMaxChars int
+	// ReloadSummaryMaxChars, if non-nil, is called at the start of every
+	// Fetch (Issue #76 PR4a, ADR-0006 Tier A) to get the current
+	// effective RSS_SUMMARY_MAX_CHARS value; a non-positive result
+	// (including the zero value from a Store that found no override) is
+	// ignored and SummaryMaxChars above is used instead. Nil disables
+	// reload entirely: SummaryMaxChars never changes after construction,
+	// exactly this type's pre-#76 behavior.
+	ReloadSummaryMaxChars func(ctx context.Context) int
 }
 
 // Adapter implements ingest.Adapter for RSS 2.0 and Atom feeds.
@@ -110,7 +119,13 @@ func (a *Adapter) Fetch(ctx context.Context, source domain.ExternalSource, curso
 		return ingest.FetchResult{}, ingest.NewFetchError(ingest.CategoryTooLarge, err)
 	}
 
-	items, err := parseFeed(data, source.ID, a.cfg)
+	fetchCfg := a.cfg
+	if a.cfg.ReloadSummaryMaxChars != nil {
+		if v := a.cfg.ReloadSummaryMaxChars(ctx); v > 0 {
+			fetchCfg.SummaryMaxChars = v
+		}
+	}
+	items, err := parseFeed(data, source.ID, fetchCfg)
 	if err != nil {
 		return ingest.FetchResult{}, ingest.NewFetchError(ingest.CategoryMalformed, err)
 	}

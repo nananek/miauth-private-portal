@@ -99,6 +99,15 @@ func run() error {
 		logger.Info("app config seeded", "keys_seeded", seeded)
 	}
 
+	// configStore is Issue #76 PR4a/4b/4c's shared read path into the DB
+	// configuration overlay (ADR-0006): every reload-capable component
+	// below is given a closure reading through it, falling back to its
+	// own bootstrap cfg value, rather than a direct reference — so each
+	// stays ignorant of internal/configstore/internal/config entirely
+	// and is exercised in tests the same way it always was, by
+	// constructing it with plain values.
+	configStore := configstore.New(db.Config, logger)
+
 	reg := health.NewRegistry()
 	reg.Register(db.Checker())
 
@@ -210,6 +219,9 @@ func run() error {
 		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, toolCache, featureCache, logger).Handle)
 		openWebUICatalogScheduler = openwebui.NewCatalogScheduler(db.Jobs, openwebui.CatalogSchedulerConfig{
 			Interval: cfg.OpenWebUI.CatalogSyncInterval,
+			ReloadInterval: func(ctx context.Context) time.Duration {
+				return configStore.Duration(ctx, config.KeyOpenWebUICatalogSyncInterval, cfg.OpenWebUI.CatalogSyncInterval)
+			},
 		}, logger)
 
 		// Registered only when generation itself is on: no
@@ -239,7 +251,10 @@ func run() error {
 				MaxAttempts:        cfg.Jobs.MaxAttempts,
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
 				WebSearchOverride:  cfg.OpenWebUI.WebSearchEnabled,
-				ViewerBaseURL:      cfg.OpenWebUI.ViewerBaseURL,
+				ReloadWebSearchOverride: func(ctx context.Context) *bool {
+					return configStore.BoolPtr(ctx, config.KeyOpenWebUIWebSearchEnabled, cfg.OpenWebUI.WebSearchEnabled)
+				},
+				ViewerBaseURL: cfg.OpenWebUI.ViewerBaseURL,
 			}, nil, logger)
 			openWebUIBridge = bridge.EnqueueTurn
 			jobsManager.Register(openwebui.JobType, turnJob.Handle)
@@ -338,21 +353,31 @@ func run() error {
 			FetchTimeout:     cfg.RSS.FetchTimeout,
 			MaxResponseBytes: cfg.RSS.MaxResponseBytes,
 			SummaryMaxChars:  cfg.RSS.SummaryMaxChars,
+			ReloadSummaryMaxChars: func(ctx context.Context) int {
+				return configStore.Int(ctx, config.KeyRSSSummaryMaxChars, cfg.RSS.SummaryMaxChars)
+			},
 		})
 		ingestSvc.RegisterAdapter(rssAdapter)
 
-		seedNow := time.Now().UTC()
-		rssSources := make([]domain.ExternalSource, len(cfg.RSS.FeedURLs))
-		for i, feedURL := range cfg.RSS.FeedURLs {
-			rssSources[i] = domain.ExternalSource{ID: domain.NewID(), Kind: rss.Kind, URI: feedURL, CreatedAt: seedNow}
-		}
-		if err := db.ExternalSources.EnsureFromConfig(ctx, rssSources); err != nil {
+		// ReconcileFromConfig (Issue #76 PR4a), not the old create-only
+		// EnsureFromConfig: a feed URL added or removed from
+		// RSS_FEED_URLS after this point is picked up by rssScheduler's
+		// own per-tick reconciliation below (DesiredURIs) without a
+		// restart, but the source set must still exist before the
+		// server reports itself ready, hence this explicit startup call.
+		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, time.Now().UTC()); err != nil {
 			return fmt.Errorf("seed rss sources: %w", err)
 		}
 
 		rssScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
 			Kind:         rss.Kind,
 			PollInterval: cfg.RSS.PollInterval,
+			ReloadPollInterval: func(ctx context.Context) time.Duration {
+				return configStore.Duration(ctx, config.KeyRSSPollInterval, cfg.RSS.PollInterval)
+			},
+			DesiredURIs: func(ctx context.Context) []string {
+				return configStore.StringList(ctx, config.KeyRSSFeedURLs, cfg.RSS.FeedURLs)
+			},
 		}, logger)
 	}
 
@@ -382,15 +407,22 @@ func run() error {
 		})
 		ingestSvc.RegisterAdapter(imapAdapter)
 
+		// IMAP_HOST/PORT/MAILBOX stay bootstrap-only (ADR-0006's
+		// network-destination carve-out), so imapURI can only ever
+		// change via a restart — this one-time reconcile is therefore
+		// the only reconciliation IMAP's source ever needs; unlike RSS
+		// above, imapScheduler is given no DesiredURIs closure.
 		imapURI := (&url.URL{Scheme: "imap", Host: fmt.Sprintf("%s:%d", cfg.IMAP.Host, cfg.IMAP.Port), Path: "/" + cfg.IMAP.Mailbox}).String()
-		imapSource := domain.ExternalSource{ID: domain.NewID(), Kind: imap.Kind, URI: imapURI, CreatedAt: time.Now().UTC()}
-		if err := db.ExternalSources.EnsureFromConfig(ctx, []domain.ExternalSource{imapSource}); err != nil {
+		if err := db.ExternalSources.ReconcileFromConfig(ctx, imap.Kind, []string{imapURI}, time.Now().UTC()); err != nil {
 			return fmt.Errorf("seed imap source: %w", err)
 		}
 
 		imapScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
 			Kind:         imap.Kind,
 			PollInterval: cfg.IMAP.PollInterval,
+			ReloadPollInterval: func(ctx context.Context) time.Duration {
+				return configStore.Duration(ctx, config.KeyIMAPPollInterval, cfg.IMAP.PollInterval)
+			},
 		}, logger)
 	}
 

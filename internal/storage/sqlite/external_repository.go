@@ -13,8 +13,12 @@ import (
 type externalSourceRepository struct{ q querier }
 
 const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, cursor, last_fetched_at, last_error,
-	consecutive_failures, created_at FROM external_sources`
+	consecutive_failures, active, created_at FROM external_sources`
 
+// Create relies on the active column's own DEFAULT 1 (migration 0023):
+// a newly created source is always active, so callers (Create's own,
+// and ReconcileFromConfig's create-if-missing path below) never need to
+// pass it explicitly.
 func (r *externalSourceRepository) Create(ctx context.Context, s domain.ExternalSource) error {
 	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO external_sources (id, kind, uri, display_name, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -29,7 +33,7 @@ func (r *externalSourceRepository) Get(ctx context.Context, id string) (domain.E
 }
 
 func (r *externalSourceRepository) List(ctx context.Context, kind string) ([]domain.ExternalSource, error) {
-	rows, err := r.q.QueryContext(ctx, externalSourceSelectColumns+` WHERE kind = ? ORDER BY created_at, id`, kind)
+	rows, err := r.q.QueryContext(ctx, externalSourceSelectColumns+` WHERE kind = ? AND active = 1 ORDER BY created_at, id`, kind)
 	if err != nil {
 		return nil, fmt.Errorf("list external sources: %w", err)
 	}
@@ -73,34 +77,93 @@ func (r *externalSourceRepository) RecordFetchFailure(ctx context.Context, id st
 	return requireRowAffected(res)
 }
 
-// EnsureFromConfig is not run inside one transaction across all sources:
-// each Create is independent, so a conflict on one entry (already
-// seeded in a prior run) never blocks the others from being created. It
-// does not touch an existing source's display_name or other fields, by
-// design: EnsureFromConfig is a create-if-missing seed, not an upsert.
-func (r *externalSourceRepository) EnsureFromConfig(ctx context.Context, sources []domain.ExternalSource) error {
-	for _, s := range sources {
-		if err := r.Create(ctx, s); err != nil {
-			if errors.Is(err, domain.ErrConflict) {
-				continue
+// ReconcileFromConfig is not run inside one transaction across every
+// row: each Create/setActive is independent, so a conflict or failure
+// on one URI never blocks the others from being reconciled. It never
+// touches an existing source's display_name, cursor, last_fetched_at,
+// last_error, or consecutive_failures — the only column this ever
+// writes on an existing row is active.
+func (r *externalSourceRepository) ReconcileFromConfig(ctx context.Context, kind string, uris []string, at time.Time) error {
+	rows, err := r.q.QueryContext(ctx, `SELECT id, uri, active FROM external_sources WHERE kind = ?`, kind)
+	if err != nil {
+		return fmt.Errorf("reconcile external sources: list existing: %w", err)
+	}
+	type existingSource struct {
+		id     string
+		active bool
+	}
+	existing := make(map[string]existingSource)
+	for rows.Next() {
+		var id, uri string
+		var activeInt int
+		if scanErr := rows.Scan(&id, &uri, &activeInt); scanErr != nil {
+			rows.Close()
+			return fmt.Errorf("reconcile external sources: scan existing: %w", scanErr)
+		}
+		existing[uri] = existingSource{id: id, active: activeInt != 0}
+	}
+	closeErr := rows.Err()
+	rows.Close()
+	if closeErr != nil {
+		return fmt.Errorf("reconcile external sources: list existing: %w", closeErr)
+	}
+
+	desired := make(map[string]bool, len(uris))
+	for _, uri := range uris {
+		desired[uri] = true
+		cur, ok := existing[uri]
+		if !ok {
+			if err := r.Create(ctx, domain.ExternalSource{ID: domain.NewID(), Kind: kind, URI: uri, CreatedAt: at}); err != nil {
+				if errors.Is(err, domain.ErrConflict) {
+					// Created concurrently since the SELECT above (e.g.
+					// another reconcile round racing this one); it is
+					// active by default (the column's own DEFAULT 1),
+					// nothing more to do for this URI.
+					continue
+				}
+				return fmt.Errorf("reconcile external sources: create %s: %w", uri, err)
 			}
-			return fmt.Errorf("ensure external source from config: %w", err)
+			continue
+		}
+		if !cur.active {
+			if err := r.setActive(ctx, cur.id, true); err != nil {
+				return fmt.Errorf("reconcile external sources: reactivate %s: %w", uri, err)
+			}
+		}
+	}
+
+	for uri, cur := range existing {
+		if desired[uri] || !cur.active {
+			continue
+		}
+		if err := r.setActive(ctx, cur.id, false); err != nil {
+			return fmt.Errorf("reconcile external sources: deactivate %s: %w", uri, err)
 		}
 	}
 	return nil
 }
 
+func (r *externalSourceRepository) setActive(ctx context.Context, id string, active bool) error {
+	res, err := r.q.ExecContext(ctx, `UPDATE external_sources SET active = ? WHERE id = ?`, boolToInt(active), id)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
 func scanExternalSource(row rowScanner) (domain.ExternalSource, error) {
 	var s domain.ExternalSource
 	var displayName, cursor, lastFetchedAt, lastError sql.NullString
+	var active int
 	var createdAt string
 	if err := row.Scan(&s.ID, &s.Kind, &s.URI, &displayName, &cursor, &lastFetchedAt, &lastError,
-		&s.ConsecutiveFailures, &createdAt); err != nil {
+		&s.ConsecutiveFailures, &active, &createdAt); err != nil {
 		return domain.ExternalSource{}, mapReadError(err)
 	}
 	s.DisplayName = stringPtr(displayName)
 	s.Cursor = stringPtr(cursor)
 	s.LastError = stringPtr(lastError)
+	s.Active = active != 0
 
 	var err error
 	if s.LastFetchedAt, err = parseTimePtr(lastFetchedAt); err != nil {

@@ -58,6 +58,63 @@ func TestAdapter_Fetch_ValidFeedReturnsItemsAndCursor(t *testing.T) {
 	}
 }
 
+// TestAdapter_Fetch_ReloadSummaryMaxCharsOverridesConstructionValue backs
+// Issue #76 PR4a's RSS_SUMMARY_MAX_CHARS reload: ReloadSummaryMaxChars,
+// when set, wins over the SummaryMaxChars value Config was built with,
+// without needing a new Adapter.
+func TestAdapter_Fetch_ReloadSummaryMaxCharsOverridesConstructionValue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validRSSFeed))
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(testSafehttpClient(), Config{
+		FetchTimeout:          5 * time.Second,
+		MaxResponseBytes:      1 << 20,
+		SummaryMaxChars:       4000,
+		ReloadSummaryMaxChars: func(context.Context) int { return 5 },
+	})
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
+
+	result, err := adapter.Fetch(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(result.Items) == 0 {
+		t.Fatal("no items returned")
+	}
+	for _, item := range result.Items {
+		if len(item.Title) > 5 {
+			t.Errorf("item.Title = %q (%d chars), want at most 5 (ReloadSummaryMaxChars override, not the construction-time 4000)", item.Title, len(item.Title))
+		}
+	}
+}
+
+// TestAdapter_Fetch_NilReloadSummaryMaxCharsUsesConstructionValue
+// preserves this type's pre-Issue #76 behavior for a caller unaware of
+// the DB overlay.
+func TestAdapter_Fetch_NilReloadSummaryMaxCharsUsesConstructionValue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validRSSFeed))
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
+
+	result, err := adapter.Fetch(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(result.Items) == 0 || result.Items[0].Title != "First & Best Post" {
+		t.Errorf("Items[0].Title = %q, want the untruncated title", result.Items[0].Title)
+	}
+}
+
 // TestAdapter_Fetch_ConditionalRequestReturnsNotModified is the ETag
 // round-trip Issue #11 requires: a cursor from a prior fetch is sent
 // back as If-None-Match, and a 304 response yields NotModified with no

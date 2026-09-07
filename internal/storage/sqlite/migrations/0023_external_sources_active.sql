@@ -1,0 +1,21 @@
+-- Issue #76 PR4a: adds an `active` flag to external_sources so
+-- RSS_FEED_URLS's reload (domain.ExternalSourceRepository.
+-- ReconcileFromConfig, replacing the old create-only EnsureFromConfig)
+-- can stop polling a feed removed from config without ever deleting the
+-- row: this service's append-only-history convention means a source's
+-- already-fetched external_items and the timeline Entries they were
+-- promoted into must survive exactly as they are even after its feed
+-- URL is dropped from RSS_FEED_URLS. This mirrors
+-- openwebui_models.active (migration 0017) and Registry.SyncCatalog's
+-- own create/reactivate/deactivate reconciliation pattern.
+--
+-- ingest.Scheduler only lists and enqueues jobs for active sources
+-- (ExternalSourceRepository.List's own doc comment) — an inactive
+-- source is simply never polled again, not hidden from anything else.
+-- IMAP's single source is reconciled through the same method for
+-- consistency, even though IMAP_HOST/PORT/MAILBOX stay bootstrap-only
+-- (Tier B) and so only ever change via a restart.
+--
+-- Existing rows default to active (1): nothing already being polled
+-- stops being polled just because this migration ran.
+ALTER TABLE external_sources ADD COLUMN active INTEGER NOT NULL DEFAULT 1;

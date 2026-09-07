@@ -93,6 +93,27 @@ func TestStore_Int_And_Int64_And_Bool(t *testing.T) {
 	}
 }
 
+func TestStore_BoolPtr_TriState(t *testing.T) {
+	db := newTestDB(t)
+	store := configstore.New(db.Config, nil)
+
+	if got := store.BoolPtr(t.Context(), "OPENWEBUI_WEB_SEARCH_ENABLED", nil); got != nil {
+		t.Errorf("BoolPtr(unset, nil fallback) = %v, want nil", got)
+	}
+
+	trueFallback := true
+	if got := store.BoolPtr(t.Context(), "OPENWEBUI_WEB_SEARCH_ENABLED", &trueFallback); got == nil || *got != true {
+		t.Errorf("BoolPtr(unset, non-nil fallback) = %v, want &true", got)
+	}
+
+	if err := db.Config.Set(t.Context(), "OPENWEBUI_WEB_SEARCH_ENABLED", "false", 0, "system", time.Now()); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := store.BoolPtr(t.Context(), "OPENWEBUI_WEB_SEARCH_ENABLED", &trueFallback); got == nil || *got != false {
+		t.Errorf("BoolPtr(db override) = %v, want &false (the DB override, not the fallback)", got)
+	}
+}
+
 func TestStore_StringList_SplitsAndHandlesEmpty(t *testing.T) {
 	db := newTestDB(t)
 	store := configstore.New(db.Config, nil)

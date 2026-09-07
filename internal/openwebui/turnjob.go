@@ -41,8 +41,16 @@ type TurnJobConfig struct {
 	// then falls back to the selected model's own synced
 	// defaultFeatureIds (featureCache) — while a non-nil value overrides
 	// every model uniformly, on or off, regardless of that model's own
-	// default.
+	// default. This is only the *initial* value: resolveWebSearchEnabled
+	// reloads it on every turn via ReloadWebSearchOverride, if set.
 	WebSearchOverride *bool
+	// ReloadWebSearchOverride, if non-nil, is called at the point each
+	// turn resolves web search (Issue #76 PR4a, ADR-0006 Tier A) to get
+	// the current effective OPENWEBUI_WEB_SEARCH_ENABLED value; its
+	// result replaces WebSearchOverride for that resolution. Nil
+	// disables reload entirely: WebSearchOverride never changes after
+	// construction, exactly this type's pre-#76 behavior.
+	ReloadWebSearchOverride func(ctx context.Context) *bool
 	// ViewerBaseURL mirrors OPENWEBUI_VIEWER_BASE_URL (Issue #84,
 	// ADR-0005 D23). Empty (the default, unset) means the whole feature
 	// is off: StartChat never asks for title generation, and complete()
@@ -118,9 +126,13 @@ func (j *TurnJob) resolveToolIDs(externalModelID string) []string {
 // featureCache — false for a nil cache or a cache miss, the same
 // "never guess a feature on" default resolveToolIDs already applies to
 // tool_ids.
-func (j *TurnJob) resolveWebSearchEnabled(externalModelID string) bool {
-	if j.cfg.WebSearchOverride != nil {
-		return *j.cfg.WebSearchOverride
+func (j *TurnJob) resolveWebSearchEnabled(ctx context.Context, externalModelID string) bool {
+	override := j.cfg.WebSearchOverride
+	if j.cfg.ReloadWebSearchOverride != nil {
+		override = j.cfg.ReloadWebSearchOverride(ctx)
+	}
+	if override != nil {
+		return *override
 	}
 	if j.featureCache == nil {
 		return false
@@ -286,7 +298,7 @@ func (j *TurnJob) handleCreationPending(
 		CorrelationID:         turn.RequestID,
 		SentAt:                now,
 		ToolIDs:               j.resolveToolIDs(model.ExternalModelID),
-		WebSearchEnabled:      j.resolveWebSearchEnabled(model.ExternalModelID),
+		WebSearchEnabled:      j.resolveWebSearchEnabled(ctx, model.ExternalModelID),
 		EnableTitleGeneration: j.cfg.ViewerBaseURL != "",
 		OnChatCreated: func(hookCtx context.Context, remoteChatID string) error {
 			confirmedAt := j.clock.Now().UTC()
@@ -410,7 +422,7 @@ func (j *TurnJob) handleReady(
 		CorrelationID:    turn.RequestID,
 		SentAt:           now,
 		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
-		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
+		WebSearchEnabled: j.resolveWebSearchEnabled(ctx, model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
@@ -515,7 +527,7 @@ func (j *TurnJob) resendContinue(
 		CorrelationID:    turn.RequestID,
 		SentAt:           now,
 		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
-		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
+		WebSearchEnabled: j.resolveWebSearchEnabled(ctx, model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)

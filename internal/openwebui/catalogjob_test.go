@@ -67,6 +67,38 @@ func TestCatalogScheduler_RunStopsOnCancel(t *testing.T) {
 	}
 }
 
+// TestCatalogScheduler_ReloadInterval_UpdatesIntervalAndResetsTicker
+// backs Issue #76 PR4a's OPENWEBUI_CATALOG_SYNC_INTERVAL reload,
+// mirroring internal/ingest.Scheduler's own reloadInterval coverage.
+func TestCatalogScheduler_ReloadInterval_UpdatesIntervalAndResetsTicker(t *testing.T) {
+	tr := newTestRegistry(t, validRegistryConfig())
+	scheduler := NewCatalogScheduler(tr.db.Jobs, CatalogSchedulerConfig{
+		Interval:       time.Hour,
+		ReloadInterval: func(context.Context) time.Duration { return 5 * time.Minute },
+	}, nil)
+	scheduler.ticker = time.NewTicker(time.Hour)
+	defer scheduler.ticker.Stop()
+
+	scheduler.reloadInterval(t.Context())
+
+	if scheduler.interval != 5*time.Minute {
+		t.Errorf("interval = %v, want 5m", scheduler.interval)
+	}
+}
+
+func TestCatalogScheduler_ReloadInterval_NilReloadFuncIsNoop(t *testing.T) {
+	tr := newTestRegistry(t, validRegistryConfig())
+	scheduler := NewCatalogScheduler(tr.db.Jobs, CatalogSchedulerConfig{Interval: time.Hour}, nil)
+	scheduler.ticker = time.NewTicker(time.Hour)
+	defer scheduler.ticker.Stop()
+
+	scheduler.reloadInterval(t.Context())
+
+	if scheduler.interval != time.Hour {
+		t.Errorf("interval = %v, want unchanged 1h", scheduler.interval)
+	}
+}
+
 // TestCatalogSyncJob_HandleCallsSyncCatalog backs the thin-handler
 // contract: Handle is nothing but Registry.SyncCatalog against the
 // provider it was built with.
