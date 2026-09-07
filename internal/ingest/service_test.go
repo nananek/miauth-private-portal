@@ -483,6 +483,74 @@ func TestHandle_DuplicateDeliveryDoesNotDuplicateEntries(t *testing.T) {
 	}
 }
 
+// TestHandle_BatchOrderMatchesPublishedAtNotFetchOrder is Issue #83's
+// regression test. A single poll finding several new items hands them to
+// CreateExternalEntry in feed order — RSS/Atom feeds list newest-first,
+// so that order runs from the batch's newest item to its oldest. Before
+// Issue #83's fix, each entry's CreatedAt was stamped with the ingest
+// wall-clock time at the moment it was processed, so the newest feed
+// item (processed first) got the earliest CreatedAt and the oldest item
+// (processed last) got the latest — a deterministic reversal of the home
+// timeline's created_at-DESC order relative to the feed's real publish
+// order. Deriving CreatedAt from PublishedAt (internal/timeline/
+// service.go's CreateExternalEntry) removes that dependency on
+// processing order entirely.
+func TestHandle_BatchOrderMatchesPublishedAtNotFetchOrder(t *testing.T) {
+	db := newTestDB(t)
+	source := mustCreateSource(t, db, "rss", "https://example.com/feed.xml")
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	newest := base
+	middle := base.Add(-time.Hour)
+	oldest := base.Add(-2 * time.Hour)
+
+	// Feed order: newest item first, exactly as a real RSS/Atom feed
+	// lists its entries.
+	adapter := &fakeAdapter{kind: "rss", fn: func(ctx context.Context, source domain.ExternalSource, cursor *string) (FetchResult, error) {
+		return FetchResult{
+			Items: []FetchedItem{
+				{ExternalID: "guid-newest", DedupeKey: "dedupe-newest", Title: "Newest", Body: "b", PublishedAt: &newest},
+				{ExternalID: "guid-middle", DedupeKey: "dedupe-middle", Title: "Middle", Body: "b", PublishedAt: &middle},
+				{ExternalID: "guid-oldest", DedupeKey: "dedupe-oldest", Title: "Oldest", Body: "b", PublishedAt: &oldest},
+			},
+			NextCursor: `{"etag":"v1"}`,
+		}, nil
+	}}
+	svc := NewService(db.Repos, timelineSvc, nil)
+	svc.RegisterAdapter(adapter)
+
+	payload, err := NewJobPayload(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Handle(t.Context(), newTestJob(payload)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	entries, err := timelineSvc.GetTimelineDesc(t.Context(), nil, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("timeline has %d entries, want 3", len(entries))
+	}
+	var titles []string
+	for _, e := range entries {
+		titles = append(titles, e.Body)
+	}
+	wantOrder := []string{
+		"[news] Newest\n\nb",
+		"[news] Middle\n\nb",
+		"[news] Oldest\n\nb",
+	}
+	for i, want := range wantOrder {
+		if titles[i] != want {
+			t.Errorf("timeline[%d] = %q, want %q (order = %v)", i, titles[i], want, titles)
+		}
+	}
+}
+
 // failingUOW wraps a real domain.UnitOfWork and fails the failAt-th
 // WithinTx call with a plain (non-domain.ErrConflict) error, before any
 // transaction is opened. Service.Handle calls
