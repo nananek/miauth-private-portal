@@ -235,8 +235,8 @@ func TestTurnJob_StartChat_StripsMentionTagsFromProviderContentButKeepsEntryBody
 
 	provider := newFakeProvider(t)
 	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
-		if req.NewTurn.Content != "hey [mention removed], how are you?" {
-			t.Errorf("StartChat NewTurn.Content = %q, want mention stripped", req.NewTurn.Content)
+		if req.NewTurn.Content != "hey , how are you?" {
+			t.Errorf("StartChat NewTurn.Content = %q, want mention omitted", req.NewTurn.Content)
 		}
 		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
 			return TurnResult{}, err

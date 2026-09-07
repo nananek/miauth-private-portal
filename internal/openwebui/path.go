@@ -158,12 +158,15 @@ func pathNodeRole(ctx context.Context, repos domain.Repos, node domain.Entry) (s
 	}
 }
 
-// mentionReplacement is what stripMentionTagsForProvider substitutes
-// for an entire matched @mention, username included: an external LLM
-// provider gets no more reason to address, or reason to believe it
-// knows, a specific local username than it would any other redacted
-// detail.
-const mentionReplacement = "[mention removed]"
+// mentionGapPattern collapses a run of two or more horizontal whitespace
+// bytes (space or tab) into a single space. stripMentionTagsForProvider
+// runs it once, only when it actually omitted a mention, to clean up the
+// gap an omitted mention can leave between the whitespace that preceded
+// it and the whitespace that followed it (e.g. "cc @owner please" ->
+// "cc  please" -> "cc please"). It deliberately does not touch newlines
+// or punctuation spacing (e.g. a lone space left before a comma) — that
+// would be normalizing content this function never otherwise touches.
+var mentionGapPattern = regexp.MustCompile(`[ \t]{2,}`)
 
 // mentionPattern matches one Misskey-style @mention token anchored at
 // its own start (the "^" matches the start of whatever suffix of body
@@ -190,13 +193,15 @@ func isMentionBoundaryByte(b byte) bool {
 	return !(b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z'))
 }
 
-// stripMentionTagsForProvider rewrites every Misskey-style @mention in
-// body (e.g. "@luna@ai.tail2c8c7.ts.net" or a bare "@owner") to
-// mentionReplacement before the text is sent to an external LLM
-// provider: neither the "@"/host wire syntax nor the bare username
-// itself is something the model should see or need to address. This
-// never touches domain.Entry.Body itself — only the copy of the text
-// placed in a Provider-facing Message (Issue #70).
+// stripMentionTagsForProvider omits every Misskey-style @mention in body
+// (e.g. "@luna@ai.tail2c8c7.ts.net" or a bare "@owner") entirely before
+// the text is sent to an external LLM provider: neither the "@"/host
+// wire syntax nor the bare username itself is something the model should
+// see or need to address, and a fixed placeholder string was rejected in
+// favor of plain omission because it was itself leaking into Open WebUI's
+// auto-generated chat titles. This never touches domain.Entry.Body
+// itself — only the copy of the text placed in a Provider-facing Message
+// (Issue #70).
 //
 // This scans byte by byte instead of doing one regexp.ReplaceAllString
 // pass over the whole body, deliberately: a single non-overlapping
@@ -213,13 +218,14 @@ func stripMentionTagsForProvider(body string) string {
 	var sb strings.Builder
 	sb.Grow(len(body))
 	justStrippedMention := false
+	strippedAny := false
 	for i := 0; i < len(body); {
 		c := body[i]
 		if c == '@' && (i == 0 || justStrippedMention || isMentionBoundaryByte(body[i-1])) {
 			if loc := mentionPattern.FindStringIndex(body[i:]); loc != nil {
-				sb.WriteString(mentionReplacement)
 				i += loc[1]
 				justStrippedMention = true
+				strippedAny = true
 				continue
 			}
 		}
@@ -227,7 +233,10 @@ func stripMentionTagsForProvider(body string) string {
 		i++
 		justStrippedMention = false
 	}
-	return sb.String()
+	if !strippedAny {
+		return body
+	}
+	return strings.TrimSpace(mentionGapPattern.ReplaceAllString(sb.String(), " "))
 }
 
 // ProviderMessages converts path's root-to-parent nodes into the
@@ -235,7 +244,7 @@ func stripMentionTagsForProvider(body string) string {
 // body only, never a local entry id, Misskey metadata, credentials, or a
 // system prompt (roadmap: "The sequence carries no local IDs, Misskey
 // metadata, credentials, system prompt"). Body is each entry's own text
-// with any Misskey-style @mention — username included — masked out
+// with any Misskey-style @mention — username included — omitted
 // (Issue #70) — domain.Entry.Body itself is untouched. The caller
 // appends the new turn's own Message separately
 // (StartChatRequest.NewTurn / ContinueTurnRequest.NewTurn).
