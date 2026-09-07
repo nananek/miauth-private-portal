@@ -230,6 +230,31 @@ func TestDrive_FilesDelete(t *testing.T) {
 	assertWireError(t, showRec, http.StatusBadRequest, "NO_SUCH_FILE")
 }
 
+// TestDrive_FilesDelete_RejectsWhenAttached is Issue #77 PR6's own
+// addition to the ownership/GC edge case PR0 flagged as unresolved
+// ("deleting a files row while entry_files rows still reference it"):
+// this service rejects the delete explicitly (FILE_ATTACHED) rather than
+// cascading it or letting SQLite's foreign-key enforcement surface as an
+// unhandled error, the same stance ErrFolderNotEmpty already takes for a
+// non-empty folder.
+func TestDrive_FilesDelete_RejectsWhenAttached(t *testing.T) {
+	ts := newDriveTestServer(t)
+	fileID := createTestDriveFile(t, ts, "attached.png")
+	writeNotesToken, _ := mustIssueToken(t, ts.Server, "attach-delete-write", "write:notes,write:drive")
+	createRec := ts.post(t, "/api/notes/create", writeNotesToken, map[string]any{"text": "with attachment", "fileIds": []string{fileID}})
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create note: status = %d %q, want %d", createRec.Code, createRec.Body.String(), http.StatusOK)
+	}
+
+	deleteRec := ts.post(t, "/api/drive/files/delete", ts.tokenWrite, map[string]any{"fileId": fileID})
+	assertWireError(t, deleteRec, http.StatusBadRequest, "FILE_ATTACHED")
+
+	showRec := ts.post(t, "/api/drive/files/show", ts.tokenRead, map[string]any{"fileId": fileID})
+	if showRec.Code != http.StatusOK {
+		t.Errorf("a rejected delete must leave the file intact: show status = %d %q, want %d", showRec.Code, showRec.Body.String(), http.StatusOK)
+	}
+}
+
 // There is no HTTP-layer equivalent of "a different owner's token" to
 // test against: this is a single-owner deployment where every MiAuth-
 // issued token authenticates the same singleton owner actor
@@ -241,7 +266,12 @@ func TestDrive_FilesDelete(t *testing.T) {
 // and its FileUpdate/Folder counterparts, built directly against
 // repositories rather than through MiAuth.
 
-func TestDrive_FilesAttachedNotes_AlwaysEmpty(t *testing.T) {
+// TestDrive_FilesAttachedNotes_EmptyBeforeAttachment covers the file
+// itself existing but not (yet) attached to anything — the still-correct
+// "empty" case now that Issue #77 PR6's entry_files backs this endpoint
+// for real, distinct from the always-[] placeholder PR3 shipped before
+// that table existed.
+func TestDrive_FilesAttachedNotes_EmptyBeforeAttachment(t *testing.T) {
 	ts := newDriveTestServer(t)
 	fileID := createTestDriveFile(t, ts, "a.png")
 	rec := ts.post(t, "/api/drive/files/attached-notes", ts.tokenRead, map[string]any{"fileId": fileID})
@@ -251,7 +281,36 @@ func TestDrive_FilesAttachedNotes_AlwaysEmpty(t *testing.T) {
 	var notes []map[string]any
 	mustDecode(t, rec, &notes)
 	if len(notes) != 0 {
-		t.Errorf("attached-notes = %v, want an empty array (Issue #77 PR6 not implemented yet)", notes)
+		t.Errorf("attached-notes = %v, want an empty array before any attachment", notes)
+	}
+}
+
+// TestDrive_FilesAttachedNotes_ReportsAttachedNote is Issue #77 PR6's
+// core "which notes is this file attached to" contract test: attaching a
+// file to a note through POST /api/notes/create's fileIds must make it
+// show up here, corroborating PR0's finding that a single drive file
+// (createTestDriveFile's own not-yet-attached fixture above) is not
+// restricted to at most one note either.
+func TestDrive_FilesAttachedNotes_ReportsAttachedNote(t *testing.T) {
+	ts := newDriveTestServer(t)
+	fileID := createTestDriveFile(t, ts, "a.png")
+	writeNotesToken, _ := mustIssueToken(t, ts.Server, "attach-notes-write", "write:notes,write:drive")
+
+	createRec := ts.post(t, "/api/notes/create", writeNotesToken, map[string]any{"text": "with attachment", "fileIds": []string{fileID}})
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create note: status = %d %q, want %d", createRec.Code, createRec.Body.String(), http.StatusOK)
+	}
+	var created createdNoteResponse
+	mustDecode(t, createRec, &created)
+
+	rec := ts.post(t, "/api/drive/files/attached-notes", ts.tokenRead, map[string]any{"fileId": fileID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	var notes []map[string]any
+	mustDecode(t, rec, &notes)
+	if len(notes) != 1 || notes[0]["id"] != created.CreatedNote.ID {
+		t.Errorf("attached-notes = %v, want exactly the created note %q", notes, created.CreatedNote.ID)
 	}
 }
 

@@ -52,6 +52,10 @@ func writeFileTooLarge(w http.ResponseWriter) {
 	writeWireError(w, http.StatusBadRequest, "file-too-large", "FILE_TOO_LARGE", "This file exceeds the maximum allowed size.", "client", nil)
 }
 
+func writeFileAttached(w http.ResponseWriter) {
+	writeWireError(w, http.StatusBadRequest, "file-attached", "FILE_ATTACHED", "This file is attached to one or more notes.", "client", nil)
+}
+
 // writeDriveFileError maps a drive.Service file-operation error to a
 // wire response, logging (and generalizing to a 500) anything this
 // package does not have a specific client-facing shape for.
@@ -67,6 +71,8 @@ func (s *Server) writeDriveFileError(w http.ResponseWriter, r *http.Request, op 
 		writeInvalidParam(w, "invalid url")
 	case errors.Is(err, drive.ErrUploadFromURLFailed):
 		writeInvalidParam(w, "could not fetch url")
+	case errors.Is(err, drive.ErrFileAttached):
+		writeFileAttached(w)
 	default:
 		s.logger.Error(op+" failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)
@@ -420,12 +426,15 @@ func (s *Server) handleDriveFilesDelete(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleDriveFilesAttachedNotes handles POST
-// /api/drive/files/attached-notes. It always returns an empty list until
-// Issue #77 PR6 adds entry_files (no traced schema, no note can be
-// attached to any file yet) — but still verifies fileId names a file the
-// caller owns first, so an unknown or foreign fileId is rejected the
-// same way every other Drive route rejects one, rather than silently
-// returning [] for a probe.
+// /api/drive/files/attached-notes (Issue #77 PR6, docs/compat/
+// aria-v1.5.11.md's PR0 trace: a genuine one-to-many query, not the
+// always-[] placeholder PR3 shipped before entry_files existed). It
+// still verifies fileId names a file the caller owns first, so an
+// unknown or foreign fileId is rejected the same way every other Drive
+// route rejects one, rather than silently returning [] for a probe. A
+// hidden/archived note the file happens to still be attached to is
+// filtered out, the same entryVisible rule every other note-reading
+// endpoint applies.
 func (s *Server) handleDriveFilesAttachedNotes(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeJSONBody[driveFilesAttachedNotesRequest](r)
 	if !ok || req.FileID == "" {
@@ -437,7 +446,34 @@ func (s *Server) handleDriveFilesAttachedNotes(w http.ResponseWriter, r *http.Re
 		s.writeDriveFileError(w, r, "attached notes", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, []note{})
+
+	entries, err := s.timeline.AttachedEntries(r.Context(), req.FileID)
+	if err != nil {
+		s.logger.Error("list attached notes failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	owner, err := s.miauth.DescribeOwner(r.Context(), actorID)
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	notes := make([]note, 0, len(entries))
+	for _, e := range entries {
+		if !entryVisible(e) {
+			continue
+		}
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project attached note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
+	}
+	writeJSON(w, http.StatusOK, notes)
 }
 
 func (s *Server) handleDriveFolders(w http.ResponseWriter, r *http.Request) {

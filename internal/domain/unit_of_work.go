@@ -31,6 +31,9 @@ type Repos struct {
 	// the repository).
 	Files   FileRepository
 	Folders FolderRepository
+	// EntryFiles backs Issue #77 PR6's notes/create fileIds attachment
+	// (the entry_files many-to-many join table).
+	EntryFiles EntryFileRepository
 
 	// The Open WebUI registry and conversation-link repositories (Issue
 	// #52). They are always present; whether anything writes through

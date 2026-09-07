@@ -1,13 +1,14 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
 - Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
-  icons), PR3 (Misskey-compatible Drive API), and PR5 (profile images +
-  favicon fetching) complete. PR4 (RSS/external-source icons and
-  attribution)'s identity/host mechanism (ADR-0008) was done in its own
-  commit; favicon fetching/storage — left open at the end of PR4 as an
-  explicit owner decision — was folded into PR5 rather than a PR4
-  follow-up, since both need the same Drive-backed image storage
-  infrastructure (owner decision, 2026-09-08). PR6–PR7 not started.
+  icons), PR3 (Misskey-compatible Drive API), PR5 (profile images +
+  favicon fetching), and PR6 (post attachments) complete. PR4
+  (RSS/external-source icons and attribution)'s identity/host mechanism
+  (ADR-0008) was done in its own commit; favicon fetching/storage — left
+  open at the end of PR4 as an explicit owner decision — was folded into
+  PR5 rather than a PR4 follow-up, since both need the same Drive-backed
+  image storage infrastructure (owner decision, 2026-09-08). PR7 not
+  started.
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -118,7 +119,8 @@ changed from the pre-investigation plan:
   that order.
 - **`POST /api/notes/timeline`'s `withFiles` filter is already accepted
   and currently ignored** (`internal/httpserver/noteapi_handlers.go`).
-  Whether to start honoring it is a PR6/PR7 decision, out of PR0's scope.
+  PR6 left it ignored even once `note.files` became real data; whether to
+  start honoring it is a PR7 decision, out of PR0's scope.
 
 ## PR1: Drive foundation (`internal/drive`)
 
@@ -403,18 +405,40 @@ Favicon fetching:
 
 ## PR6: Post attachments
 
-**Status: not started.** Depends on PR1 and PR3.
+**Status: complete.** Depended on PR1 and PR3.
 
-- `POST /api/notes/create` accepts `fileIds`; each ID must be a `files`
-  row owned by the requesting owner with `purpose = 'attachment'`.
-- New `entry_files` table (`entry_id`, `file_id`, `position`) as a genuine
-  many-to-many join — see PR0's finding above on why a 1:1 design is
-  insufficient.
-- `note.fileIds`/`note.files` (currently hardcoded empty,
-  `internal/httpserver/noteapi_wire.go`) switch to real data, reusing
-  PR3's `DriveFile` wire type.
+- `POST /api/notes/create` accepts `fileIds`; each ID is validated
+  (`drive.Service.ValidateAttachmentFiles`) as a `files` row owned by the
+  requesting owner with `purpose = 'attachment'` — a bad ID rejects the
+  whole call with `NO_SUCH_FILE` before any entry or attachment row is
+  written. An omitted `fileIds` key (PR0's trace: the common,
+  attachment-less case) is unaffected.
+- New `entry_files` table (`entry_id`, `file_id`, `position`; migration
+  `0029_entry_files.sql`) as a genuine many-to-many join — see PR0's
+  finding above on why a 1:1 design is insufficient. The attachment link
+  is written inside the same transaction that creates the entry, via
+  `internal/timeline.Service`'s existing `EntryHook` mechanism
+  (Issue #53's own extension point); `internal/httpserver`'s new
+  `combineEntryHooks` composes it with the pre-existing Open WebUI bridge
+  hook, since `CreateRootWithHook`/`CreateReplyWithHook` accept only one.
+- `note.fileIds`/`note.files` (previously hardcoded empty,
+  `internal/httpserver/noteapi_wire.go`) now project real data —
+  `(*Server).projectNote` queries `timeline.Service.AttachedFiles` and
+  reuses PR3's `DriveFile` wire type/`projectDriveFile` helper, in
+  attachment order.
+- `POST /api/drive/files/attached-notes` (PR3 shipped it always
+  returning `[]`) now queries `entry_files` for real via the new
+  `timeline.Service.AttachedEntries`, filtering out a hidden/archived
+  note the same way every other note-reading endpoint does.
+- **Deleting a still-attached file is rejected, not cascaded**:
+  `drive.Service.DeleteFile` checks `EntryFileRepository.CountByFile`
+  first and returns the new `ErrFileAttached` (wire: `FILE_ATTACHED`) —
+  this PR's own resolution of the "ownership/GC edge case" PR0 left open,
+  the entries-row half of which never arises since `notes/delete` is a
+  soft hide, never a hard delete (`docs/decisions/0004-note-delete-as-hide.md`).
 - Attachments are never auto-injected into an LLM prompt (AGENTS.md;
-  vision-input use is a separate future issue if ever pursued).
+  vision-input use is a separate future issue if ever pursued) — nothing
+  in this PR touches `internal/llmreply`/`internal/llmclassify`.
 
 ## PR7: Operational hardening
 
@@ -441,7 +465,11 @@ Favicon fetching:
   section and allowlist rows (done). PR3 promotes them from "planned" to
   "implemented" (done). PR4 updated the existing provenance-is-a-fixed-
   actor framing in "Note.text provenance markers" (done). PR5 updated the
-  `i/update` avatar non-goal note PR0 had flagged (done).
+  `i/update` avatar non-goal note PR0 had flagged (done). PR6 promoted
+  the `fileIds`/`attached-notes` allowlist rows to "implemented" and
+  added its own "PR6 implementation notes" subsection recording the
+  file-attached delete rejection and the entry-creation-transaction hook
+  composition (done).
 - New `docs/decisions/000X-drive-storage-boundary.md` ADR (PR1).
 - `docs/operations/configuration.md`: new Drive-related configuration keys
   (PR1).

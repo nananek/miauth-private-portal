@@ -104,7 +104,7 @@ redacted.
 | `POST /api/drive/files/update` | **必要** for Issue #77 (implemented — PR3) | Rename, toggle sensitive, edit comment, and move-to-folder — all four via the same endpoint as a partial-field POST | `i` token; `write:drive` |
 | `POST /api/drive/files/delete` | **必要** for Issue #77 (implemented — PR3) | Drive file delete action | `i` token; `write:drive` |
 | `POST /api/drive/files/upload-from-url` | **必要** for Issue #77 (implemented — PR3) | Drive screen's "upload from URL" action | `i` token; `write:drive` |
-| `POST /api/drive/files/attached-notes` | **必要** for Issue #77 (implemented — PR3; always returns `[]` until PR6 adds `entry_files`) | Drive file detail page's "notes this file is attached to" list | `i` token; `read:drive` + `read:notes` |
+| `POST /api/drive/files/attached-notes` | **必要** for Issue #77 (implemented — PR3 shipped the route returning `[]`; PR6 wires it to real `entry_files` data) | Drive file detail page's "notes this file is attached to" list | `i` token; `read:drive` + `read:notes` |
 | `POST /api/drive/files/move-bulk` | **要実機確認**; optional | Drive multi-select bulk-move action — Aria probes `POST /api/endpoints` first and transparently falls back to per-file `drive/files/update` moves when the name is absent | Omitting this name from this service's `/api/endpoints` response is sufficient to make Aria always use the per-file fallback instead of implementing this endpoint |
 | `POST /api/drive/folders`, `/create`, `/delete`, `/update`, `/show` | **必要** for Issue #77 (implemented — PR3) | Drive screen's folder browsing, creation, rename, and move UI — used extensively, not an edge feature | `i` token; `read:drive`/`write:drive` |
 | `POST /api/drive/stream` | **不要** | No traced Aria source ever calls this (`MisskeyDrive.stream` has no Aria call site) | N/A — never implement without a new observed source |
@@ -112,7 +112,7 @@ redacted.
 | `POST /api/drive/files/check-existence` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/drive/files/find-by-hash` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/drive/folders/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
-| `POST /api/notes/create` (`fileIds` field) | **必要** for Issue #77 (PR6, not yet implemented) | Post composer's attachment picker (new local upload or existing drive file) | Already-granted `write:notes` — no new scope |
+| `POST /api/notes/create` (`fileIds` field) | **必要** for Issue #77 (implemented — PR6) | Post composer's attachment picker (new local upload or existing drive file) | Already-granted `write:notes` — no new scope |
 | `POST /api/i/update` (`avatarId` field) | **必要** for Issue #77 (implemented — PR5) | Profile avatar upload/removal flow | `write:account` (already granted). Every other non-`name`/`avatarId` `IUpdateRequest` field stays rejected as `UNSUPPORTED_FEATURE`, per the Issue #23 scope decision above |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
@@ -1038,8 +1038,8 @@ polymorphic `User`/`UserDetailed` discriminator).
 ### Drive API and note attachments (Issue #77 investigation — PR0)
 
 **This section originally documented a contract for functionality this
-service did not implement yet; Drive (PR3) and profile avatars (PR5) are
-now implemented, post attachments (PR6) are not yet.** This PR0 records
+service did not implement yet; Drive (PR3), profile avatars (PR5), and
+post attachments (PR6) are all now implemented.** This PR0 records
 what the pinned Aria snapshot and its pinned `misskey_dart` dependency
 actually do, so those later PRs implement an observed protocol rather
 than a remembered one
@@ -1146,6 +1146,32 @@ not a 1:1 pointer plan-issue-77 v2 tentatively allowed) — deleting one
 `files` row while `entry_files` rows still reference it, or vice versa, is
 the ownership/GC edge case PR6/PR7 must define, not something PR0 resolves.
 
+#### PR6 implementation notes (Issue #77, `entry_files` + `internal/httpserver/noteapi_{handlers,wire}.go` + `internal/drive.Service`)
+
+- **The files-row-still-referenced half of the edge case above is
+  resolved: rejected explicitly, never cascaded.**
+  `internal/drive.Service.DeleteFile` now checks
+  `EntryFileRepository.CountByFile` first and returns `ErrFileAttached`
+  (wire: `FILE_ATTACHED`) if the file is still attached to any entry —
+  the same stance `ErrFolderNotEmpty` already takes for a non-empty
+  folder (AGENTS.md: unsupported/unsafe operations must fail explicitly,
+  not silently cascade or surface as a raw SQLite foreign-key
+  constraint error). The entries-row half never arises in practice:
+  `notes/delete` maps onto `hidden_at` rather than a hard delete
+  (`docs/decisions/0004-note-delete-as-hide.md`), so an entry_files row's
+  `entry_id` never dangles.
+- **fileIds is validated (ownership + `purpose = 'attachment'`) before
+  any entry or entry_files row is written**, via the new
+  `drive.Service.ValidateAttachmentFiles` — a bad ID fails the whole
+  `notes/create` call with `NO_SUCH_FILE`, never a partially-created
+  note.
+- **The attachment link itself is written inside the same transaction
+  that creates the entry**, through `internal/timeline.Service`'s
+  existing `EntryHook` extension point (Issue #53's own mechanism for
+  running the Open WebUI bridge post-creation) — `httpserver`'s new
+  `combineEntryHooks` composes both hooks into one, since
+  `CreateRootWithHook`/`CreateReplyWithHook` accept only a single hook.
+
 **Avatar upload sequence confirms plan-issue-77 v2 §2.5's hypothesis.**
 `profile_page.dart`'s `_getFile` calls
 `drive.files.create`/`createAsBinary` (optionally after a client-side
@@ -1160,20 +1186,21 @@ opts out of this document's usual null-field-omission rule for this one
 field. PR5 accepts an explicit-null `avatarId` as "remove avatar,"
 per this finding, rather than rejecting it as a validation error.
 
-**`POST /api/notes/timeline`'s `withFiles` flag is currently accepted and
-ignored** (`internal/httpserver/noteapi_handlers.go`'s `WithFiles *bool`
-field, per its own comment). Aria sends it as a user-configurable
-"only show notes with attachments" timeline filter reflecting an Aria
-setting, not a fixed value; whether to start honoring it is a PR6/PR7
-implementation decision, not a PR0 finding, since it has no effect while
-every note's `files`/`fileIds` are empty regardless of the flag.
+**`POST /api/notes/timeline`'s `withFiles` flag is still accepted and
+ignored even after PR6** (`internal/httpserver/noteapi_handlers.go`'s
+`WithFiles *bool` field, per its own comment) — PR6 makes
+`note.files`/`fileIds` real, but never wires `withFiles` itself into
+`GetTimelineDesc`'s query. Aria sends it as a user-configurable "only
+show notes with attachments" timeline filter reflecting an Aria setting,
+not a fixed value; whether to start honoring it remains a PR7
+implementation decision, not something this PR needed to resolve.
 
 **`Note.files`/`Note.fileIds` default to `[]` when absent** (already noted
 in this document's "Minimum Note contract" section below via
 `misskey_dart`'s `@Default([])`), so returning an explicit empty array
-(this service's current behavior, `internal/httpserver/noteapi_wire.go`)
-is safe and remains the correct behavior for every note with no
-attachments after PR6 ships.
+(this service's behavior for every note with no attachments,
+`internal/httpserver/noteapi_wire.go`) is safe and correct, and is now
+joined by real data for a note that does have attachments.
 
 #### PR3 implementation notes (Issue #77, `internal/drive.Service` + `internal/httpserver/drive_{handlers,wire}.go`)
 
@@ -1207,11 +1234,12 @@ did not already settle:
   fetching uses), before responding — unlike real Misskey's async
   behavior. Aria's only call site declares the method `Future<void>` and
   never inspects the response, so this is wire-compatible.
-- **`drive/files/attached-notes` always returns `[]`** until Issue #77
-  PR6 adds `entry_files` — see this section's earlier PR0 note on why a
-  file can be attached to more than one note. It still verifies the
-  given `fileId` is owned by the caller first (`NO_SUCH_FILE` otherwise),
-  rather than returning `[]` for any id unconditionally.
+- **`drive/files/attached-notes` returned `[]` unconditionally until
+  Issue #77 PR6 added `entry_files`** — see this section's earlier PR0
+  note on why a file can be attached to more than one note, and PR6's own
+  implementation notes above. It still verifies the given `fileId` is
+  owned by the caller first (`NO_SUCH_FILE` otherwise), rather than
+  querying attachments for any id unconditionally.
 - **Folders are real** (migration 0025): create/list/show/update/delete,
   with a "cannot delete a non-empty folder" check
   (`FOLDER_NOT_EMPTY`, this service's own invented-but-Misskey-flavored

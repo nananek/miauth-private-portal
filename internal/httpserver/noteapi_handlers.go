@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -313,6 +314,34 @@ type createdNoteResponse struct {
 	CreatedNote note `json:"createdNote"`
 }
 
+// combineEntryHooks returns a single timeline.EntryHook running each of
+// hooks in order, inside the same transaction, stopping at the first
+// error — skipping any nil entry. CreateRootWithHook/CreateReplyWithHook
+// each accept only one hook, but handleNotesCreate needs to run both
+// Issue #53's openWebUIBridge hook and Issue #77 PR6's own fileIds-
+// attachment hook from the same call. Returns nil (not a no-op hook) when
+// every entry is nil, so CreateRootWithHook's own "hook == nil" skip
+// still applies in the common no-attachments, OpenWebUI-disabled case.
+func combineEntryHooks(hooks ...timeline.EntryHook) timeline.EntryHook {
+	live := make([]timeline.EntryHook, 0, len(hooks))
+	for _, h := range hooks {
+		if h != nil {
+			live = append(live, h)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, repos domain.Repos, entry domain.Entry) error {
+		for _, h := range live {
+			if err := h(ctx, repos, entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeJSONBody[notesCreateRequest](r)
 	if !ok {
@@ -339,9 +368,6 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 	case req.ScheduledAt != nil:
 		writeUnsupportedFeature(w, "scheduledAt")
 		return
-	case len(req.FileIDs) > 0:
-		writeUnsupportedFeature(w, "fileIds")
-		return
 	case req.Visibility != nil && *req.Visibility != "public":
 		writeUnsupportedFeature(w, "visibility")
 		return
@@ -351,6 +377,34 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		writeInvalidParam(w, "text is required")
 		return
 	}
+
+	// fileIds (Issue #77 PR6) is validated before any entry/entry_files
+	// row is written: PR0's trace found an attachment-less post omits
+	// this key entirely rather than sending fileIds: [], so len(nil) > 0
+	// here already excludes that common case.
+	actorID := LocalActorIDFromContext(r.Context())
+	var attachHook timeline.EntryHook
+	if len(req.FileIDs) > 0 {
+		if s.drive == nil {
+			s.logger.Error("fileIds create requested but drive is not configured", "request_id", logging.RequestIDFromContext(r.Context()))
+			writeInternalError(w)
+			return
+		}
+		if err := s.drive.ValidateAttachmentFiles(r.Context(), actorID, req.FileIDs); err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				writeNoSuchFile(w)
+				return
+			}
+			s.logger.Error("validate fileIds failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		fileIDs := req.FileIDs
+		attachHook = func(ctx context.Context, repos domain.Repos, entry domain.Entry) error {
+			return repos.EntryFiles.Create(ctx, entry.ID, fileIDs)
+		}
+	}
+	hook := combineEntryHooks(s.openWebUIBridge, attachHook)
 
 	job := s.llmReplyJob(*req.Text)
 	classificationJob := s.llmClassificationJob()
@@ -378,13 +432,13 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		entry, err = s.timeline.CreateReplyWithHook(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, s.openWebUIBridge, job, classificationJob)
+		entry, err = s.timeline.CreateReplyWithHook(r.Context(), *req.ReplyID, domain.EntryUserPost, *req.Text, hook, job, classificationJob)
 		if errors.Is(err, timeline.ErrParentNotFound) {
 			writeNoSuchNote(w)
 			return
 		}
 	} else {
-		entry, err = s.timeline.CreateRootWithHook(r.Context(), domain.EntryUserPost, *req.Text, s.openWebUIBridge, job, classificationJob)
+		entry, err = s.timeline.CreateRootWithHook(r.Context(), domain.EntryUserPost, *req.Text, hook, job, classificationJob)
 	}
 	if err != nil {
 		s.logger.Error("create note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
@@ -392,7 +446,7 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	owner, err := s.miauth.DescribeOwner(r.Context(), actorID)
 	if err != nil {
 		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)
