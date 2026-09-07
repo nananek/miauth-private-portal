@@ -3,6 +3,7 @@ package openwebui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,14 +12,23 @@ import (
 
 // fakeCatalogProvider is a test-controlled CatalogProvider: either a
 // fixed model list or a fixed error, never both meaningfully at once
-// (SyncCatalog only ever consults Err when it is non-nil).
+// (SyncCatalog only ever consults Err when it is non-nil). accessibleTools/
+// accessibleErr back its ListAccessibleTools half independently, since a
+// test exercising the model registry side has no reason to also fix a
+// tool list.
 type fakeCatalogProvider struct {
-	models []RemoteModel
-	err    error
+	models        []RemoteModel
+	err           error
+	accessibleIDs []string
+	accessibleErr error
 }
 
 func (f *fakeCatalogProvider) ListModels(ctx context.Context) ([]RemoteModel, error) {
 	return f.models, f.err
+}
+
+func (f *fakeCatalogProvider) ListAccessibleTools(ctx context.Context) ([]string, error) {
+	return f.accessibleIDs, f.accessibleErr
 }
 
 func TestEligibleRemoteModels_FiltersBlankArenaAndDuplicateIDs(t *testing.T) {
@@ -43,7 +53,7 @@ func TestSyncCatalog_DisabledReturnsErrDisabled(t *testing.T) {
 	cfg := validRegistryConfig()
 	cfg.Enabled = false
 	tr := newTestRegistry(t, cfg)
-	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{}, nil); !errors.Is(err, ErrDisabled) {
+	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{}, nil, nil); !errors.Is(err, ErrDisabled) {
 		t.Errorf("SyncCatalog() error = %v, want ErrDisabled", err)
 	}
 }
@@ -61,7 +71,7 @@ func TestSyncCatalog_ProviderErrorLeavesRegistryUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{err: errors.New("boom")}, discardLogger()); err == nil {
+	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{err: errors.New("boom")}, nil, discardLogger()); err == nil {
 		t.Fatal("SyncCatalog with a failing provider should return an error")
 	}
 
@@ -98,7 +108,7 @@ func TestSyncCatalog_CreatesNewModelsWithGeneratedSlugs(t *testing.T) {
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B"},
 	}}
-	result, err := tr.SyncCatalog(t.Context(), provider, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), provider, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("SyncCatalog: %v", err)
 	}
@@ -173,7 +183,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B"},
 	}}
-	if _, err := tr.SyncCatalog(t.Context(), firstRound, discardLogger()); err != nil {
+	if _, err := tr.SyncCatalog(t.Context(), firstRound, nil, discardLogger()); err != nil {
 		t.Fatalf("first SyncCatalog: %v", err)
 	}
 	secondModel, err := tr.db.OpenWebUIModels.GetByExternalID(t.Context(), workspace.ID, "gpt-oss:120b")
@@ -186,7 +196,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 	secondRound := &fakeCatalogProvider{models: []RemoteModel{
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 	}}
-	result, err := tr.SyncCatalog(t.Context(), secondRound, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), secondRound, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("second SyncCatalog: %v", err)
 	}
@@ -210,7 +220,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B (renamed)"},
 	}}
-	result, err = tr.SyncCatalog(t.Context(), thirdRound, discardLogger())
+	result, err = tr.SyncCatalog(t.Context(), thirdRound, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("third SyncCatalog: %v", err)
 	}
@@ -262,7 +272,7 @@ func TestSyncCatalog_EmptySuccessfulListDeactivatesEverything(t *testing.T) {
 	}
 
 	tr.clock.Advance(time.Hour)
-	result, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{models: nil}, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{models: nil}, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("SyncCatalog: %v", err)
 	}
@@ -275,6 +285,90 @@ func TestSyncCatalog_EmptySuccessfulListDeactivatesEverything(t *testing.T) {
 	}
 	if got.Active {
 		t.Error("a successful empty catalog response should deactivate every model")
+	}
+}
+
+// TestResolveToolConfig_FiltersInaccessibleIDs backs Issue #75 PR5's
+// fail-closed rule: a model's own ToolIDs are kept only when
+// accessibleTools also reports them, mirroring Issue #74's original
+// exclusion behavior — now applied per model rather than to one
+// resolved-at-boot default.
+func TestResolveToolConfig_FiltersInaccessibleIDs(t *testing.T) {
+	eligible := []RemoteModel{
+		{ID: "model-a", ToolIDs: []string{"web_search", "stale_tool"}},
+		{ID: "model-b", ToolIDs: []string{"calculator"}},
+		{ID: "model-c"}, // no toolIds at all
+	}
+	got := resolveToolConfig(eligible, []string{"web_search", "calculator"}, discardLogger())
+
+	if !reflect.DeepEqual(got["model-a"], []string{"web_search"}) {
+		t.Errorf("model-a = %v, want [web_search] (stale_tool excluded)", got["model-a"])
+	}
+	if !reflect.DeepEqual(got["model-b"], []string{"calculator"}) {
+		t.Errorf("model-b = %v, want [calculator]", got["model-b"])
+	}
+	if len(got["model-c"]) != 0 {
+		t.Errorf("model-c = %v, want none", got["model-c"])
+	}
+}
+
+// TestSyncCatalog_PopulatesToolCachePerModel backs the integration this
+// package's whole point is: a sync round resolves each eligible model's
+// own tool_ids into the shared ToolConfigCache, filtered against
+// ListAccessibleTools, keyed by ExternalModelID.
+func TestSyncCatalog_PopulatesToolCachePerModel(t *testing.T) {
+	tr := newTestRegistry(t, validRegistryConfig())
+	if err := tr.Seed(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &fakeCatalogProvider{
+		models: []RemoteModel{
+			{ID: "gpt-oss:20b", Name: "GPT OSS 20B", ToolIDs: []string{"web_search", "stale_tool"}},
+			{ID: "gpt-oss:120b", Name: "GPT OSS 120B", ToolIDs: []string{"calculator"}},
+		},
+		accessibleIDs: []string{"web_search", "calculator"},
+	}
+	toolCache := NewToolConfigCache()
+	if _, err := tr.SyncCatalog(t.Context(), provider, toolCache, discardLogger()); err != nil {
+		t.Fatalf("SyncCatalog: %v", err)
+	}
+
+	if got := toolCache.Get("gpt-oss:20b"); !reflect.DeepEqual(got, []string{"web_search"}) {
+		t.Errorf("toolCache.Get(gpt-oss:20b) = %v, want [web_search]", got)
+	}
+	if got := toolCache.Get("gpt-oss:120b"); !reflect.DeepEqual(got, []string{"calculator"}) {
+		t.Errorf("toolCache.Get(gpt-oss:120b) = %v, want [calculator]", got)
+	}
+}
+
+// TestSyncCatalog_ListAccessibleToolsErrorKeepsPreviousToolCache backs
+// the fail-open rule: a transient failure resolving the accessible-tools
+// list must not blow away a previous round's good cache, and must not
+// fail the whole sync (the registry write itself already succeeded).
+func TestSyncCatalog_ListAccessibleToolsErrorKeepsPreviousToolCache(t *testing.T) {
+	tr := newTestRegistry(t, validRegistryConfig())
+	if err := tr.Seed(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	toolCache := NewToolConfigCache()
+	toolCache.Replace(map[string][]string{"gpt-oss:20b": {"web_search"}})
+
+	tr.clock.Advance(time.Hour)
+	provider := &fakeCatalogProvider{
+		models:        []RemoteModel{{ID: "gpt-oss:20b", Name: "GPT OSS 20B", ToolIDs: []string{"calculator"}}},
+		accessibleErr: errors.New("tools endpoint unreachable"),
+	}
+	result, err := tr.SyncCatalog(t.Context(), provider, toolCache, discardLogger())
+	if err != nil {
+		t.Fatalf("SyncCatalog should still succeed on the registry side: %v", err)
+	}
+	if result.Updated != 1 {
+		t.Errorf("Updated = %d, want 1 (the registry write is independent of tool resolution)", result.Updated)
+	}
+	if got := toolCache.Get("gpt-oss:20b"); !reflect.DeepEqual(got, []string{"web_search"}) {
+		t.Errorf("toolCache.Get(gpt-oss:20b) = %v, want the previous round's value kept", got)
 	}
 }
 

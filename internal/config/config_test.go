@@ -1562,26 +1562,23 @@ func TestLoad_OpenWebUIWebSearchEnabledDefaultsFalse(t *testing.T) {
 	}
 }
 
-// TestLoad_OpenWebUIToolIDsParsesCommaSeparatedList backs Issue #72:
-// OPENWEBUI_TOOL_IDS is a comma-separated list of opaque tokens, trimmed
-// of surrounding whitespace, with no format validation (this service has
-// no way to check a tool id against Open WebUI's own registry).
-func TestLoad_OpenWebUIToolIDsParsesCommaSeparatedList(t *testing.T) {
-	def, err := loadWithOpenWebUI(t, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// TestLoad_OpenWebUIToolIDsIsNoLongerAKnownKey backs Issue #75's removal
+// of OPENWEBUI_TOOL_IDS (Issue #72's deployment-wide tool_ids override):
+// every model's tool_ids now comes from its own GET /api/models
+// info.meta.toolIds, resolved by catalog sync, so a config file still
+// setting this retired key must fail closed as unknown rather than being
+// silently ignored.
+func TestLoad_OpenWebUIToolIDsIsNoLongerAKnownKey(t *testing.T) {
+	if isKnownKey("OPENWEBUI_TOOL_IDS") {
+		t.Error(`"OPENWEBUI_TOOL_IDS" is still a known key; Issue #75 removed it`)
 	}
-	if def.OpenWebUI.ToolIDs != nil {
-		t.Errorf("ToolIDs default = %v, want nil", def.OpenWebUI.ToolIDs)
+	path := writeTempEnvFile(t, "OPENWEBUI_TOOL_IDS=web_search\n")
+	_, err := Load(LoadOptions{ConfigFilePath: path, Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{KeyAppEnv: "development"}))})
+	if err == nil {
+		t.Fatal("a config file setting the retired OPENWEBUI_TOOL_IDS key should fail to load")
 	}
-
-	cfg, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIToolIDs: "web_search, server:mcp:example ,,"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []string{"web_search", "server:mcp:example"}
-	if !reflect.DeepEqual(cfg.OpenWebUI.ToolIDs, want) {
-		t.Errorf("ToolIDs = %v, want %v", cfg.OpenWebUI.ToolIDs, want)
+	if !strings.Contains(err.Error(), "OPENWEBUI_TOOL_IDS") {
+		t.Errorf("error %q does not name the unknown key", err.Error())
 	}
 }
 

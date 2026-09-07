@@ -1,6 +1,7 @@
 package openwebui
 
 import (
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -9,6 +10,17 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 )
+
+// discardLogger is a real, non-nil *slog.Logger that writes nowhere, for
+// tests that want a package function's warning/info logging path to run
+// without cluttering test output.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(discardWriter{}, nil))
+}
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // fakeClock is a mutable, test-controlled Clock, mirroring
 // internal/timeline's and internal/miauth's identically-named test

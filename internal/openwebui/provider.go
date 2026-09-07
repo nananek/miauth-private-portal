@@ -61,6 +61,16 @@ type StartChatRequest struct {
 	Messages []Message
 	NewTurn  Message
 	IDs      TurnIDs
+	// ToolIDs is sent verbatim as tool_ids on this one call — Issue #75
+	// resolves it per model (the model's own info.meta.toolIds, GET
+	// /api/models, filtered against what this credential may actually
+	// invoke), unlike Issue #72's original single deployment-wide
+	// OPENWEBUI_TOOL_IDS override, which Issue #75 retires. Nil/empty
+	// sends no "tool_ids" key at all. WebSearchEnabled has no per-call
+	// counterpart: OPENWEBUI_WEB_SEARCH_ENABLED stays one deployment-wide
+	// flag (owner decision, Issue #75), so the adapter still carries it
+	// as a construction-time Config field.
+	ToolIDs []string
 	// CorrelationID is a local request id for logging only. It is never
 	// sent to the provider and is not a provider idempotency key — Open
 	// WebUI has none (ADR-0005 D7).
@@ -90,6 +100,8 @@ type ContinueTurnRequest struct {
 	IDs           TurnIDs
 	CorrelationID string
 	SentAt        time.Time
+	// ToolIDs mirrors StartChatRequest.ToolIDs — see its doc comment.
+	ToolIDs []string
 }
 
 // TurnResult is a turn's confirmed successful outcome. RemoteCurrentID,

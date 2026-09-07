@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -115,6 +116,16 @@ func mustTurnJobPayload(t *testing.T, job domain.Job) turnJobPayload {
 }
 
 func newTestTurnJob(env *turnTestEnv, provider Provider, cfg TurnJobConfig) (*TurnJob, *timeline.Service) {
+	return newTestTurnJobWithToolCache(env, provider, nil, cfg)
+}
+
+// newTestTurnJobWithToolCache is newTestTurnJob with an explicit
+// *ToolConfigCache, for the one test (below) exercising Issue #75 PR5's
+// per-model tool_ids resolution — every other test in this file goes
+// through the nil-cache shorthand above, since ToolIDs's zero value
+// (omit the key entirely) is Provider.StartChat/ContinueTurn's existing,
+// already-covered default.
+func newTestTurnJobWithToolCache(env *turnTestEnv, provider Provider, toolCache *ToolConfigCache, cfg TurnJobConfig) (*TurnJob, *timeline.Service) {
 	timelineSvc := timeline.NewService(env.db, env.db.Repos, timeline.Config{Clock: env.clock})
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 8
@@ -122,7 +133,7 @@ func newTestTurnJob(env *turnTestEnv, provider Provider, cfg TurnJobConfig) (*Tu
 	if cfg.MaxContextMessages == 0 {
 		cfg.MaxContextMessages = 100
 	}
-	return NewTurnJob(env.db.Repos, timelineSvc, provider, cfg, env.clock, nil), timelineSvc
+	return NewTurnJob(env.db.Repos, timelineSvc, provider, toolCache, cfg, env.clock, nil), timelineSvc
 }
 
 func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
@@ -221,6 +232,81 @@ func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
 	// value that never learned the chat id.
 	if turn.RemoteChatID == nil || *turn.RemoteChatID != "remote-chat-1" {
 		t.Errorf("turn.RemoteChatID = %v, want remote-chat-1", turn.RemoteChatID)
+	}
+}
+
+// TestTurnJob_StartChat_SendsResolvedToolIDs backs Issue #75 PR5: a
+// StartChat request carries whatever tool_ids the shared ToolConfigCache
+// resolved for this turn's model (Registry.SyncCatalog's own writes,
+// keyed by ExternalModelID) — resolved per model now, never a single
+// deployment-wide OPENWEBUI_TOOL_IDS override.
+func TestTurnJob_StartChat_SendsResolvedToolIDs(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+
+	toolCache := NewToolConfigCache()
+	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search", "calculator"}})
+
+	var sawToolIDs []string
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		sawToolIDs = req.ToolIDs
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
+	}
+
+	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !reflect.DeepEqual(sawToolIDs, []string{"web_search", "calculator"}) {
+		t.Errorf("StartChat ToolIDs = %v, want the cached resolution", sawToolIDs)
+	}
+}
+
+// TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs backs the safe
+// default: a model the cache has never resolved anything for (a nil
+// cache, or one that has simply not synced this model yet) sends no
+// tool_ids at all, rather than erroring or guessing.
+func TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+
+	toolCache := NewToolConfigCache() // never populated
+
+	var sawToolIDs []string
+	sawCall := false
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		sawToolIDs = req.ToolIDs
+		sawCall = true
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
+	}
+
+	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !sawCall {
+		t.Fatal("StartChat was never called")
+	}
+	if len(sawToolIDs) != 0 {
+		t.Errorf("StartChat ToolIDs = %v, want none for an unresolved model", sawToolIDs)
 	}
 }
 

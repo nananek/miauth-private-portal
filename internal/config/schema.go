@@ -98,10 +98,14 @@ const (
 	KeyOpenWebUIMaxRequestBytes    = "OPENWEBUI_MAX_REQUEST_BYTES"
 	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
 
-	// The two keys below are Issue #72's opt-in web-search/tool-use
-	// flags for the outbound completions call.
+	// KeyOpenWebUIWebSearchEnabled is Issue #72's opt-in web-search flag
+	// for the outbound completions call. It stays one deployment-wide
+	// setting (owner decision, Issue #75) — unlike per-model tool_ids
+	// (OPENWEBUI_TOOL_IDS, Issue #72's sibling flag, removed by that same
+	// decision: every model's tool_ids now come from its own
+	// GET /api/models info.meta.toolIds, resolved by catalog sync rather
+	// than overridden by a single deployment-wide config value).
 	KeyOpenWebUIWebSearchEnabled = "OPENWEBUI_WEB_SEARCH_ENABLED"
-	KeyOpenWebUIToolIDs          = "OPENWEBUI_TOOL_IDS"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -184,7 +188,6 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIMaxRequestBytes,
 	KeyOpenWebUIMaxContextMessages,
 	KeyOpenWebUIWebSearchEnabled,
-	KeyOpenWebUIToolIDs,
 }
 
 func isKnownKey(key string) bool {

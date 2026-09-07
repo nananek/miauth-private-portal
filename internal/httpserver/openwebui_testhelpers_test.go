@@ -98,7 +98,7 @@ func findOpenWebUITurnJobFor(t *testing.T, ts *noteAPITestServer, sourceEntryID 
 func runOpenWebUITurnJobForIgnoringError(t *testing.T, ts *noteAPITestServer, provider openwebui.Provider, sourceEntryID string) error {
 	t.Helper()
 	turnJob := findOpenWebUITurnJobFor(t, ts, sourceEntryID)
-	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
+	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
 	return handler.Handle(t.Context(), turnJob)
 }
 

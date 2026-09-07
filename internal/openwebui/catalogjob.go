@@ -27,23 +27,25 @@ const JobTypeCatalogSync = "openwebui_catalog_sync"
 // every job type, so a transient provider outage is retried on jobs' own
 // schedule rather than this package growing a second one.
 type CatalogSyncJob struct {
-	registry *Registry
-	provider CatalogProvider
-	logger   *slog.Logger
+	registry  *Registry
+	provider  CatalogProvider
+	toolCache *ToolConfigCache
+	logger    *slog.Logger
 }
 
-// NewCatalogSyncJob builds a CatalogSyncJob. A nil logger defaults to
-// slog.Default().
-func NewCatalogSyncJob(registry *Registry, provider CatalogProvider, logger *slog.Logger) *CatalogSyncJob {
+// NewCatalogSyncJob builds a CatalogSyncJob. toolCache may be nil to skip
+// per-model tool resolution entirely (see Registry.SyncCatalog); a nil
+// logger defaults to slog.Default().
+func NewCatalogSyncJob(registry *Registry, provider CatalogProvider, toolCache *ToolConfigCache, logger *slog.Logger) *CatalogSyncJob {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &CatalogSyncJob{registry: registry, provider: provider, logger: logger}
+	return &CatalogSyncJob{registry: registry, provider: provider, toolCache: toolCache, logger: logger}
 }
 
 // Handle implements internal/jobs.Handler.
 func (j *CatalogSyncJob) Handle(ctx context.Context, job domain.Job) error {
-	result, err := j.registry.SyncCatalog(ctx, j.provider, j.logger)
+	result, err := j.registry.SyncCatalog(ctx, j.provider, j.toolCache, j.logger)
 	if err != nil {
 		return fmt.Errorf("openwebui: catalog sync job: %w", err)
 	}

@@ -48,10 +48,15 @@ type RemoteModel struct {
 	DefaultFeatureIDs []string
 }
 
-// CatalogProvider is the one call SyncCatalog needs from a provider
-// adapter: list every model the configured account can currently see.
+// CatalogProvider is what SyncCatalog needs from a provider adapter:
+// list every model the configured account can currently see, and list
+// every tool id that same account may actually invoke — the latter is
+// what per-model tool_ids resolution (toolcache.go) filters each
+// RemoteModel's own ToolIDs against, fail-closed, the same rule Issue
+// #74 originally applied to a single resolved-at-boot model.
 type CatalogProvider interface {
 	ListModels(ctx context.Context) ([]RemoteModel, error)
+	ListAccessibleTools(ctx context.Context) ([]string, error)
 }
 
 // SyncResult summarizes what one SyncCatalog run changed, for a caller
@@ -110,7 +115,15 @@ func eligibleRemoteModels(models []RemoteModel, logger *slog.Logger) []RemoteMod
 // service knows about. A *successful* empty list is different: it is
 // treated as a genuine "the account can currently see nothing", and
 // every active model is deactivated accordingly.
-func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, logger *slog.Logger) (SyncResult, error) {
+//
+// toolCache, if non-nil, is refreshed with every eligible model's own
+// tool_ids (Issue #75 PR5), filtered against provider.ListAccessibleTools
+// — but only once the registry write below actually commits, and never
+// at all if ListAccessibleTools itself fails (logged, cache left exactly
+// as the previous successful round left it, the same fail-open-not-
+// fail-closed treatment #74 gave a startup-time outage). Pass nil to
+// skip tool resolution entirely.
+func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, toolCache *ToolConfigCache, logger *slog.Logger) (SyncResult, error) {
 	if !r.cfg.Enabled {
 		return SyncResult{}, ErrDisabled
 	}
@@ -192,6 +205,15 @@ func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, lo
 	})
 	if err != nil {
 		return SyncResult{}, err
+	}
+
+	if toolCache != nil {
+		accessible, err := provider.ListAccessibleTools(ctx)
+		if err != nil {
+			logger.Warn("openwebui: catalog sync: list accessible tools failed; keeping the previous round's tool_ids cache", "error", err)
+		} else {
+			toolCache.Replace(resolveToolConfig(eligible, accessible, logger))
+		}
 	}
 	return result, nil
 }
