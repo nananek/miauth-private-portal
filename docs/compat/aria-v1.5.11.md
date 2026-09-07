@@ -85,7 +85,7 @@ redacted.
 | `POST /api/i/update` (`name` field only) | **必要** for Issue #23 | Owner profile display-name self-edit from Settings → Profile | `i` token; local `write:account` equivalent |
 | `POST /api/i/update` (`username` field) | **不要** | No traced Aria/misskey_dart source ever sends or exposes a `username` field on this endpoint | N/A — never implement without a new observed source |
 | `POST /api/notes/update` | **不要** for Issue #2 | Only the edit path uses it; editing is not an Issue #2 acceptance journey | Do not advertise it until a later issue adds a contract |
-| WebSocket `/streaming` timeline channel | **不要** for MVP; **minimal stub since Issue #41** | Provides live insertion, but HTTP load/reload/pagination are sufficient for MVP | A failed optional stream must not make HTTP timeline or post operations fail |
+| WebSocket `/streaming` timeline channel | **不要** for MVP compatibility scope (HTTP load/reload/pagination remain the correctness source of truth); **minimal stub since Issue #41, real `homeTimeline` note-create push since Issue #95** | Provides live insertion as a UX enhancement, not a requirement — see "Streaming decision" below | A failed optional stream must not make HTTP timeline or post operations fail |
 | `POST /api/stats` | **必要** for Issue #23 PR2 (implemented) | Server-info page, always reachable via `/{acct}/servers/{host}` | Anonymous; the traced call site always builds a tokenless guest account, so no `i` field is ever sent |
 | `POST /api/notes/delete` | **必要** for Issue #23 PR3 (implemented) | Note footer/sheet delete action, and the post-edit dialog's delete option | `i` token; `write:notes` (already granted — no new scope) |
 | `POST /api/notes/renote` | **不要** | No traced Aria/misskey_dart source ever sends a dedicated renote-creation request to this path; renoting is `notes/create` with `renoteId` set (already rejected as `UNSUPPORTED_FEATURE`) | N/A — never implement without a new observed source |
@@ -1108,16 +1108,32 @@ chronology from an ID. Stable cursor behavior is a local requirement.
 
 ## Streaming decision
 
-Streaming is **not an MVP requirement**. The observation shows that Aria's
-timeline is initially populated and paginated through HTTP
+Streaming was **not an MVP requirement** (Issue #2). The observation showed
+that Aria's timeline is initially populated and paginated through HTTP
 `/api/notes/timeline`; its WebSocket timeline channel only inserts newly
 arriving notes and provides a live UX enhancement. Post success, reload,
-restart persistence, reply creation, and thread viewing can all be verified
-without a stream.
+restart persistence, reply creation, and thread viewing could all be
+verified without a stream.
 
-MVP therefore uses poll/reload semantics as the release gate. A future
-streaming adapter may be added behind a capability check, but a stream outage
-must not make the HTTP timeline, post, or thread endpoints unavailable.
+MVP therefore used poll/reload semantics as the release gate, and that
+remains true today: HTTP load/reload/pagination is still the correctness
+source of truth for every journey this contract covers, not the stream. A
+stream outage must never make the HTTP timeline, post, or thread endpoints
+unavailable.
+
+**Updated by Issue #95 PR2**: the "future streaming adapter" this section
+originally deferred has now shipped, narrowly. `GET /streaming` pushes a
+real live-insertion event — but only a `homeTimeline` `"note"` create event,
+nothing else — see "Traced server→client `channel`/`note` push event shape"
+below for the confirmed wire shape and internal/streamhub's role, and
+"Issue #41: minimal stub, not a capability" just below for how this sits
+alongside the earlier handshake-only stub. This is still not "full Misskey
+streaming compatibility": reaction, notification, mention, renote, and every
+other `ChannelStreamEvent` case remain unimplemented and un-pushed, a
+deliberate, permanent non-goal (README.md's "Known limitations"), not
+deferred work. Push delivery is additive UX only — its failure in any form
+must never affect post success or the HTTP timeline's own correctness, the
+same rule this section has always stated for a stream outage.
 
 ### Issue #41: minimal stub, not a capability
 
@@ -1132,13 +1148,22 @@ merely a theoretical gap in this contract's Non-goals.
 
 Issue #41 adds a `read:account`-authenticated `GET /streaming` that
 completes the WebSocket handshake, sends a `{"type":"connected", ...}` ack
-for `connect`, tracks (but never reads back) `disconnect`/`subNote`/
-`unsubNote` state, and pings every `StreamPingInterval` (default 30s) to
-stay alive through an idle-timeout intermediary. It still pushes no real
-note/notification event — the "not an MVP requirement" decision above is
-unchanged in substance. This is a wire-availability fix for the symptom
-above, not a promotion of streaming to a supported capability; do not treat
-a successful handshake as evidence that live timeline updates work.
+for `connect`, tracks `disconnect`/`subNote`/`unsubNote` state, and pings
+every `StreamPingInterval` (default 30s) to stay alive through an
+idle-timeout intermediary. At the time, none of that tracked state was ever
+read back — the "not an MVP requirement" decision above was unchanged in
+substance, a wire-availability fix for the symptom above, not a promotion
+of streaming to a supported capability. **This is no longer the full
+picture as of Issue #95 PR2**: `connect`'s `channel`/`id` state (only —
+`subNote`/`unsubNote`'s note-ID tracking is still never read back by
+anything) is now read to drive a real `homeTimeline` `"note"` push — Issue
+#41's own doc comment already noted this connection state existed only so
+"a future real-event-push feature has an established place to look up ...
+against". See the "Streaming decision" section's Issue #95 update above and
+"Traced server→client `channel`/`note` push event shape" below for the
+confirmed wire shape. A successful handshake is still not evidence that
+every kind of live timeline update works — only home-timeline note creation
+is ever pushed.
 
 As with Issues #7 and #13, **no real Aria/Misskey end-to-end verification
 has been performed for this issue**: `streaming_handlers_test.go` proves

@@ -182,10 +182,14 @@ surface the pinned Aria target needs (`AGENTS.md`'s "Product boundary").
 The following are permanent, deliberate non-goals rather than deferred
 work:
 
-- **No streaming**: the `/streaming` WebSocket timeline channel is not
-  implemented. Aria's HTTP poll/reload/pagination flow is sufficient for
-  every supported journey (see
-  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s
+- **No full streaming, only a live home-timeline note push**: `/streaming`
+  completes the WebSocket handshake (Issue #41) and pushes a real event for
+  a newly created note on the home timeline (Issue #95), but that remains
+  a UX enhancement, not the correctness source of truth — Aria's HTTP
+  poll/reload/pagination flow is sufficient, and still authoritative, for
+  every supported journey. Reactions, notifications, mentions, renotes, and
+  every other live event type are permanently unimplemented and never
+  pushed (see [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s
   "Streaming decision").
 - **No full Misskey compatibility or federation**: reactions, files/
   drive, polls, renotes, notifications, channels, chat, and every other
