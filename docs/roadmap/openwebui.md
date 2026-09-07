@@ -661,16 +661,14 @@ Acceptance criteria (evidence: `docs/operations/openwebui-release-gate.md`):
   access-controlled backups may contain the local post/assistant bodies and
   opaque remote IDs required for restart and continuation, but never raw
   provider secrets.
-- [ ] Same-remote-chat branch management, regeneration, provider edit/delete,
+- [x] Same-remote-chat branch management, regeneration, provider edit/delete,
   existing-chat import/list/pull, and history-browsing behavior is not
-  advertised as successful API/UI capability. **Deferred:** not yet
-  independently verified/documented; tracked alongside the runbook and
-  target-instance work once #50's TBDs resolve.
+  advertised as successful API/UI capability.
 
-**Status (2026-09-07, Issue #54 OWUI-R PR3):** 6 of the 8 criteria above have
-fixture-based or documented-inspection evidence. The remaining 2 (target-
-instance evidence and the capability-advertising restriction) are pending
-Issue #50's TBD resolution; Issue #54 stays open until they are addressed.
+**Status (2026-09-07, Issue #54 OWUI-R PR3):** 7 of the 8 criteria above have
+fixture-based or documented-inspection evidence. The remaining 1
+(target-instance evidence) is pending Issue #50's TBD resolution; Issue #54
+stays open until it is addressed.
 
 ## Auth, permission, and secret boundary
 

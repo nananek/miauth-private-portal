@@ -9,15 +9,14 @@ Issue #13's AC8.
 
 **Out of scope for this document, by owner decision:** target-instance
 evidence (persistent chat creation/continuation, default-model permission,
-and completion finish against a real Open WebUI instance) and the
-operational finalization of credential rotation ownership both require
-details Issue #50 (Open WebUI umbrella) still tracks as TBD — a dedicated
-service account and rotation owner, the pinned production instance version,
-the allowlisted origin, size/timeout/rate limits, the default-model access
-grant procedure, and the socket.io streaming decision. Six of the eight AC
-bullets below have fixture/inspection evidence as of this PR; the remaining
-two are deferred to a follow-up once those TBDs resolve. **Issue #54 is not
-closed by this PR series** — see the status note at the end of this
+and completion finish against a real Open WebUI instance) requires details
+Issue #50 (Open WebUI umbrella) still tracks as TBD — a dedicated service
+account, the pinned production instance version, the allowlisted origin,
+size/timeout/rate limits, the default-model access grant procedure, and the
+socket.io streaming decision. Seven of the eight AC bullets below have
+fixture/inspection evidence as of this PR; the remaining one (target-instance
+evidence) is deferred to a follow-up once those TBDs resolve. **Issue #54 is
+not closed by this PR series** — see the status note at the end of this
 document and the matching note in `docs/roadmap/openwebui.md`.
 
 ## Acceptance criteria → evidence
@@ -31,12 +30,11 @@ document and the matching note in `docs/roadmap/openwebui.md`.
 | 5 | Initial remote chat creation response loss becomes `ambiguous` (and may become `dead` only through explicit recovery) and never silently creates a duplicate chat; no new creation, continuation, or automatic retry occurs until owner/operator recovery. | `internal/httpserver/openwebui_ambiguity_test.go`: `TestOpenWebUIAmbiguity_ChatCreationResponseLossNeverAutoRetriesOrDuplicatesChat`, `TestOpenWebUIAmbiguity_OwnerConfirmLinkIsTheOnlyWayToRecoverAReply` (Issue #54 OWUI-R PR2), backed by the unit-level `internal/openwebui/turnjob_test.go`: `TestTurnJob_StartChat_TimeoutFreezesLinkAmbiguousAndNeverRecreates`, `TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider` and `internal/openwebui/recovery_test.go`: `TestConfirmLink_*`, `TestAbandonLink_*`, `TestFreezeLink_*` |
 | 6 | Target-instance evidence covers persistent chat creation/continuation, default-model permission, completion finish, and any enabled stream finish. | **Deferred.** Requires a real Open WebUI instance and a provisioned service account, both TBD in Issue #50. |
 | 7 | Raw provider credentials, session capabilities, cookies, prompts, and stream chunks are absent from logs, traces, fixtures, and error responses; encrypted, access-controlled backups may contain local post/assistant bodies and opaque remote IDs, but never raw provider secrets. | `docs/operations/security-regression.md`'s "Log redaction" table: the existing `internal/openwebui/provider_test.go`/`internal/provider/openwebui/client_test.go`/`cmd/openwebuictl/main_test.go` rows cover logs/traces/fixtures/error responses; the backup row added by Issue #54 OWUI-R PR3 covers backups, citing `internal/openwebui.RegistryConfig` (`internal/openwebui/registry.go`) holding only `SecretRef` (a configuration key name, never the key itself) and `docs/decisions/0005-openwebui-boundary.md` D10 as the decision record for that storage boundary |
-| 8 | Same-remote-chat branch management, regeneration, provider edit/delete, existing-chat import/list/pull, and history-browsing behavior is not advertised as successful API/UI capability. | **Deferred.** Not yet independently verified and documented; tracked alongside the runbook and target-instance work once Issue #50's TBDs resolve. |
+| 8 | Same-remote-chat branch management, regeneration, provider edit/delete, existing-chat import/list/pull, and history-browsing behavior is not advertised as successful API/UI capability. | Verified by inspection, not a dedicated test (Issue #54 OWUI-R PR3): `internal/httpserver/server.go`'s route table has no endpoint for any of these operations — the only Open WebUI touchpoint is the bridge wired into `POST /api/notes/create`; `internal/httpserver/noteapi_handlers.go`'s `implementedEndpoints` list (what `POST /api/endpoints` advertises) never lists one either; `cmd/openwebuictl/main.go` exposes only the owner-recovery subcommands `links`/`show`/`confirm`/`abandon`/`freeze`, none of which touches remote-chat content; and `internal/provider/openwebui/client.go`'s `Client` implements only `StartChat`/`ContinueTurn`/`LookupTurnOutcome` — no method exists for any of these capabilities to be advertised through |
 
 ## Status (as of Issue #54 OWUI-R PR3)
 
-6 of 8 acceptance criteria have fixture-based or documented-inspection
-evidence. The remaining 2 (target-instance evidence and the same-remote-chat
-capability-advertising restriction, rows 6 and 8 above) are pending Issue
-#50's TBD resolution and are not addressed by this PR series. Issue #54
-stays open until they are.
+7 of 8 acceptance criteria have fixture-based or documented-inspection
+evidence. The remaining 1 (target-instance evidence, row 6 above) is
+pending Issue #50's TBD resolution and is not addressed by this PR series.
+Issue #54 stays open until it is.
