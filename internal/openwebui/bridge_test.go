@@ -81,6 +81,65 @@ func TestEnqueueTurn_SkipsAuthorNotLoginable(t *testing.T) {
 	requireNoTurnRows(t, env)
 }
 
+func TestEnqueueTurn_SkipsMentionOnlyPost(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	// A bare mention (no other text) strips to an empty provider-facing
+	// message (Issue #70's follow-up), so there is nothing to start a
+	// turn over.
+	root := env.mustCreateRoot(t, "@someone@example.com")
+
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	requireNoTurnRows(t, env)
+}
+
+func TestEnqueueTurn_SkipsWhitespaceOnlyMentionPost(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	// A mention padded with whitespace still strips to nothing once the
+	// mention-gap cleanup and trim run.
+	root := env.mustCreateRoot(t, "  @owner  ")
+
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	requireNoTurnRows(t, env)
+}
+
+func TestEnqueueTurn_SkipsWhitespaceOnlyPostWithNoMentionAtAll(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	// No mention at all, but nothing but whitespace either — the same
+	// "nothing to send" case as a stripped-down mention.
+	root := env.mustCreateRoot(t, "   ")
+
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	requireNoTurnRows(t, env)
+}
+
+func TestEnqueueTurn_DoesNotSkipMentionPlusRealText(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	// A mention alongside real text must still enqueue normally — only
+	// an entirely-empty provider-facing result is skipped.
+	root := env.mustCreateRoot(t, "@owner hello")
+
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	jobRows, err := env.db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobRows) != 1 {
+		t.Fatalf("jobs = %v, want exactly 1", jobRows)
+	}
+}
+
 func TestEnqueueTurn_SkipsIneligiblePath(t *testing.T) {
 	env := newTurnTestEnv(t)
 	bridge := newTestBridge(env)
