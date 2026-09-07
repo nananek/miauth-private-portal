@@ -59,8 +59,13 @@ type Config struct {
 	// context.WithTimeout wrapping the job's own ctx — internal/provider/
 	// openai.Client has no Config of its own to reload, so this is where
 	// LLM_TIMEOUT's live value actually takes effect (Issue #76 PR4c).
-	// Zero (the default for a hand-built Config that predates this
-	// field) leaves ctx's own deadline, if any, as the only bound.
+	// internal/provider/openai.Client deliberately keeps no
+	// construction-time http.Client.Timeout of its own for this reason: a
+	// frozen client-level timeout would silently floor this field's live
+	// increases at whatever LLM_TIMEOUT was at process start (see that
+	// package's NewClient/doComplete comments). Zero (the default for a
+	// hand-built Config that predates this field) leaves ctx's own
+	// deadline, if any, as the only bound.
 	Timeout time.Duration
 	// MaxAttempts must mirror internal/jobs.Config.MaxAttempts (the same
 	// value cmd/server passes to jobs.NewManager), so Handle can tell

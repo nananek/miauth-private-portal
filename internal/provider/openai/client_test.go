@@ -233,6 +233,32 @@ func TestClient_Complete_ClassifiesErrors(t *testing.T) {
 	}
 }
 
+// TestClient_Complete_CallerDeadlineLongerThanConstructionTimeoutIsHonored
+// backs Issue #76 PR4c's live LLM_TIMEOUT increase: Client must never
+// clamp a call to the timeout.Duration it was constructed with when the
+// caller's own context already carries a longer deadline (Service.Handle
+// derives that deadline from the current, possibly live-reloaded,
+// Config.Timeout). A regression here would silently floor every raised
+// LLM_TIMEOUT back down to whatever it was when the process started.
+func TestClient_Complete_CallerDeadlineLongerThanConstructionTimeoutIsHonored(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"still on time"},"finish_reason":"stop"}]}`))
+	})
+	client.timeout = 5 * time.Millisecond // the construction-time fallback, deliberately shorter than the handler's own sleep
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	result, err := client.Complete(ctx, llmreply.CompletionRequest{Messages: []llmreply.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("Complete: %v, want the caller's longer deadline to win over Client's own construction-time timeout", err)
+	}
+	if result.Content != "still on time" {
+		t.Errorf("Content = %q, want %q", result.Content, "still on time")
+	}
+}
+
 func TestClient_Complete_TimeoutIsClassifiedAsTimeout(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
