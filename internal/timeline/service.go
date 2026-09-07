@@ -758,6 +758,23 @@ func (s *Service) ResolveAuthor(ctx context.Context, actorID string) (domain.Act
 	return s.repos.Actors.Get(ctx, actorID)
 }
 
+// GetActorByType returns the singleton actor of actorType (owner,
+// assistant, system) — the same repos.Actors.GetByType lookup
+// ResolveAuthor makes for one already-known actor ID, but keyed by type
+// instead, for a caller enumerating the known actor set rather than
+// resolving one entry's author (Issue #65's user search).
+func (s *Service) GetActorByType(ctx context.Context, actorType domain.ActorType) (domain.Actor, error) {
+	return s.repos.Actors.GetByType(ctx, actorType)
+}
+
+// ListActorsByType returns every actor of actorType, in
+// ActorRepository.ListByType's own stable order. Issue #65's user search
+// uses it to enumerate every Open WebUI model actor
+// (domain.ActorOpenWebUIModel), the one non-singleton actor type.
+func (s *Service) ListActorsByType(ctx context.Context, actorType domain.ActorType) ([]domain.Actor, error) {
+	return s.repos.Actors.ListByType(ctx, actorType)
+}
+
 // enqueueForEntry enqueues each non-nil job in jobs against entryID, in
 // the same transaction the caller is already running inside. Since jobs
 // is variadic, a caller passing a single possibly-nil job (as every

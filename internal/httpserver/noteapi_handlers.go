@@ -96,6 +96,8 @@ var implementedEndpoints = []string{
 	"notes/mentions",
 	"i/notifications",
 	"stats",
+	"users/search",
+	"users/search-by-username-and-host",
 }
 
 func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {

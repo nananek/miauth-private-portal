@@ -10,9 +10,19 @@ import "time"
 // it to internal/timeline.Service.CountByAuthor); it was an honest 0
 // before Issue #7 implemented any note functionality to count.
 type userDetailedNotMe struct {
-	ID             string  `json:"id"`
-	Username       string  `json:"username"`
-	Name           *string `json:"name"`
+	ID       string  `json:"id"`
+	Username string  `json:"username"`
+	Name     *string `json:"name"`
+	// Host mirrors userLite's own convention (noteapi_wire.go): nil
+	// (host: null) for every local actor, and the same fixed
+	// presentation host resolveUserLite gives an Open WebUI model actor
+	// (Issue #52) elsewhere. It stays nil for /api/i and the MiAuth
+	// check response — both only ever project the local owner — and is
+	// only ever non-nil from users/search's Open WebUI model results
+	// (Issue #65). docs/compat/aria-v1.5.11.md's "UserDetailedNotMe
+	// minimum" lists host as nullable/omittable, so leaving it nil here
+	// is a valid response, not a gap.
+	Host           *string `json:"host"`
 	CreatedAt      string  `json:"createdAt"`
 	IsBot          bool    `json:"isBot"`
 	IsCat          bool    `json:"isCat"`
@@ -22,6 +32,15 @@ type userDetailedNotMe struct {
 	FollowersCount int     `json:"followersCount"`
 	FollowingCount int     `json:"followingCount"`
 	NotesCount     int     `json:"notesCount"`
+	// Url is always nil: this deployment has no per-user profile URL
+	// concept. Its purpose is purely structural — misskey_dart's
+	// polymorphic User.fromJson (lib/src/data/base/user.dart) decodes an
+	// object as UserDetailed only when the "url" key is present at all
+	// (any value, including null); every projection built through this
+	// struct (POST /api/i, MiAuth check, users/search) must carry the
+	// key so Aria's own `.whereType<UserDetailed>()` call sites never
+	// silently drop it (Issue #65).
+	Url *string `json:"url"`
 }
 
 func newUserDetailedNotMe(actorID, username, displayName string, createdAt time.Time, notesCount int) userDetailedNotMe {

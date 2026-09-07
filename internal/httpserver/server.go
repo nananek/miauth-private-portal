@@ -73,8 +73,9 @@ type Server struct {
 // Issue #23 PR1's POST /api/i/update, PR2's anonymous POST /api/stats,
 // PR3's POST /api/notes/delete, PR4's POST
 // /api/notes/reactions/create, /api/notes/reactions/delete, and POST
-// /api/notes/reactions, PR5's POST /api/notes/mentions, and PR6's POST
-// /api/i/notifications. They register only when both
+// /api/notes/reactions, PR5's POST /api/notes/mentions, PR6's POST
+// /api/i/notifications, and Issue #65's POST /api/users/search and
+// /api/users/search-by-username-and-host. They register only when both
 // opts.MiAuthService and opts.TimelineService are non-nil: every
 // protected note route authenticates through RequireScope (which needs
 // the MiAuth service), and there is no meaningful note API without a
@@ -133,6 +134,8 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /api/notes/reactions", RequireScope(logger, s.miauth, miauth.ScopeReadReactions)(http.HandlerFunc(s.handleNotesReactions)))
 		s.Handle("POST /api/notes/mentions", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesMentions)))
 		s.Handle("POST /api/i/notifications", RequireScope(logger, s.miauth, miauth.ScopeReadNotifications)(http.HandlerFunc(s.handleAPINotifications)))
+		s.Handle("POST /api/users/search", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearch)))
+		s.Handle("POST /api/users/search-by-username-and-host", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearchByUsernameAndHost)))
 	}
 
 	return s

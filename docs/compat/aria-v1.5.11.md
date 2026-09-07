@@ -95,6 +95,8 @@ redacted.
 | `POST /api/notes/mentions` | **必要** for Issue #23 (not yet implemented — PR5) | Optional user-added "Mention"/"Direct" home-timeline tabs | `i` token; `read:notes` (already granted — no new scope, per trace; see below) |
 | `POST /api/i/notifications` | **必要** for Issue #23 PR6 (implemented) | The Notifications tab, always present in Aria's navigation | `i` token; new `read:notifications` scope |
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
+| `POST /api/users/search` | **必要** for Issue #65 (implemented) | User-selection dialog and mention/search autocomplete's query-based lookup | `i` token; `read:account` (already granted — no new scope) |
+| `POST /api/users/search-by-username-and-host` | **必要** for Issue #65 (implemented) | Same call sites' exact username(+host) lookup | `i` token; `read:account` (already granted — no new scope) |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -925,6 +927,85 @@ conflict requiring a new owner decision the way PR1's `username` finding
 was — but it is a large enough surprise relative to Issue #23's explicit
 Scope/Acceptance-criteria text (which lists this sub-endpoint by name)
 that PR6 should not assume it needs to add this route at all.
+
+### `POST /api/users/search` and `POST /api/users/search-by-username-and-host` (Issue #65, implemented)
+
+Traced from the pinned Aria commit's `lib/view/dialog/user_select_dialog.dart`,
+`lib/provider/api/search_users_notifier_provider.dart`, and
+`lib/provider/api/search_users_by_username_provider.dart`, plus the pinned
+`misskey_dart`'s `UsersSearchRequest`/`UsersSearchByUsernameAndHostRequest`
+models and the polymorphic `User.fromJson` decoder in
+`lib/src/data/base/user.dart`. The observed operator action that surfaces
+these calls is Aria's own "Chat" feature's user picker (`Start Chat` →
+`Individual Chat`); **this PR implements only the search lookup itself, not
+Chat** — `POST /api/chat/*` remains unimplemented, matching README.md's
+"Known limitations." Selecting a user from the resulting dialog still ends
+in an unsupported-endpoint error the first time Aria tries to actually start
+or send a chat message.
+
+Both endpoints omit any null-valued optional field before sending, per this
+document's general rule:
+
+```json
+// POST /api/users/search
+{"query": "some text", "offset": 0, "limit": 10, "origin": "combined", "detail": true}
+// POST /api/users/search-by-username-and-host
+{"username": "someuser", "host": null, "limit": 10, "detail": true}
+```
+
+`query` is the only field `UsersSearchRequest` requires; every other field on
+both requests — `offset`/`limit`/`origin`/`detail` on the first,
+`username`/`host`/`limit`/`detail` on the second — may be entirely absent.
+
+**The response is a bare JSON array, never wrapped in an object**, and each
+element is decoded through `User.fromJson`'s discriminator, not directly as
+`UserDetailedNotMe`:
+
+```dart
+factory User.fromJson(json) {
+  if (json.containsKey("url")) return UserDetailed.fromJson(json);
+  else return UserLite.fromJson(json);
+}
+factory UserDetailed.fromJson(json) {
+  if (json.containsKey("avatarId")) return MeDetailed.fromJson(json);
+  else if (json.containsKey("isFollowing")) return UserDetailedNotMeWithRelations.fromJson(json);
+  else return UserDetailedNotMe.fromJson(json);
+}
+```
+
+All three Aria call sites filter their result list with
+`.whereType<UserDetailed>()`. **A search result object missing the `"url"`
+key (any value, including `null`, is enough) decodes as `UserLite` instead
+and is silently dropped from what Aria ever shows** — the endpoint still
+returns 200 with otherwise-correct-looking JSON, so this failure mode is
+easy to miss without a dedicated raw-JSON key check. Conversely, an
+`"avatarId"` or `"isFollowing"` key must never be present, or the object
+misdecodes as `MeDetailed`/`UserDetailedNotMeWithRelations` and fails to
+parse against their own additional required fields. Every other required
+field matches this document's already-frozen "`UserDetailedNotMe` minimum"
+table above.
+
+**Implemented as** `Server.handleUsersSearch`/
+`Server.handleUsersSearchByUsernameAndHost`
+(`internal/httpserver/users_handlers.go`/`users_wire.go`), registered with
+the existing `read:account` scope (no new scope; `users/search` is not
+gated behind any distinct permission in Aria's fixed MiAuth permission list
+either). Both search over this deployment's known local-actor set — the
+owner, the reserved assistant/system presentation actors, and (Issue #52)
+every currently resolvable Open WebUI model actor — rather than a general
+directory: `users/search` does a case-insensitive substring match on
+username or display name plus an optional `origin` (`local`/`remote`/
+`combined`) scope; `users/search-by-username-and-host` does an exact,
+case-insensitive username match plus a host match (an omitted or empty host
+means local-only, matching this document's "host: null means local"
+convention). `userDetailedNotMe` gained two fields for this: `Host *string`
+(nil for every local actor, the Open WebUI model's fixed presentation host
+otherwise — mirroring `userLite`'s own convention) and `Url *string`
+(always nil; existing solely to keep the `"url"` discriminator key present
+on every projection built through this struct, including `/api/i` and the
+MiAuth check response, which were already unaffected since Aria decodes
+their `user` field directly as `UserDetailedNotMe`, never through the
+polymorphic `User`/`UserDetailed` discriminator).
 
 ## Minimum Note contract
 
