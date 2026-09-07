@@ -122,9 +122,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_ALLOWED_ORIGINS` | required if `OPENWEBUI_ENABLED=true` | `""` | Comma-separated fixed HTTPS origin allowlist (ADR-0005 D11); same splitting rule as `ARIA_CLIENT_CALLBACKS`/`RSS_FEED_URLS`. `OPENWEBUI_BASE_URL` must be an exact-match member. A Tailnet origin belongs here only if listed explicitly — nothing is inferred. |
 | `OPENWEBUI_API_KEY` | required if `OPENWEBUI_ENABLED=true` | `""` | Bearer credential for `OPENWEBUI_BASE_URL` (ADR-0005 D10). Never logged or returned to a client; `Config.Redacted()` shows only whether it is set. The registry stores only this key's *name* (`secret_ref`), never its value. |
 | `OPENWEBUI_WORKSPACE_NAME` | no | `Open WebUI` | The seeded workspace's display name. |
-| `OPENWEBUI_DEFAULT_MODEL_ID` | required if `OPENWEBUI_ENABLED=true` | `""` | The provider's own opaque model id (ADR-0005 D9: a `GET /api/models` `data[].id`, or a workspace custom-model id from `GET /api/v1/models`). Trimmed of surrounding whitespace only — never case-folded, split, or otherwise reshaped; it is never regenerated from a display name. |
-| `OPENWEBUI_MODEL_DISPLAY_NAME` | no | `OPENWEBUI_DEFAULT_MODEL_ID`'s value | The seeded model's display name. |
-| `OPENWEBUI_MODEL_SLUG` | no | `model` | 1-32 lowercase ASCII letters, digits, or underscores. The local half of the VirtualActor handle `@<slug>@<presentation host>`. Must not collide (case-insensitively) with `OWNER_USERNAME` or the reserved `assistant`/`system` names. |
+| `OPENWEBUI_DEFAULT_MODEL_ID` | required if `OPENWEBUI_ENABLED=true` | `""` | The provider's own opaque model id (ADR-0005 D9: a `GET /api/models` `data[].id`, or a workspace custom-model id from `GET /api/v1/models`). Trimmed of surrounding whitespace only — never case-folded, split, or otherwise reshaped; it is never regenerated from a display name. `Registry.Seed`'s fallback model row for this id; catalog sync (Issue #75) also expects to see it, and logs a warning when a sync round does not report it. |
 | `OPENWEBUI_PRESENTATION_HOST` | required if `OPENWEBUI_ENABLED=true` | `""` | A bare lowercase DNS hostname (no scheme, port, path, or trailing dot) — a fixed, deployment-provisioned presentation value, never inferred from `OPENWEBUI_BASE_URL`. Must differ from `LOCAL_ORIGIN`'s host: a `UserLite` with a null host means "local to this service", so reusing the local host here would make a VirtualActor indistinguishable from a local actor. |
 | `OPENWEBUI_GENERATION_ENABLED` | no | `false` | Issue #53's outbound-generation gate; only meaningful when `OPENWEBUI_ENABLED=true`, ignored otherwise (parsed and defaulted regardless, the same "sub-flag" shape `LLM_CLASSIFICATION_ENABLED` has relative to `LLM_ENABLED`, but never validated or required while the parent flag is off). `Registry.Seed` reconciles it onto the enabled workspace's `generation_enabled` column on every run (both directions — turning it back off clears a previous `true`), but as of this issue nothing reads that column: there is no bridge yet to gate. |
 | `OPENWEBUI_TIMEOUT` | no | `120s` | Issue #53's per-HTTP-call bound for the outbound adapter. Larger than `LLM_TIMEOUT`'s default because a buffered (non-streaming) chat completion can run considerably longer than an ordinary reply generation. Not yet consumed by anything. |
@@ -892,27 +890,39 @@ transaction, idempotently:
    update its name/presentation host/secret ref if it already exists.
 2. Find or create the model by `OPENWEBUI_DEFAULT_MODEL_ID` within that
    workspace, minting its `actors` row (`actor_type='openwebui_model'`,
-   migration `0016`) the first time it is seen; update its display
-   name/handle slug if it already exists.
+   migration `0016`) and a generated handle slug the first time it is
+   seen (see below); reactivate it if a catalog sync had deactivated it.
 3. Point the workspace's `default_model_id` at that model.
-4. Deactivate every other model in the workspace: the MVP publishes only
-   the configured default model as an actor.
-5. Disable every *other* workspace (and deactivate its models): this
+4. Disable every *other* workspace (and deactivate its models): this
    deployment supports exactly one enabled workspace, so changing
    `OPENWEBUI_BASE_URL` and restarting disables the instance left behind
    rather than leaving it enabled alongside the new one.
-6. Enable the workspace.
+5. Enable the workspace.
 
-Re-running `Seed` with a changed `OPENWEBUI_MODEL_DISPLAY_NAME` or
-`OPENWEBUI_MODEL_SLUG` updates those presentation fields without
-disturbing the workspace id, the model id, or the model's `actor_id` —
-the roadmap's "a model actor's stable local ID must survive display-name
-or handle changes" requirement. Startup fails closed (the server does
-not start) if `Seed` returns an error, which includes every
-`OPENWEBUI_*` validation `Config.Validate` already performs before
-`Seed` ever runs, plus `internal/openwebui.ErrInvalidSecretRef` if the
-stored `secret_ref` is ever anything other than the one credential key
-this service knows how to resolve (`OPENWEBUI_API_KEY`).
+As of Issue #75, `Seed` no longer deactivates any other model in the
+workspace, and it no longer takes a display name or handle slug from
+configuration — both are catalog-sync-owned presentation values now
+(`internal/openwebui.Registry.SyncCatalog`, run at startup and on an
+interval, reconciles every model `GET /api/models` reports for the
+configured account). `Seed`'s own model row exists only as the
+fallback `OPENWEBUI_DEFAULT_MODEL_ID` guarantees even before any catalog
+sync has ever succeeded: a brand new such row gets a provisional display
+name equal to its own opaque id, and a slug generated from that same id
+(`internal/openwebui.GenerateActorSlug`) — which, per that function's own
+stable-handle contract, is never recomputed again even once a later sync
+learns the model's real name. Re-running `Seed` therefore never disturbs
+the workspace id, a model id, or a model's `actor_id` — the roadmap's "a
+model actor's stable local ID must survive display-name or handle
+changes" requirement — but it also never re-derives a model's display
+name or slug once assigned; only a sync round (a new `Name` from the
+provider) or an explicit owner rename does that.
+
+Startup fails closed (the server does not start) if `Seed` returns an
+error, which includes every `OPENWEBUI_*` validation `Config.Validate`
+already performs before `Seed` ever runs, plus
+`internal/openwebui.ErrInvalidSecretRef` if the stored `secret_ref` is
+ever anything other than the one credential key this service knows how
+to resolve (`OPENWEBUI_API_KEY`).
 
 ### Owner-only
 

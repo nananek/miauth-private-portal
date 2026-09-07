@@ -59,9 +59,8 @@ func newVirtualActorTestServer(t *testing.T) *virtualActorTestServer {
 		SecretRef:        openwebui.SecretRefAPIKey,
 		WorkspaceName:    "Open WebUI",
 		PresentationHost: "openwebui.example.net",
-		ModelDisplayName: "GPT-OSS 20B",
-		ModelSlug:        "model",
-		DefaultModelID:   "gpt-oss:20b",
+		DefaultModelID:   openWebUITestModelExternalID,
+		OwnerUsername:    miauthCfg.OwnerUsername,
 	}, clock, nil, nil)
 	if err := registry.Seed(t.Context()); err != nil {
 		t.Fatalf("seed Open WebUI registry: %v", err)

@@ -18,7 +18,7 @@ import (
 // carries that job the rest of the way — through TurnJob.Handle against
 // a fake Provider (e2eFakeProvider, openwebui_testhelpers_test.go) —
 // and checks that the resulting VirtualActor-authored reply is visible
-// through notes/children with the projected @model@host identity,
+// through notes/children with its projected @<slug>@host identity,
 // exactly as a real owner client would see it.
 func TestOpenWebUIEndToEnd_PostToProjectedVirtualActorReply(t *testing.T) {
 	ts := newNoteAPITestServerOpenWebUIEnabled(t)
@@ -62,8 +62,8 @@ func TestOpenWebUIEndToEnd_PostToProjectedVirtualActorReply(t *testing.T) {
 	if reply.User.Host == nil || *reply.User.Host != "openwebui.example.net" {
 		t.Errorf("reply.User.Host = %v, want the VirtualActor's presentation host", reply.User.Host)
 	}
-	if reply.User.Username != "model" {
-		t.Errorf("reply.User.Username = %q, want %q", reply.User.Username, "model")
+	if wantSlug := openWebUITestModelSlug(); reply.User.Username != wantSlug {
+		t.Errorf("reply.User.Username = %q, want %q", reply.User.Username, wantSlug)
 	}
 
 	notifications, err := ts.db.Notifications.ListDesc(t.Context(), nil, 10)

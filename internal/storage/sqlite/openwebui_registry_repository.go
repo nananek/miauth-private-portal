@@ -202,17 +202,17 @@ func scanOpenWebUIWorkspace(row rowScanner) (domain.OpenWebUIWorkspace, error) {
 type openWebUIModelRepository struct{ q querier }
 
 const openWebUIModelSelectColumns = `SELECT id, workspace_id, external_model_id, display_name, actor_slug,
-	actor_id, active, capabilities, external_updated_at, created_at, updated_at
+	actor_id, active, capabilities, external_updated_at, last_seen_at, created_at, updated_at
 	FROM openwebui_models`
 
 func (r *openWebUIModelRepository) Create(ctx context.Context, m domain.OpenWebUIModel) error {
 	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO openwebui_models (id, workspace_id, external_model_id, display_name, actor_slug,
-			actor_id, active, capabilities, external_updated_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			actor_id, active, capabilities, external_updated_at, last_seen_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.WorkspaceID, m.ExternalModelID, m.DisplayName, m.ActorSlug,
 		m.ActorID, boolToInt(m.Active), m.Capabilities.Encode(), formatTimePtr(m.ExternalUpdatedAt),
-		formatTime(m.CreatedAt), formatTime(m.UpdatedAt),
+		formatTimePtr(m.LastSeenAt), formatTime(m.CreatedAt), formatTime(m.UpdatedAt),
 	)
 	return mapWriteError(err)
 }
@@ -252,19 +252,19 @@ func (r *openWebUIModelRepository) ListByWorkspace(ctx context.Context, workspac
 	return models, rows.Err()
 }
 
-// Update writes only display name, actor slug, capabilities and the
-// provider's own timestamp. workspace_id, external_model_id and actor_id
-// are not in the statement at all: the roadmap requires a model actor's
-// local ID to survive a display-name or handle change, and the surest
-// way to guarantee that is for the rename path to have no way to write
-// those columns.
+// Update writes only display name, actor slug, capabilities, the
+// provider's own timestamp, and last_seen_at. workspace_id,
+// external_model_id and actor_id are not in the statement at all: the
+// roadmap requires a model actor's local ID to survive a display-name or
+// handle change, and the surest way to guarantee that is for the rename
+// path to have no way to write those columns.
 func (r *openWebUIModelRepository) Update(ctx context.Context, m domain.OpenWebUIModel) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE openwebui_models
-		 SET display_name = ?, actor_slug = ?, capabilities = ?, external_updated_at = ?, updated_at = ?
+		 SET display_name = ?, actor_slug = ?, capabilities = ?, external_updated_at = ?, last_seen_at = ?, updated_at = ?
 		 WHERE id = ?`,
 		m.DisplayName, m.ActorSlug, m.Capabilities.Encode(), formatTimePtr(m.ExternalUpdatedAt),
-		formatTime(m.UpdatedAt), m.ID,
+		formatTimePtr(m.LastSeenAt), formatTime(m.UpdatedAt), m.ID,
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -287,9 +287,9 @@ func scanOpenWebUIModel(row rowScanner) (domain.OpenWebUIModel, error) {
 	var m domain.OpenWebUIModel
 	var active int
 	var capabilities, createdAt, updatedAt string
-	var externalUpdatedAt sql.NullString
+	var externalUpdatedAt, lastSeenAt sql.NullString
 	if err := row.Scan(&m.ID, &m.WorkspaceID, &m.ExternalModelID, &m.DisplayName, &m.ActorSlug,
-		&m.ActorID, &active, &capabilities, &externalUpdatedAt, &createdAt, &updatedAt,
+		&m.ActorID, &active, &capabilities, &externalUpdatedAt, &lastSeenAt, &createdAt, &updatedAt,
 	); err != nil {
 		return domain.OpenWebUIModel{}, mapReadError(err)
 	}
@@ -302,6 +302,9 @@ func scanOpenWebUIModel(row rowScanner) (domain.OpenWebUIModel, error) {
 	m.Capabilities = caps
 
 	if m.ExternalUpdatedAt, err = parseTimePtr(externalUpdatedAt); err != nil {
+		return domain.OpenWebUIModel{}, err
+	}
+	if m.LastSeenAt, err = parseTimePtr(lastSeenAt); err != nil {
 		return domain.OpenWebUIModel{}, err
 	}
 	if m.CreatedAt, err = parseTime(createdAt); err != nil {

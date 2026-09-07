@@ -82,8 +82,6 @@ const (
 	KeyOpenWebUIAPIKey           = "OPENWEBUI_API_KEY"
 	KeyOpenWebUIWorkspaceName    = "OPENWEBUI_WORKSPACE_NAME"
 	KeyOpenWebUIDefaultModelID   = "OPENWEBUI_DEFAULT_MODEL_ID"
-	KeyOpenWebUIModelDisplayName = "OPENWEBUI_MODEL_DISPLAY_NAME"
-	KeyOpenWebUIModelSlug        = "OPENWEBUI_MODEL_SLUG"
 	KeyOpenWebUIPresentationHost = "OPENWEBUI_PRESENTATION_HOST"
 
 	// The five keys below are Issue #53's (OWUI-B) client-side bounds and
@@ -174,8 +172,6 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIAPIKey,
 	KeyOpenWebUIWorkspaceName,
 	KeyOpenWebUIDefaultModelID,
-	KeyOpenWebUIModelDisplayName,
-	KeyOpenWebUIModelSlug,
 	KeyOpenWebUIPresentationHost,
 	KeyOpenWebUIGenerationEnabled,
 	KeyOpenWebUITimeout,

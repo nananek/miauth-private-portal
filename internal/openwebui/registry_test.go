@@ -34,8 +34,14 @@ func TestSeed_CreatesWorkspaceModelAndVirtualActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get default model: %v", err)
 	}
-	if model.ExternalModelID != "gpt-oss:20b" || model.ActorSlug != "model" || model.DisplayName != "GPT-OSS 20B" {
-		t.Errorf("model = %+v, want the seeded values", model)
+	// Since Issue #75, Seed has no display name to reconcile from config
+	// (that is catalog-sync-owned now): a brand new model's DisplayName
+	// provisionally falls back to its own opaque external id, and its
+	// slug is whatever GenerateActorSlug deterministically derives from
+	// that same id.
+	wantSlug := GenerateActorSlug("gpt-oss:20b", "", reservedForValidRegistryConfig)
+	if model.ExternalModelID != "gpt-oss:20b" || model.ActorSlug != wantSlug || model.DisplayName != "gpt-oss:20b" {
+		t.Errorf("model = %+v, want ActorSlug %q and DisplayName %q", model, wantSlug, "gpt-oss:20b")
 	}
 	if !model.Active {
 		t.Error("the default model should be active")
@@ -59,11 +65,12 @@ func TestSeed_CreatesWorkspaceModelAndVirtualActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveVirtualActor: %v", err)
 	}
-	if virtual.Handle() != "@model@openwebui.example.net" {
-		t.Errorf("Handle() = %q, want @model@openwebui.example.net", virtual.Handle())
+	wantHandle := "@" + wantSlug + "@openwebui.example.net"
+	if virtual.Handle() != wantHandle {
+		t.Errorf("Handle() = %q, want %q", virtual.Handle(), wantHandle)
 	}
-	if virtual.DisplayName != "GPT-OSS 20B" {
-		t.Errorf("DisplayName = %q, want GPT-OSS 20B", virtual.DisplayName)
+	if virtual.DisplayName != "gpt-oss:20b" {
+		t.Errorf("DisplayName = %q, want gpt-oss:20b", virtual.DisplayName)
 	}
 }
 
@@ -126,8 +133,6 @@ func TestSeed_IsIdempotentWithStableIdentity(t *testing.T) {
 	tr.clock.Advance(time.Hour)
 	changed := cfg
 	changed.WorkspaceName = "Renamed Instance"
-	changed.ModelDisplayName = "Renamed Model"
-	changed.ModelSlug = "renamed"
 	changed.PresentationHost = "renamed.example.net"
 	tr.Registry = NewRegistry(tr.db, tr.db.Repos, changed, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
@@ -156,21 +161,29 @@ func TestSeed_IsIdempotentWithStableIdentity(t *testing.T) {
 		t.Errorf("ExternalModelID changed: %q -> %q", firstModel.ExternalModelID, secondModel.ExternalModelID)
 	}
 
-	// The presentation fields did change.
+	// The workspace's own presentation fields did change: Seed still
+	// reconciles those from config every run.
 	if secondWorkspace.Name != "Renamed Instance" || secondWorkspace.PresentationHost != "renamed.example.net" {
 		t.Errorf("workspace presentation fields did not update: %+v", secondWorkspace)
 	}
-	if secondModel.DisplayName != "Renamed Model" || secondModel.ActorSlug != "renamed" {
-		t.Errorf("model presentation fields did not update: %+v", secondModel)
+	// The model's presentation fields did not: since Issue #75, Seed has
+	// no display name or slug of its own to reconcile onto an existing
+	// model (SyncCatalog owns DisplayName, and ActorSlug is never
+	// recomputed once assigned) — so they are exactly what the first
+	// Seed run set them to.
+	if secondModel.DisplayName != firstModel.DisplayName || secondModel.ActorSlug != firstModel.ActorSlug {
+		t.Errorf("Seed changed a model presentation field it does not own: %+v, want unchanged from %+v", secondModel, firstModel)
 	}
 
-	// The old handle no longer resolves; the actor now projects the new one.
+	// The actor still projects under the new presentation host (the
+	// workspace's, not the model's own field).
 	virtual, err := tr.ResolveVirtualActor(t.Context(), secondModel.ActorID)
 	if err != nil {
 		t.Fatalf("ResolveVirtualActor after rename: %v", err)
 	}
-	if virtual.Handle() != "@renamed@renamed.example.net" {
-		t.Errorf("Handle() = %q, want @renamed@renamed.example.net", virtual.Handle())
+	wantHandle := "@" + firstModel.ActorSlug + "@renamed.example.net"
+	if virtual.Handle() != wantHandle {
+		t.Errorf("Handle() = %q, want %q", virtual.Handle(), wantHandle)
 	}
 }
 
@@ -240,11 +253,14 @@ func TestSeed_DifferentBaseURLCreatesADistinctWorkspace(t *testing.T) {
 	}
 }
 
-// TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection is the
-// MVP's "publishes only the default model" rule, plus its reverse: a
-// model deactivated by a prior run becomes usable again once it is
-// configured as the default.
-func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
+// TestSeed_SwitchingDefaultModelDoesNotDeactivateThePrevious pins the
+// Issue #75 behavior change from Seed's earlier "publishes only the
+// default model" rule: deciding which models are active is SyncCatalog's
+// job now (catalog_test.go), not Seed's, so switching
+// OPENWEBUI_DEFAULT_MODEL_ID and re-running Seed must leave a
+// previously-seeded model exactly as it was — active and still
+// resolvable — rather than deactivating it.
+func TestSeed_SwitchingDefaultModelDoesNotDeactivateThePrevious(t *testing.T) {
 	cfg := validRegistryConfig()
 	tr := newTestRegistry(t, cfg)
 	if err := tr.Seed(t.Context()); err != nil {
@@ -262,7 +278,6 @@ func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
 	tr.clock.Advance(time.Hour)
 	switched := cfg
 	switched.DefaultModelID = "gpt-oss:120b"
-	switched.ModelSlug = "big-model"
 	tr.Registry = NewRegistry(tr.db, tr.db.Repos, switched, tr.clock, nil, nil)
 	if err := tr.Seed(t.Context()); err != nil {
 		t.Fatalf("seed model B as default: %v", err)
@@ -272,11 +287,11 @@ func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterSwitch.Active {
-		t.Error("model A should be deactivated once it is no longer the default")
+	if !afterSwitch.Active {
+		t.Error("Seed must not deactivate a model it is no longer pointing the default at")
 	}
-	if _, err := tr.ResolveVirtualActor(t.Context(), modelA.ActorID); !errors.Is(err, ErrNotVirtualActor) {
-		t.Errorf("ResolveVirtualActor(deactivated model) error = %v, want ErrNotVirtualActor", err)
+	if _, err := tr.ResolveVirtualActor(t.Context(), modelA.ActorID); err != nil {
+		t.Errorf("ResolveVirtualActor(model A) after switching the default = %v, want it to still resolve", err)
 	}
 
 	workspace, err = tr.db.OpenWebUIWorkspaces.GetEnabled(t.Context())
@@ -293,26 +308,8 @@ func TestSeed_DeactivatesOtherModelsAndReactivatesOnReselection(t *testing.T) {
 	if !modelB.Active {
 		t.Error("the new default model should be active")
 	}
-
-	// Switching back reactivates A rather than leaving it dead forever.
-	tr.clock.Advance(time.Hour)
-	tr.Registry = NewRegistry(tr.db, tr.db.Repos, cfg, tr.clock, nil, nil)
-	if err := tr.Seed(t.Context()); err != nil {
-		t.Fatalf("seed model A as default again: %v", err)
-	}
-	reactivated, err := tr.db.OpenWebUIModels.Get(t.Context(), modelA.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reactivated.Active {
-		t.Error("model A should be reactivated once it is the default again")
-	}
-	afterSwitchBack, err := tr.db.OpenWebUIModels.Get(t.Context(), modelB.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterSwitchBack.Active {
-		t.Error("model B should now be deactivated")
+	if modelB.ActorSlug == modelA.ActorSlug {
+		t.Errorf("model A and model B were assigned the same slug %q", modelA.ActorSlug)
 	}
 }
 
@@ -440,8 +437,10 @@ func TestDefaultVirtualActor_ResolvesTheSeededDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultVirtualActor: %v", err)
 	}
-	if virtual.Handle() != "@model@openwebui.example.net" {
-		t.Errorf("Handle() = %q, want @model@openwebui.example.net", virtual.Handle())
+	wantSlug := GenerateActorSlug("gpt-oss:20b", "", reservedForValidRegistryConfig)
+	wantHandle := "@" + wantSlug + "@openwebui.example.net"
+	if virtual.Handle() != wantHandle {
+		t.Errorf("Handle() = %q, want %q", virtual.Handle(), wantHandle)
 	}
 }
 

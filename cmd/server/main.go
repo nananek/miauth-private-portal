@@ -116,9 +116,8 @@ func run() error {
 			SecretRef:         config.KeyOpenWebUIAPIKey,
 			WorkspaceName:     cfg.OpenWebUI.WorkspaceName,
 			PresentationHost:  cfg.OpenWebUI.PresentationHost,
-			ModelDisplayName:  cfg.OpenWebUI.ModelDisplayNameOrDefault(),
-			ModelSlug:         cfg.OpenWebUI.ModelSlug,
 			DefaultModelID:    cfg.OpenWebUI.DefaultModelID,
+			OwnerUsername:     cfg.Auth.OwnerUsername,
 			GenerationEnabled: cfg.OpenWebUI.GenerationEnabled,
 		}, nil, nil, nil)
 		if err := registry.Seed(ctx); err != nil {

@@ -20,6 +20,23 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
+// openWebUITestModelExternalID is every OpenWebUI-enabled test server
+// helper's OPENWEBUI_DEFAULT_MODEL_ID.
+const openWebUITestModelExternalID = "gpt-oss:20b"
+
+// openWebUITestModelSlug is the actor_slug openwebui.GenerateActorSlug
+// deterministically derives for that seeded default model: since Issue
+// #75 removed OPENWEBUI_MODEL_SLUG, Registry.Seed generates it from the
+// model's own external id (no display name is known before any catalog
+// sync runs, and these tests never run one), the same computation tests
+// that used to assert against the literal "model" now have to make
+// themselves rather than assume.
+func openWebUITestModelSlug() string {
+	return openwebui.GenerateActorSlug(openWebUITestModelExternalID, "", func(candidate string) bool {
+		return candidate == defaultMiAuthTestConfig().OwnerUsername || candidate == "assistant" || candidate == "system"
+	})
+}
+
 // fakeTimelineClock is a settable timeline.Clock, so note-API contract
 // tests can control entry ordering/timestamps without depending on
 // wall-clock timing (mirrors internal/timeline's own test fake).
@@ -161,9 +178,8 @@ func newNoteAPITestServerOpenWebUIEnabledAt(t *testing.T, path, tokenSessionID s
 		SecretRef:         openwebui.SecretRefAPIKey,
 		WorkspaceName:     "Open WebUI",
 		PresentationHost:  "openwebui.example.net",
-		ModelDisplayName:  "GPT-OSS 20B",
-		ModelSlug:         "model",
-		DefaultModelID:    "gpt-oss:20b",
+		DefaultModelID:    openWebUITestModelExternalID,
+		OwnerUsername:     miauthCfg.OwnerUsername,
 		GenerationEnabled: true,
 	}, nil, nil, nil)
 	if err := registry.Seed(t.Context()); err != nil {
