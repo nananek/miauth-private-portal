@@ -134,8 +134,8 @@ as contract:
 | `POST /api/v1/chats/new` | **必要** | Creates the persistent chat and fixes its `chat_id` *before* any generation runs | Body is a free-form chat object; the server assigns the id |
 | `POST /api/chat/completions` | **必要** | Executes one turn (`StartChat` and `ContinueTurn` both map here) | The only generating call. Chat management is opted into by sending a `parent_id` key |
 | `GET /api/v1/chats/{id}` | **必要** | Reads back `done`/`error`/`currentId` to classify a turn's outcome | Read of *this* bridge's own chat only; never used to browse or import history |
-| `GET /api/models` | **必要** | Resolves and validates the configured `external_model_id`; also reads `info.meta.toolIds`/`defaultFeatureIds` at startup to resolve `OPENWEBUI_TOOL_IDS` (Issue #74, `Client.GetModelTools`) | Also the health signal for "this credential can see the model" |
-| `GET /api/v1/tools/` | **必要** | Startup-only: resolves which tool ids this account may actually invoke, to filter `OPENWEBUI_TOOL_IDS`/the model's own `toolIds` fail-closed (Issue #74, `Client.ListAccessibleTools`) | Called once at boot, never per-turn |
+| `GET /api/models` | **必要** | Catalog sync's one call (Issue #75, `Client.ListModels`): reconciles every model this account can see, including each one's own `info.meta.toolIds`/`defaultFeatureIds` for per-model tool resolution (superseding Issue #74's single-model `GetModelTools`, retired) | Also the health signal for "this credential can see at least the configured default model" |
+| `GET /api/v1/tools/` | **必要** | Called once per catalog sync round (Issue #75, superseding Issue #74's once-at-boot call): resolves which tool ids this account may actually invoke, to filter every model's own `toolIds` fail-closed (`Client.ListAccessibleTools`) | Never per-turn |
 | `GET /api/v1/auths/` | **必要** | Credential liveness / whoami probe | Cheapest call that proves the API key is still valid |
 | `GET /api/version` | **必要** | Records the running version for drift detection against this document | Unauthenticated |
 | `POST /api/v1/auths/signup` | **運用のみ** | Creates the dedicated account (first account becomes `admin`) | One-time provisioning |
@@ -449,7 +449,17 @@ Returns the same `ChatResponse` shape. The tree lives in
 - `GET /api/models` → `{"data":[{id, name, owned_by, connection_type, info, …}]}`,
   everything the calling account can see. The configured `external_model_id` is
   one of these `data[].id` values. A built-in `arena-model` entry is present
-  alongside real models.
+  alongside real models, distinguished by both its literal id and its own
+  `arena: true` field (`fixtures/openwebui/models_response.json`'s second
+  entry) — `Registry.eligibleRemoteModels` (Issue #75) checks both, the id as
+  the primary signal and the flag as defense in depth against a future rename
+  of that literal.
+- Issue #75's catalog sync (`Registry.SyncCatalog`, `Client.ListModels`) is
+  this call's only production caller: once per sync round, it reconciles
+  every eligible entry into `openwebui_models` and caches each one's own
+  `info.meta.toolIds`/`defaultFeatureIds` for per-model tool resolution — the
+  same fields Issue #74's now-retired `GetModelTools` read for a single
+  resolved-at-boot model.
 - `GET /api/models/base` narrows this to connection-provided base models;
   `GET /api/v1/models` lists workspace custom models (presets created with
   `POST /api/v1/models/create`), whose ids are equally valid as
@@ -461,6 +471,20 @@ Returns the same `ChatResponse` shape. The tree lives in
 - **Visibility is access-controlled.** A non-admin account sees an empty
   `/api/models` until it is granted access, and every generating call then
   fails with 400 `Model not found`. Granting that access is **要実機確認**.
+  Catalog sync treats a successful empty response as a genuine "nothing
+  visible" snapshot (deactivating every previously active model), never as
+  evidence of an access grant being revoked versus an outage — those two
+  cases are indistinguishable from this endpoint alone, and a transport/HTTP-
+  level failure is handled as an outage instead (existing registry left
+  untouched; see `internal/openwebui/catalog.go`'s own doc comment).
+- **Hidden/visibility fields beyond access control are still 要実機確認.**
+  The one real capture this document pins
+  (`fixtures/openwebui/models_response.json`) shows one real model and the
+  built-in arena entry; it does not exercise a model an admin has hidden or
+  disabled by some other means. `eligibleRemoteModels` therefore does not
+  filter on any field beyond blank/duplicate ids and the arena signal above —
+  a model this filter is unsure about is kept rather than silently dropped,
+  pending real-instance evidence one way or the other.
 
 ### `GET /api/v1/auths/` (必要) and the credential endpoints (運用のみ)
 
@@ -524,8 +548,11 @@ adapter must therefore tolerate:
   ([`completions_only_newchat_chat.json`](fixtures/openwebui/completions_only_newchat_chat.json)
   against [`chat_after_start.json`](fixtures/openwebui/chat_after_start.json));
 - on a model entry: `info`, which the recorded `/api/models` shape gives as an
-  object or `null`. No `/api/models` response was captured as a fixture, so
-  that endpoint's field list is the weakest-evidenced part of this document;
+  object or `null` — `fixtures/openwebui/models_response.json` (Issue #74
+  Phase 0) captured one real model with `info` present and the built-in
+  arena entry with a much sparser one, but not a model an admin has hidden
+  or disabled by some other means, so that specific corner remains this
+  endpoint's weakest-evidenced part (see "GET /api/models" above);
 - whole-response `null`: both `POST /api/v1/chats/new` and
   `GET /api/v1/chats/{id}` declare `ChatResponse | null` as their 200 schema,
   and the chat-managed completions path returns a literal `null` on failure.
@@ -620,7 +647,7 @@ All fixtures live in [`fixtures/openwebui/`](fixtures/openwebui/).
 | `error_401_chat_not_found.json` | observed | Another account's chat is 401, not 404 |
 | `error_400_model_not_found.json` | observed | Unknown/invisible model |
 | `error_422_validation.json` | **synthetic**, from the recorded response shape | Pydantic validation array, shown for a typed body (`POST /api/v1/chats/new` without `chat`) — completions never returns one |
-| `models_response.json` | observed (Issue #74 Phase 0, real pinned instance + a workspace model configured with `toolIds`/`defaultFeatureIds`) | `GET /api/models`'s `data[].info.meta.toolIds`/`defaultFeatureIds` shape `Client.GetModelTools` reads |
+| `models_response.json` | observed (Issue #74 Phase 0, real pinned instance + a workspace model configured with `toolIds`/`defaultFeatureIds`) | `GET /api/models`'s `data[].{id,name,info.meta.toolIds,info.meta.defaultFeatureIds}` shape `Client.ListModels` reads for catalog sync (Issue #75), including the built-in arena entry's `arena: true` field |
 | `tools_response.json` | observed (Issue #74 Phase 0, the real calculator Tool registered through the admin "Tools" feature) | `GET /api/v1/tools/`'s per-tool `id` shape `Client.ListAccessibleTools` reads |
 | `openapi-0.11.3.excerpt.json` | observed, filtered | 13 paths and 21 schemas out of 485/314: the schemas those paths reference, plus the request bodies of the declined and unverified endpoints whose paths were left out (`ForkForm`, `EventForm`, `MessageForm`, `ModelForm`). `info.version` is FastAPI's default `0.1.0`, **not** the Open WebUI version |
 

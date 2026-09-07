@@ -3,7 +3,10 @@
 - Status: Planned, opt-in P1 extension; not required for the Issue #1 MVP.
   Child issues #51–#54 filed 2026-09-06 under umbrella
   [Issue #50](https://github.com/nananek/miauth-private-portal/issues/50);
-  OWUI-C (#51) is complete.
+  OWUI-C (#51), OWUI-P (#52), OWUI-B (#53), and OWUI-R (#54) are complete.
+  [Issue #75](https://github.com/nananek/miauth-private-portal/issues/75)
+  (OWUI-M, below), also under #50, extends OWUI-P/OWUI-B from one seeded
+  model to every model the account can see.
 - Umbrella issue: [#50](https://github.com/nananek/miauth-private-portal/issues/50)
 - Target contract: [`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md)
   and [ADR-0005](../decisions/0005-openwebui-boundary.md), from the 2026-09-06
@@ -235,14 +238,22 @@ The minimum registry model is:
 
 `default_model_id` points to exactly one model in its workspace. Workspace
 disable/delete and related actor/job behavior must be one transaction. A model
-actor's stable local ID must survive display-name or handle changes. MVP
-publishes only the default model as an actor.
+actor's stable local ID must survive display-name or handle changes.
+
+**Superseded by OWUI-M (#75, below):** the MVP built here published only the
+configured default model as an actor. #75 lifts that: catalog sync now
+projects every model the configured account can see, each as its own
+VirtualActor, while everything else in this section — the FK, the
+transaction boundary, the stable-ID requirement — is unchanged and now
+applies uniformly to every model rather than to one.
 
 ### VirtualActor
 
-The default model is a presentation actor, not a login-capable user:
+Each model — the default and, since #75, every other one the account can
+see — is a presentation actor, not a login-capable user:
 
-- handle: `@model-slug@openwebui.tail1a2b3c.ts.net`
+- handle: `@model-slug@openwebui.tail1a2b3c.ts.net`, generated once per
+  model at first registration and never recomputed (OWUI-M, below)
 - host: `openwebui.tail1a2b3c.ts.net` (a fixed presentation value, not a
   federation or discovery target)
 - stable local `actor_id`, `source=openwebui`, external model/workspace metadata
@@ -283,11 +294,14 @@ existing `CHECK`/table-level `UNIQUE`, since done via the migration
 runner's new `-- migrate:rebuild` path); a workspace's `default_model_id`
 is enforced same-workspace by a composite foreign key into
 `openwebui_models(workspace_id, id)` rather than a Go-level check
-(migration `0017`); and the whole registry is populated by **config-driven
+(migration `0017`); and the registry is populated by **config-driven
 startup seeding** (`internal/openwebui.Registry.Seed`, called from
 `cmd/server` when `OPENWEBUI_ENABLED=true`), not a new HTTP endpoint or
 CLI — see `docs/operations/configuration.md`'s "Open WebUI bridge"
-section for the full seeding/owner-only/VirtualActor writeup.
+section for the full seeding/owner-only/VirtualActor writeup. `Seed`
+guarantees only the one config-named default model; since #75, catalog
+sync (OWUI-M, below) is what populates the rest of the registry with
+every other model the account can see.
 
 ## OWUI-B: outbound adapter, durable turn, and thread bridge
 
@@ -670,13 +684,125 @@ fixture-based or documented-inspection evidence. The remaining 1
 (target-instance evidence) is pending Issue #50's TBD resolution; Issue #54
 stays open until it is addressed.
 
+## OWUI-M: model catalog sync and mention routing
+
+Issue #75, filed under umbrella #50, extending OWUI-P (#52) and OWUI-B
+(#53). Placement: after both are done (they are); no new phase number —
+this is the same feature area, generalized from one model to every model
+the configured account can see. See [ADR-0005](../decisions/0005-openwebui-
+boundary.md) D18–D20 for the full decision record; this section is the
+roadmap-level summary.
+
+OWUI-P's own MVP scope (above) published only the configured default model
+as an actor and explicitly excluded "automatic discovery or management of
+all Open WebUI models" (see "MVP and non-goals" below — that exclusion is
+retired by this issue). That was workable for a single-model deployment,
+but does not scale: an operator running more than one model behind one Open
+WebUI account had no way to expose the others, and no way for an owner post
+to address one of them specifically. OWUI-M removes both limits while
+changing nothing about OWUI-P/OWUI-B's own local-source-of-truth,
+branch-per-remote-chat, or idempotency guarantees — every mechanism below
+is additive to them, not a replacement.
+
+### Catalog sync
+
+`Registry.SyncCatalog` (`internal/openwebui/catalog.go`) reconciles
+`openwebui_models` against `GET /api/models`, on a bounded best-effort
+attempt at startup and every `OPENWEBUI_CATALOG_SYNC_INTERVAL` thereafter
+(`CatalogScheduler`/`CatalogSyncJob`, `internal/openwebui/catalogjob.go`),
+independent of `OPENWEBUI_GENERATION_ENABLED`. Each eligible model the
+account can currently see is created (minting a new VirtualActor and a
+slug generated once, never recomputed — ADR-0005 D18) or, if already
+known, kept in step on `DisplayName` only — its slug and local id are
+immutable once assigned. A model absent from a successful round is
+deactivated (its actor and every entry it already authored are
+untouched); one that reappears later is reactivated under its original
+identity, never re-created. A provider outage leaves the registry exactly
+as it was; a successful empty response is trusted as a genuine "nothing
+visible right now" and deactivates every model accordingly. `Registry.Seed`
+keeps guaranteeing the one `OPENWEBUI_DEFAULT_MODEL_ID` row exists and stays
+active — the fallback this deployment can rely on even before any catalog
+sync has ever succeeded — but no longer decides which *other* models are
+active; that is `SyncCatalog`'s job alone now.
+
+`OPENWEBUI_MODEL_DISPLAY_NAME` and `OPENWEBUI_MODEL_SLUG` — single-model
+overrides from before this issue — are removed. A model's display name and
+slug are no longer configuration; they come from the provider's own model
+name (once a sync round succeeds) and from generation (`GenerateActorSlug`)
+respectively.
+
+### Mention-based model selection
+
+An owner post's `@mention` of one of the workspace's own active models
+(`@<slug>` or `@<slug>@<presentation_host>`) selects which model the post
+is for, resolved by `ResolveModelMentions`
+(`internal/openwebui/mentionresolve.go`). The decision table (owner-decided
+2026-09-07, ADR-0005 D19): no mention falls back to the workspace's
+configured default model (unchanged pre-#75 behavior); exactly one
+mentioned active model routes the turn to it instead of the default; an
+unknown slug or an inactive model's slug folds into the no-mention/default
+bucket rather than erroring; two or more distinct mentioned active models
+is `ambiguous_model_selection` — recorded (a failed link and turn, for
+owner-facing visibility via `cmd/openwebuictl`/`docs/operations/
+runbook.md`) but never guessed at, and no durable job is ever enqueued for
+that post.
+
+A reply that `@mention`s a model different from the one its parent link is
+already talking to always starts a new branch against the mentioned model,
+generalizing OWUI-B's existing "reply to an earlier node starts a new
+branch" rule (this section's own state machine, above) from a *tree
+position* rule to a *model identity* rule: mixing two models' turns into
+one remote chat was never permitted, and this closes the one gap where a
+reply's local tree position alone did not already prevent it.
+
+### Per-model tool resolution
+
+Issue #74's tool/web-search resolution (`OPENWEBUI_TOOL_IDS`, resolved once
+at boot for the single default model) is generalized to every active model,
+resolved on each catalog sync round into a small in-memory cache
+(`internal/openwebui.ToolConfigCache`) rather than per turn — ADR-0005 D20
+has the full mechanism. `OPENWEBUI_TOOL_IDS` itself is removed: a model's
+`tool_ids` now come solely from its own `GET /api/models`
+`info.meta.toolIds`, filtered fail-closed against what the configured
+account may actually invoke, exactly as before but per model instead of
+once for one. `OPENWEBUI_WEB_SEARCH_ENABLED` is unchanged — still one
+deployment-wide flag, an explicit owner decision not to relitigate that
+scope.
+
+### Acceptance criteria
+
+- [x] Catalog sync reconciles every eligible model, atomically upserting
+  new ones and deactivating/reactivating by presence in each round, without
+  ever losing a provider outage's distinction from a genuine empty
+  snapshot. (PR1)
+- [x] A model's handle slug is generated once and stable across a display-
+  name change, a restart, or any number of later sync rounds. (PR1/PR2,
+  folded into one commit)
+- [x] `@mention` resolution implements the full decision table above,
+  including the inactive/unknown-slug fold-in and the two-or-more
+  `ambiguous_model_selection` case, with the cross-model-reply branch rule
+  covered end to end. (PR3)
+- [x] Catalog sync runs at startup (bounded, non-blocking on failure) and on
+  a configurable interval thereafter, independent of the generation gate.
+  (PR4)
+- [x] Per-model tool resolution replaces the single deployment-wide
+  override; `OPENWEBUI_WEB_SEARCH_ENABLED` stays unchanged. (PR5)
+- [x] Documentation (this roadmap, ADR-0005, the compat document, and
+  operations docs) reflects the multi-model design. (PR6, this update)
+- VirtualActor exclusion from login/MiAuth paths, addressing-mention
+  stripping before a message reaches the provider, and linked-continuation
+  model pinning were already correct for a multi-model registry before this
+  issue (OWUI-P/OWUI-B's own design) and needed only regression coverage,
+  not new behavior.
+
 ## Auth, permission, and secret boundary
 
 The authentication and execution boundaries remain distinct:
 
 1. local owner MiAuth/session and local API token used by Aria;
 2. workspace-scoped Open WebUI credential/API key;
-3. default-model VirtualActor, which is presentation-only and not an
+3. each synced model's VirtualActor (OWUI-M, #75: one per active model, not
+   just the configured default), which is presentation-only and not an
    authentication principal;
 4. the server-side `OpenWebUITurnJob` worker identity.
 
@@ -693,11 +819,17 @@ through config — the existing secret mechanism, not a new store (ADR-0005
 D10) — and rechecks that the workspace, model, feature flag, and owner policy
 still permit the turn.
 
-The completion bridge always uses the enabled workspace's configured
-`default_model_id`; no Aria request may select an arbitrary workspace, model,
-remote chat ID, or parent ID. The server resolves the local thread/link and
-parent path, and the adapter verifies that the model belongs to the workspace
-before any provider call.
+The completion bridge selects the model for each post from the enabled
+workspace's own synced catalog only: an owner's `@mention` of one of that
+workspace's active models routes the post to it, and a post naming no model
+(or an unknown/inactive slug) falls back to the workspace's configured
+`default_model_id` (OWUI-M, #75, ADR-0005 D19 — superseding this paragraph's
+original single-default-model wording; see "OWUI-M: model catalog sync and
+mention routing" above). No Aria request may select an arbitrary *workspace*,
+remote chat ID, or parent ID, or any model outside the enabled workspace's own
+synced catalog. The server resolves the local thread/link and parent path,
+and the adapter verifies that the model belongs to the workspace before any
+provider call.
 
 Open WebUI uses a dedicated low-privilege workspace account/credential. Only a
 `secret_ref` crosses the domain/config boundary; the raw provider credential is
@@ -719,7 +851,11 @@ Default permissions:
   #1/#5/#7 owner policy;
 - VirtualActor cannot log in, use MiAuth, own credentials, or perform remote
   actions;
-- arbitrary workspace/model/remote-chat switching is outside MVP, as is
+- arbitrary *workspace* or remote-chat switching is outside MVP; model
+  selection among the enabled workspace's own synced catalog via
+  `@mention` is in scope (OWUI-M, #75, ADR-0005 D19 — superseding this
+  bullet's original wider exclusion — see OWUI-M above), while switching to
+  a model outside that catalog remains out of scope. Also out of scope:
   this service itself executing a tool, running an MCP server, or
   interpreting a tool call — only requesting Open WebUI's own configured
   tools/web search via request-level `features`/`tool_ids` flags is in
@@ -863,8 +999,10 @@ reclaimable; releasing a live lease could issue a duplicate remote turn.
 ### Included when enabled
 
 - one fixed, allowlisted workspace;
-- one owner-selected default model;
-- one non-loginable VirtualActor projection;
+- one owner-selected default model, plus (since OWUI-M, #75) automatic
+  catalog sync of every other model the configured account can see;
+- a non-loginable VirtualActor projection per model, `@mention`-addressable
+  (OWUI-M) — a post naming no model falls back to the configured default;
 - an Aria owner root or reply without an existing outbound branch link starts a
   new persistent Open WebUI chat only after the target contract proves
   creation, initial-sequence, and save semantics;
@@ -889,7 +1027,11 @@ reclaimable; releasing a live lease could issue a duplicate remote turn.
 - `ListChats`, `GetChat`, remote cursor sync, existing-chat reconciliation, or
   remote deletion-event ingestion;
 - converting an existing Open WebUI message tree into an Aria reply tree;
-- automatic discovery or management of all Open WebUI workspaces/models;
+- automatic discovery or management of more than one Open WebUI
+  *workspace* — that remains exactly one fixed, allowlisted instance/account
+  pair; automatic discovery of every *model* within it is, since OWUI-M
+  (#75), explicitly in scope (superseding this bullet's original wider
+  exclusion — see OWUI-M above and ADR-0005 D18);
 - Misskey/ActivityPub federation, remote discovery, signatures,
   inbox/outbox, or remote callbacks;
 - this service itself executing a tool, running an MCP server, or

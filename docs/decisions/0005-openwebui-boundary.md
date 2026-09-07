@@ -3,8 +3,10 @@
 - Status: Accepted for Issue #51 (OWUI-C)
 - Date: 2026-09-06
 - Scope: Issues #50–#54 (umbrella #50; OWUI-C #51, OWUI-P #52, OWUI-B #53,
-  OWUI-R #54); amended for Issue #72 (opt-in `features`/`tool_ids`) and
-  Issue #74 (native-FC/legacy fix, startup tool/model resolution)
+  OWUI-R #54); amended for Issue #72 (opt-in `features`/`tool_ids`), Issue #74
+  (native-FC/legacy fix, startup tool/model resolution), and Issue #75
+  (multi-model catalog sync, mention-based model selection, per-model tool
+  resolution — filed under the same umbrella #50, extending #52/#53)
 
 ## Context
 
@@ -366,15 +368,20 @@ untrusted data — applies to them without any new mechanism: nothing here
 parses, executes, or otherwise trusts a tool's output differently from
 the rest of a completion's content.
 
-`OPENWEBUI_TOOL_IDS` is sent as opaque strings; this service has no way to
+Every model's tool ids are sent as opaque strings; this service has no way to
 list or validate a target instance's tool registry, so a typo'd id simply
-never matches anything server-side rather than failing closed here (D17
-amends this: at startup, resolution filters the configured/model-default
-list against the target's own accessible-tools list, so a stale or
-inaccessible id is dropped and logged rather than sent as-is — the
-completions request itself still cannot validate an id Open WebUI accepts
-and silently no-ops on). Which tools exist, and what they are allowed to
-do, remains entirely the Open WebUI administrator's responsibility.
+never matches anything server-side rather than failing closed here (D17 and
+D20 amend this: resolution filters each model's own list against the
+target's own accessible-tools list, so a stale or inaccessible id is dropped
+and logged rather than sent as-is — the completions request itself still
+cannot validate an id Open WebUI accepts and silently no-ops on). Which
+tools exist, and what they are allowed to do, remains entirely the Open
+WebUI administrator's responsibility.
+
+**Amended by D20 (Issue #75):** `OPENWEBUI_TOOL_IDS` itself — the
+deployment-wide override this paragraph originally named — no longer
+exists. A model's tool ids now come solely from its own configured
+`toolIds`, never a config override.
 
 ### D17. `function_calling: "legacy"` is required, and tool_ids resolves against the target's own registry at startup
 
@@ -433,6 +440,16 @@ failure at error level, the same "a dead provider never blocks the rest
 of the server" principle `OPENWEBUI_GENERATION_ENABLED`'s own gate
 already follows.
 
+**Amended by D20 (Issue #75):** this whole paragraph describes machinery
+that no longer exists. `ResolveEffectiveToolConfig`,
+`internal/openwebui.ToolConfigResolver`, the `"none"` sentinel, and the
+`cmd/server/main.go` bootstrap-client dance it required are all retired;
+`OPENWEBUI_TOOL_IDS` itself is gone from `internal/config`. See D20 for
+what replaced it: the fail-closed accessible-tools filtering rule
+described here is the one part that carries over unchanged, now applied
+per model on every catalog sync round instead of once at boot for a
+single model.
+
 `OPENWEBUI_WEB_SEARCH_ENABLED` gained no equivalent model-default
 fallback: it is a plain, always-explicit bool (Issue #72), with no
 "unset" state distinct from `false` to defer to the model's own
@@ -452,6 +469,193 @@ the "unset" state would relitigate that decision, not merely extend it —
 so even a future tri-state upgrade should not wire `defaultFeatureIds`
 into this key without first revisiting Issue #72's own reasoning.
 
+### D18. Catalog sync replaces the single seeded model with every model the account can see
+
+The roadmap's OWUI-P section originally said the MVP "publishes only the
+default model as an actor" and listed "automatic discovery or management of
+all Open WebUI models" as a non-goal. Issue #75 reverses both: a deployment's
+VirtualActor set now tracks the configured account's entire visible model
+catalog, not one config-named row.
+
+`Registry.SyncCatalog` (`internal/openwebui/catalog.go`) is the mechanism.
+Each round: `provider.ListModels` (`GET /api/models`) is called *before* any
+database transaction opens, and an error from it — a timeout, a 5xx, a
+malformed body — returns immediately with the registry completely untouched;
+a provider outage must never deactivate every model this service already
+knows about. A *successful* response is trusted at face value, including an
+empty one: a genuine "this account can currently see nothing" deactivates
+every previously active model, the same way a model simply missing from a
+non-empty response does. This is the one place D6's "classify from state,
+never assume" principle applies to a whole-catalog read rather than a single
+turn's outcome.
+
+Eligibility (`eligibleRemoteModels`) excludes only what is unambiguous: a
+blank id, the built-in `arena-model` entry (checked by both its literal id
+and its own `arena: true` field — compat's "GET /api/models" section), and
+every occurrence of an id after its first (logged, never silently picked a
+winner from — schema drift this adapter has not observed). Everything else
+is kept: the hidden/visibility fields `GET /api/models` may carry are
+compat's own "weakest-evidenced part" of the whole contract, so a model this
+filter is unsure about is registered rather than silently dropped.
+
+A model's slug — the local half of its `@<slug>@<presentation_host>` handle
+— is generated once, the first time that model is registered
+(`GenerateActorSlug`), and never recomputed afterward, even once a later
+sync round learns a nicer display name for it. This is the roadmap's
+stable-actor-ID requirement applied to the *handle* specifically, not only
+the row id: generation normalizes the model's own name to `[a-z0-9_]`
+(lowercased, truncated to 32 characters), falls back to an 8-hex-character
+hash of the model's opaque external id when that normalization yields
+nothing usable (empty, or a non-Latin name that collapses entirely), and
+appends a further hash suffix if the result collides with another model's
+already-assigned slug, the owner's own username, or the reserved
+`assistant`/`system` presentation names — the same three-way collision rule
+`OPENWEBUI_MODEL_SLUG`'s own validation enforced before this issue removed
+that config key (D9 amendment, below). A model discovered before its
+display name is known (`Registry.Seed`'s own fallback row — see next
+paragraph) therefore keeps whatever slug it was first assigned, by design,
+even after a later sync learns its real name; only its `DisplayName` field
+tracks the provider from then on.
+
+**Amends D9:** `OPENWEBUI_MODEL_DISPLAY_NAME` and `OPENWEBUI_MODEL_SLUG`
+(owner-supplied overrides for the single pre-#75 model) are removed
+entirely from `internal/config`. `Registry.Seed` still guarantees exactly
+one model row exists for `OPENWEBUI_DEFAULT_MODEL_ID` — the fallback this
+deployment can rely on even if the provider has never once answered a
+catalog sync — but it no longer takes a display name or slug from
+configuration to do it: a brand-new such row's `DisplayName` provisionally
+equals its own opaque external id, and its slug is generated exactly like
+any model `SyncCatalog` discovers. `Seed` also no longer deactivates any
+*other* model in the workspace on its own; that decision belongs entirely
+to `SyncCatalog` now, run at startup (bounded, best-effort — a failure there
+is logged and never blocks the server from starting, `Registry.Seed`'s own
+fallback row carrying the deployment until the next successful round) and
+on `OPENWEBUI_CATALOG_SYNC_INTERVAL` thereafter (`CatalogScheduler`,
+`internal/openwebui/catalogjob.go` — a reduced `internal/ingest.Scheduler`:
+one job per interval covers the whole catalog, not one per configured
+source). Both run whenever `OPENWEBUI_ENABLED` is true, independent of
+`OPENWEBUI_GENERATION_ENABLED`: the VirtualActor projection and search
+results stay current even on a deployment that never turns outbound
+generation on.
+
+`last_seen_at` (migration `0020`) records when a sync round most recently
+reported a given model, for operator visibility only
+(`docs/operations/runbook.md`) — `SyncCatalog` decides a model's active
+state from whether it appeared in the round just completed, never from how
+recently, so nothing reads this column to make that call.
+
+### D19. A post's `@mention` selects its model; a mismatched mention on a reply starts a new branch
+
+With more than one active model, an owner post needs a way to say which one
+it is for. The options were: always the workspace default (no per-post
+choice at all — untenable once multiple models are routinely active);
+inventing new addressing syntax (a command prefix, a structured field); or
+reusing the `@mention` syntax D2's stripping already recognized
+(`stripMentionTagsForProvider`, Issue #71) for something more than text
+cleanup. The owner decided (2026-09-07) on the third: `@<slug>` (optionally
+`@<slug>@<presentation_host>`; a *different* host is never a candidate for
+this workspace's own models, however its bare slug might otherwise read)
+addresses one of the workspace's own active models by its generated
+`actor_slug`, matched case-insensitively since a person typing a mention
+will not necessarily reproduce a generated slug's case exactly.
+
+`ResolveModelMentions` (`internal/openwebui/mentionresolve.go`) reduces a
+post's body to the distinct set of active models it names, and
+`Bridge.EnqueueTurn` applies the owner-approved decision table on the
+result:
+
+| mentions resolved | outcome |
+| --- | --- |
+| none | fall back to the workspace's configured default model — unchanged pre-#75 behavior |
+| exactly one active model | route the turn to that model instead of the default |
+| two or more distinct active models | `ambiguous_model_selection` (below) — never guessed between |
+| a slug naming no model, or an inactive one | folds into "none" — never an error of its own |
+
+**Cross-model reply rule (owner decision, 2026-09-07).** `SelectBranch`
+(`internal/openwebui/path.go`) gained a `targetModelID` parameter: a reply
+continues a `ready` link only when that link is *also* bound to the
+resolved model, on top of D5's existing "parent is exactly the link's
+current head, and no turn already replies to it" check. A reply
+`@mention`-ing a different model than the one its parent link is talking to
+therefore always starts a new branch against the mentioned model, exactly
+as if it had replied to an earlier node (D5) — generalizing that same rule
+from "a different local position in the tree" to "a different model",
+rather than adding a new link state or rejecting the reply outright. The new
+branch's own `StartChat` seeds a fresh remote chat with that model, never
+attaching to — or silently redirecting — the original model's chat.
+
+**Ambiguous selection is recorded, never guessed or dropped (owner decision,
+2026-09-07).** Two or more distinct `@mention`ed active models is not
+folded into "use the default" (a silent, surprising choice) and not left
+entirely unrecorded (an owner post that visibly vanishes with no trace).
+`Bridge.EnqueueTurn` instead records — for owner-facing visibility only,
+never automatic generation — a link and its one turn, both immediately
+`failed` with the new `domain.FailureCategoryAmbiguousModelSelection`, and
+enqueues no durable job at all: the provider is never contacted for that
+post. The link is bound to the workspace's own default model purely to
+satisfy the schema's `NOT NULL` foreign keys
+(`openwebui_conversation_links.model_id`,
+`openwebui_turn_links.link_id → openwebui_conversation_links.id`) — this is
+bookkeeping, never a claim that the default model was "the" intended
+recipient, and since the link is created already-`failed` and never leaves
+that state, nothing downstream ever reads it back as a routing decision.
+Mechanically this reuses D5's own `creation_pending → failed` transition
+(`Claim` then `MarkFailed`) rather than inventing a new terminal state:
+"ambiguous model selection" is a definitive, known-at-creation-time outcome
+in exactly the sense D5's `failed` state already means, not an *uncertain*
+one (D5's `ambiguous` state, reserved for a genuinely unknown remote
+outcome).
+
+### D20. Per-model tool resolution replaces the single deployment-wide `OPENWEBUI_TOOL_IDS` override
+
+D17's tool_ids resolution ran once, at boot, for the one configured default
+model. That stopped making sense once D18 made every active model a
+first-class citizen: different models may have their own `toolIds`
+configured in Open WebUI's own admin UI, and a single deployment-wide
+override would either apply identically to every model (wrong when their
+intended capabilities differ) or need to become a per-model config surface
+of its own — which the owner decided (2026-09-07) not to build.
+
+**Decision: `OPENWEBUI_TOOL_IDS` is removed entirely.** Every model's
+`tool_ids` now come solely from its own `GET /api/models`
+`info.meta.toolIds` — never a config override, and never a value one model
+borrows from another. Resolution happens once per catalog sync round, not
+per turn: `Registry.SyncCatalog` filters each eligible model's own `ToolIDs`
+(already captured by the same `GET /api/models` call that reconciles the
+registry — D18) against `GET /api/v1/tools/`'s accessible-tools list —
+exactly D17's fail-closed exclusion rule, now applied per model instead of
+to one resolved-at-boot default — and writes the result into a small
+in-memory `ToolConfigCache` (`internal/openwebui/toolcache.go`) keyed by
+`ExternalModelID`. `TurnJob` looks up its own turn's model in that shared
+cache when building `StartChatRequest`/`ContinueTurnRequest`; a cache miss —
+a model discovered by a post before the next sync round has priced it in, or
+no cache at all — sends no `tool_ids` key, the same safe default an
+inaccessible or unconfigured id already fell back to under D17.
+`StartChatRequest`/`ContinueTurnRequest` each gained a `ToolIDs` field for
+this, moving what was a `Client`-construction-time value under D17 to a
+per-call one.
+
+A transient failure resolving the accessible-tools list during a sync round
+is fail-open for the cache specifically, independent of the registry
+reconciliation half of that same round: it is logged and the previous
+round's cache is kept exactly as it was, rather than blanking every model's
+`tool_ids` or failing the whole sync over an auxiliary check.
+
+**`OPENWEBUI_WEB_SEARCH_ENABLED` is explicitly unchanged.** It stays one
+plain, deployment-wide boolean and a `Client`-construction-time setting,
+per explicit owner decision (2026-09-07) — the same "no per-model
+config-shape change this issue's scope does not require" reasoning D17
+already gave for not wiring `defaultFeatureIds` into it, now confirmed
+rather than revisited even though `tool_ids` itself did move per-model.
+
+This retires `internal/openwebui.ResolveEffectiveToolConfig`,
+`ToolConfigResolver`, `ToolIDsNone`, and `ResolvedToolConfig` (D17's own
+machinery) along with `internal/provider/openwebui.Client.GetModelTools` and
+its `Config.ToolIDs` field; `cmd/server/main.go`'s startup
+bootstrap-client/two-read-only-call dance is removed with them; a single
+`ToolConfigCache` is built once and shared between the startup sync, the
+periodic `CatalogSyncJob`, and `TurnJob`.
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
@@ -467,6 +671,14 @@ into this key without first revisiting Issue #72's own reasoning.
   redaction test asserts on `sk-mock-upstream-secret`.
 - **#54 (OWUI-R)** inherits D14 as release evidence: the digest, the
   observation record, and the re-verification requirement.
+- **#75** gets its catalog-sync, mention-routing, and per-model tool-
+  resolution inputs from D18, D19, and D20 — each amending, not replacing,
+  the #52/#53/#72/#74 decisions it builds on: D18 amends D9 (identity
+  projection now spans every visible model, not one seeded row), D19
+  amends D5 (the branch rule's "reply to an earlier node" generalizes to
+  "reply naming a different model"), and D20 amends D16/D17 (tool
+  resolution is per model and per sync round, never a single
+  deployment-wide override resolved once at boot).
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Streaming, regeneration, remote branch management, and cancellation each
   need their own contract work before they can be picked up; none of them is
