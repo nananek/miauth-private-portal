@@ -230,6 +230,11 @@ func (r *openWebUIModelRepository) GetByExternalID(ctx context.Context, workspac
 		openWebUIModelSelectColumns+` WHERE workspace_id = ? AND external_model_id = ?`, workspaceID, externalModelID))
 }
 
+func (r *openWebUIModelRepository) GetByActorSlug(ctx context.Context, workspaceID, slug string) (domain.OpenWebUIModel, error) {
+	return scanOpenWebUIModel(r.q.QueryRowContext(ctx,
+		openWebUIModelSelectColumns+` WHERE workspace_id = ? AND actor_slug = ?`, workspaceID, slug))
+}
+
 // ListByWorkspace orders by (created_at, id): the same stable local
 // ordering everything else in this service uses, and never anything
 // derived from a provider id.

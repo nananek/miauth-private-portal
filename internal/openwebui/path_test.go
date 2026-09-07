@@ -188,7 +188,7 @@ func TestSelectBranch_RootReturnsNoContinuation(t *testing.T) {
 	env := newTurnTestEnv(t)
 	root := env.mustCreateRoot(t, "root")
 
-	continuation, err := SelectBranch(t.Context(), env.db.Repos, root)
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, root, env.model.ID)
 	if err != nil {
 		t.Fatalf("SelectBranch: %v", err)
 	}
@@ -205,12 +205,47 @@ func TestSelectBranch_ContinuesReadyLinkAtItsHead(t *testing.T) {
 	env.mustSucceededTurn(t, link, m0, a0)
 
 	m1 := env.mustCreateReply(t, a0, "m1")
-	continuation, err := SelectBranch(t.Context(), env.db.Repos, m1)
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, m1, env.model.ID)
 	if err != nil {
 		t.Fatalf("SelectBranch: %v", err)
 	}
 	if continuation == nil || continuation.Link.ID != link.ID {
 		t.Errorf("continuation = %+v, want link %q", continuation, link.ID)
+	}
+}
+
+// TestSelectBranch_NoContinuationForDifferentTargetModel is Issue #75's
+// cross-model-reply rule: a reply to the exact same head, from the exact
+// same parent, still must not continue the link when the caller has
+// already resolved (by @mention) that this post addresses a *different*
+// model than the one the link is bound to — it must read as starting a
+// fresh conversation with that other model instead.
+func TestSelectBranch_NoContinuationForDifferentTargetModel(t *testing.T) {
+	env := newTurnTestEnv(t)
+	other := env.mustCreateSecondModel(t, "gpt-oss:120b", "other_model")
+	m0 := env.mustCreateRoot(t, "m0")
+	a0 := env.mustCreateReplyAs(t, m0, env.model.ActorID, domain.EntryLLMReply, "a0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+	env.mustSucceededTurn(t, link, m0, a0)
+
+	m1 := env.mustCreateReply(t, a0, "@other_model take over")
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, m1, other.ID)
+	if err != nil {
+		t.Fatalf("SelectBranch: %v", err)
+	}
+	if continuation != nil {
+		t.Errorf("continuation = %+v, want nil when the resolved model differs from the link's own", continuation)
+	}
+
+	// The same reply, resolved against the *original* model, still
+	// continues normally — this is purely the model-mismatch rule, not a
+	// change to the existing head/parent checks.
+	sameModel, err := SelectBranch(t.Context(), env.db.Repos, m1, env.model.ID)
+	if err != nil {
+		t.Fatalf("SelectBranch: %v", err)
+	}
+	if sameModel == nil || sameModel.Link.ID != link.ID {
+		t.Errorf("continuation against the original model = %+v, want link %q", sameModel, link.ID)
 	}
 }
 
@@ -223,7 +258,7 @@ func TestSelectBranch_NoContinuationForReplyToEarlierNode(t *testing.T) {
 
 	// Replying to m0 (an earlier node, not the head a0) must not continue.
 	again := env.mustCreateReply(t, m0, "reply to an earlier node")
-	continuation, err := SelectBranch(t.Context(), env.db.Repos, again)
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, again, env.model.ID)
 	if err != nil {
 		t.Fatalf("SelectBranch: %v", err)
 	}
@@ -247,7 +282,7 @@ func TestSelectBranch_NoContinuationForSecondReplyToSameHead(t *testing.T) {
 
 	// A second reply to the same head a0 must not also continue.
 	m1Again := env.mustCreateReply(t, a0, "second reply to a0")
-	continuation, err := SelectBranch(t.Context(), env.db.Repos, m1Again)
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, m1Again, env.model.ID)
 	if err != nil {
 		t.Fatalf("SelectBranch: %v", err)
 	}
@@ -276,7 +311,7 @@ func TestSelectBranch_NoContinuationAfterFailedTurn(t *testing.T) {
 	// Re-asking off the same parent (a0) after a failed turn must start a
 	// new branch, not attach to the same remote chat.
 	reask := env.mustCreateReply(t, a0, "re-ask after failure")
-	continuation, err := SelectBranch(t.Context(), env.db.Repos, reask)
+	continuation, err := SelectBranch(t.Context(), env.db.Repos, reask, env.model.ID)
 	if err != nil {
 		t.Fatalf("SelectBranch: %v", err)
 	}

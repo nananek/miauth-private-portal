@@ -468,6 +468,15 @@ const (
 	// FailureCategoryOwnerAbandoned is an explicit owner decision to give
 	// up on an uncertain turn rather than adopt it.
 	FailureCategoryOwnerAbandoned = "owner_abandoned"
+	// FailureCategoryAmbiguousModelSelection is an owner post that
+	// @mentioned two or more distinct active Open WebUI models at once
+	// (Issue #75). Bridge.EnqueueTurn refuses to guess which one the post
+	// was meant for: it never enqueues a job or contacts the provider for
+	// this post, and records both the link and its one turn failed with
+	// this category immediately, purely for owner-facing visibility
+	// (docs/operations/runbook.md, cmd/openwebuictl) — there is nothing
+	// automatic left to retry.
+	FailureCategoryAmbiguousModelSelection = "ambiguous_model_selection"
 )
 
 // OpenWebUITurnLink records one owner message and the assistant reply it
@@ -623,6 +632,13 @@ type OpenWebUIModelRepository interface {
 	// GetByExternalID finds a model by the provider's own opaque id
 	// within one workspace.
 	GetByExternalID(ctx context.Context, workspaceID, externalModelID string) (OpenWebUIModel, error)
+	// GetByActorSlug finds a model by its handle slug within one
+	// workspace — @mention resolution's lookup (Issue #75 PR3). Unlike
+	// ExternalModelID's provider-opaque identity, actor_slug is a
+	// presentation value, but migration 0017's (workspace_id, actor_slug)
+	// uniqueness still makes this a single-row lookup, active or not:
+	// the caller decides what an inactive match means.
+	GetByActorSlug(ctx context.Context, workspaceID, slug string) (OpenWebUIModel, error)
 	// ListByWorkspace returns a workspace's models in a stable
 	// (created_at, id) order.
 	ListByWorkspace(ctx context.Context, workspaceID string) ([]OpenWebUIModel, error)
