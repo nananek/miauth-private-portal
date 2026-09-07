@@ -138,7 +138,22 @@ func run() error {
 	// free until jobsManager.Run is called at the very end, so moving its
 	// construction earlier changes nothing about the other registrations
 	// that follow it.
-	jobsManager := jobs.NewManager(db.Jobs, jobsConfigFrom(cfg.Jobs), logger)
+	jobsCfg := jobsConfigFrom(cfg.Jobs)
+	jobsCfg.Reload = func(ctx context.Context) jobs.Config {
+		return jobsConfigFrom(config.JobsConfig{
+			WorkerID:            cfg.Jobs.WorkerID,
+			PollInterval:        configStore.Duration(ctx, config.KeyJobsPollInterval, cfg.Jobs.PollInterval),
+			ClaimBatchSize:      configStore.Int(ctx, config.KeyJobsClaimBatchSize, cfg.Jobs.ClaimBatchSize),
+			LeaseDuration:       configStore.Duration(ctx, config.KeyJobsLeaseDuration, cfg.Jobs.LeaseDuration),
+			LeaseRenewMargin:    configStore.Duration(ctx, config.KeyJobsLeaseRenewMargin, cfg.Jobs.LeaseRenewMargin),
+			MaxAttempts:         configStore.Int(ctx, config.KeyJobsMaxAttempts, cfg.Jobs.MaxAttempts),
+			BackoffBase:         configStore.Duration(ctx, config.KeyJobsBackoffBase, cfg.Jobs.BackoffBase),
+			BackoffMax:          configStore.Duration(ctx, config.KeyJobsBackoffMax, cfg.Jobs.BackoffMax),
+			MaxConcurrentJobs:   configStore.Int(ctx, config.KeyJobsMaxConcurrent, cfg.Jobs.MaxConcurrentJobs),
+			ShutdownGracePeriod: configStore.Duration(ctx, config.KeyJobsShutdownGrace, cfg.Jobs.ShutdownGracePeriod),
+		})
+	}
+	jobsManager := jobs.NewManager(db.Jobs, jobsCfg, logger)
 
 	// Constructed and seeded only when the feature is on: no
 	// openwebui_workspaces/openwebui_models row is ever written, and
