@@ -109,6 +109,7 @@ func run() error {
 	// each other at every startup instead of silently drifting apart.
 	var virtualActors httpserver.VirtualActorResolver
 	var openWebUIBridge timeline.EntryHook
+	var openWebUICatalogScheduler *openwebui.CatalogScheduler
 	if cfg.OpenWebUI.Enabled {
 		registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
 			Enabled:           cfg.OpenWebUI.Enabled,
@@ -124,6 +125,41 @@ func run() error {
 			return fmt.Errorf("seed openwebui registry: %w", err)
 		}
 		virtualActors = registry
+
+		// catalogClient is built and used regardless of
+		// OPENWEBUI_GENERATION_ENABLED: catalog sync (Issue #75) keeps the
+		// VirtualActor projection and search results in step with every
+		// model the configured account can see, which is useful on a
+		// deployment that never turns outbound generation on at all.
+		catalogClient, err := owuiprovider.NewClient(owuiprovider.Config{
+			BaseURL:          cfg.OpenWebUI.BaseURL,
+			AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
+			APIKey:           cfg.OpenWebUI.APIKey,
+			Timeout:          cfg.OpenWebUI.Timeout,
+			MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
+			MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
+		})
+		if err != nil {
+			return fmt.Errorf("build openwebui catalog client: %w", err)
+		}
+
+		// A bounded, best-effort attempt at boot: a target that is merely
+		// unreachable at startup must not prevent the rest of the server
+		// from starting (the same "a dead provider never blocks local
+		// posting" principle Issue #74's tool-config resolution below
+		// already follows). Registry.Seed's own fallback model is what
+		// this deployment keeps using until the periodic scheduler's next
+		// successful round.
+		startupSyncCtx, cancelStartupSync := context.WithTimeout(ctx, cfg.OpenWebUI.Timeout)
+		if _, err := registry.SyncCatalog(startupSyncCtx, catalogClient, logger); err != nil {
+			logger.Error("openwebui: startup catalog sync failed; continuing with the last known registry", "error", err)
+		}
+		cancelStartupSync()
+
+		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, logger).Handle)
+		openWebUICatalogScheduler = openwebui.NewCatalogScheduler(db.Jobs, openwebui.CatalogSchedulerConfig{
+			Interval: cfg.OpenWebUI.CatalogSyncInterval,
+		}, logger)
 
 		// Registered only when generation itself is on: no
 		// internal/provider/openwebui.Client is ever built (and so no
@@ -349,7 +385,7 @@ func run() error {
 	serviceCtx, cancelServices := context.WithCancel(ctx)
 	defer cancelServices()
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -374,6 +410,14 @@ func run() error {
 		go func() {
 			defer wg.Done()
 			errCh <- imapScheduler.Run(serviceCtx)
+			cancelServices()
+		}()
+	}
+	if openWebUICatalogScheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- openWebUICatalogScheduler.Run(serviceCtx)
 			cancelServices()
 		}()
 	}
