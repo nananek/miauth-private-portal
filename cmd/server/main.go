@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/config"
+	"github.com/nananek/miauth-private-portal/internal/configstore"
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
@@ -76,6 +77,26 @@ func run() error {
 	}
 	if err := db.Actors.EnsureReservedActors(ctx); err != nil {
 		return fmt.Errorf("seed reserved actors: %w", err)
+	}
+
+	// Issue #76 (ADR-0006 §2-4): idempotent migration of every db-eligible
+	// key's current effective value into app_config, so miauthctl config
+	// has something to list/get from the very first boot rather than only
+	// after an operator's first explicit set. Attributed to the System
+	// actor (not an owner, who may not be bound yet at this point in
+	// startup) since this runs automatically, not on an operator's
+	// command — see internal/configstore.Seed's own doc comment for why
+	// an existing row is never touched here.
+	systemActor, err := db.Actors.GetByType(ctx, domain.ActorSystem)
+	if err != nil {
+		return fmt.Errorf("resolve system actor: %w", err)
+	}
+	seeded, err := configstore.Seed(ctx, db, cfg, systemActor.ID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("seed app config: %w", err)
+	}
+	if seeded > 0 {
+		logger.Info("app config seeded", "keys_seeded", seeded)
 	}
 
 	reg := health.NewRegistry()
