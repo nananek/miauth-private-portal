@@ -22,7 +22,16 @@ type ExternalSource struct {
 	LastFetchedAt       *time.Time
 	LastError           *string
 	ConsecutiveFailures int
-	CreatedAt           time.Time
+	// Active gates ingest.Scheduler's polling: List only ever returns
+	// active sources. False means ReconcileFromConfig's most recent
+	// round did not see this source's URI among its configured feed
+	// URLs, most commonly because it was removed from RSS_FEED_URLS.
+	// The row itself, and every ExternalItem/Entry it already produced,
+	// is never deleted — removing a feed only stops future polling of
+	// it, the same "never rewrite history" convention
+	// openwebui_models.Active already follows.
+	Active    bool
+	CreatedAt time.Time
 }
 
 // ExternalItem is one fetched item from an ExternalSource, deduplicated
@@ -46,13 +55,14 @@ type ExternalItem struct {
 type ExternalSourceRepository interface {
 	Create(ctx context.Context, s ExternalSource) error
 	Get(ctx context.Context, id string) (ExternalSource, error)
-	// List returns every configured source of kind, in creation order. A
-	// caller (ingest.Scheduler) always scopes to its own kind: without
-	// this filter, two Scheduler instances configured with different
-	// per-kind poll intervals (RSS's default 15 minutes vs. an IMAP
-	// mailbox's own interval) would each enqueue a job for every source
-	// regardless of kind, double-enqueueing "external_source_poll" jobs
-	// for the same source on every tick where their intervals overlap.
+	// List returns every *active* configured source of kind, in creation
+	// order (see ExternalSource.Active's own doc comment). A caller
+	// (ingest.Scheduler) always scopes to its own kind: without this
+	// filter, two Scheduler instances configured with different per-kind
+	// poll intervals (RSS's default 15 minutes vs. an IMAP mailbox's own
+	// interval) would each enqueue a job for every source regardless of
+	// kind, double-enqueueing "external_source_poll" jobs for the same
+	// source on every tick where their intervals overlap.
 	List(ctx context.Context, kind string) ([]ExternalSource, error)
 	// RecordFetchSuccess updates last_fetched_at, clears last_error, and
 	// resets consecutive_failures to 0. When cursor is non-nil it also
@@ -68,12 +78,21 @@ type ExternalSourceRepository interface {
 	// same position. It is independent of internal/jobs' own
 	// retry/dead-job bookkeeping, which this never influences.
 	RecordFetchFailure(ctx context.Context, id string, errMsg string, at time.Time) error
-	// EnsureFromConfig idempotently creates every source in sources that
-	// does not already exist by (kind, uri): a UNIQUE(kind, uri)
-	// conflict on an individual source is ignored, so operator-edited
-	// configuration never needs a separate existence check before
-	// startup seeding. It never modifies an already-existing source row.
-	EnsureFromConfig(ctx context.Context, sources []ExternalSource) error
+	// ReconcileFromConfig reconciles kind's configured set of source URIs
+	// (RSS_FEED_URLS's entries, or IMAP's single mailbox URI) against
+	// existing external_sources rows of that kind (Issue #76 PR4a,
+	// replacing the old create-only EnsureFromConfig): a URI not yet
+	// known is created (active); one that exists but is currently
+	// inactive is reactivated; an existing active source whose URI is no
+	// longer in uris is deactivated. It never deletes a row or touches
+	// display_name/cursor/last_fetched_at/last_error/
+	// consecutive_failures — the same "reconcile presence, never rewrite
+	// history" contract Registry.SyncCatalog already uses for
+	// openwebui_models. Called once at startup and, for RSS/IMAP's
+	// db-eligible poll interval, again on every ingest.Scheduler tick, so
+	// a feed URL added or removed from config takes effect without a
+	// restart.
+	ReconcileFromConfig(ctx context.Context, kind string, uris []string, at time.Time) error
 }
 
 // ExternalItemRepository persists fetched external items and their

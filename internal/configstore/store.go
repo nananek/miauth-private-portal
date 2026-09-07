@@ -93,6 +93,28 @@ func (s *Store) StringList(ctx context.Context, key string, fallback []string) [
 	return parts
 }
 
+// BoolPtr returns key's DB override parsed as a boolean, or fallback if
+// unset or unparseable. Unlike Bool, fallback (and the return value) is
+// a *bool: it exists for a tri-state key like
+// OPENWEBUI_WEB_SEARCH_ENABLED (ADR-0005 D21), where "no DB row and no
+// bootstrap value either" (nil) is a third state distinct from both
+// true and false, not just Bool's ordinary default. A DB override, once
+// set, is always a concrete true or false — ValidateKeyValue rejects an
+// empty Set value — so only the no-override case can ever produce nil,
+// and only when fallback itself is nil.
+func (s *Store) BoolPtr(ctx context.Context, key string, fallback *bool) *bool {
+	v, ok := s.raw(ctx, key)
+	if !ok {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		s.logger.Warn("configstore: stored value no longer parses as a boolean, using bootstrap value", "key", key)
+		return fallback
+	}
+	return &b
+}
+
 // Bool returns key's DB override parsed as a boolean, or fallback if
 // unset or unparseable.
 func (s *Store) Bool(ctx context.Context, key string, fallback bool) bool {

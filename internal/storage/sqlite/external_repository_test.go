@@ -217,16 +217,13 @@ func TestExternalSourceRepository_RecordFetchFailure_IncrementsConsecutiveFailur
 	}
 }
 
-func TestExternalSourceRepository_EnsureFromConfig_CreatesMissingAndSkipsExisting(t *testing.T) {
+func TestExternalSourceRepository_ReconcileFromConfig_CreatesMissingAndSkipsExisting(t *testing.T) {
 	db := newTestDB(t)
 	existing := mustCreateExternalSource(t, db, "rss", "https://example.com/existing.xml")
 
-	sources := []domain.ExternalSource{
-		{ID: domain.NewID(), Kind: "rss", URI: "https://example.com/existing.xml", CreatedAt: time.Now()},
-		{ID: domain.NewID(), Kind: "rss", URI: "https://example.com/new.xml", CreatedAt: time.Now()},
-	}
-	if err := db.ExternalSources.EnsureFromConfig(t.Context(), sources); err != nil {
-		t.Fatalf("ensure from config: %v", err)
+	uris := []string{"https://example.com/existing.xml", "https://example.com/new.xml"}
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), "rss", uris, time.Now()); err != nil {
+		t.Fatalf("reconcile from config: %v", err)
 	}
 
 	all, err := db.ExternalSources.List(t.Context(), "rss")
@@ -239,10 +236,85 @@ func TestExternalSourceRepository_EnsureFromConfig_CreatesMissingAndSkipsExistin
 
 	got, err := db.ExternalSources.Get(t.Context(), existing.ID)
 	if err != nil {
-		t.Fatalf("existing source must survive EnsureFromConfig unchanged: %v", err)
+		t.Fatalf("existing source must survive ReconcileFromConfig unchanged: %v", err)
 	}
 	if got.ID != existing.ID {
 		t.Errorf("existing source ID changed: got %q, want %q", got.ID, existing.ID)
+	}
+}
+
+// TestExternalSourceRepository_ReconcileFromConfig_DeactivatesRemovedURI
+// backs Issue #76 PR4a's RSS_FEED_URLS reload: a URI dropped from a
+// later reconcile round is deactivated (List no longer returns it), but
+// its row survives untouched — this service's append-only-history
+// convention (ExternalSource.Active's own doc comment).
+func TestExternalSourceRepository_ReconcileFromConfig_DeactivatesRemovedURI(t *testing.T) {
+	db := newTestDB(t)
+	kept := mustCreateExternalSource(t, db, "rss", "https://example.com/kept.xml")
+	removed := mustCreateExternalSource(t, db, "rss", "https://example.com/removed.xml")
+
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), "rss", []string{kept.URI}, time.Now()); err != nil {
+		t.Fatalf("reconcile from config: %v", err)
+	}
+
+	active, err := db.ExternalSources.List(t.Context(), "rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != kept.ID {
+		t.Fatalf("List after reconcile = %+v, want only %s", active, kept.ID)
+	}
+
+	got, err := db.ExternalSources.Get(t.Context(), removed.ID)
+	if err != nil {
+		t.Fatalf("removed source's row must survive: %v", err)
+	}
+	if got.Active {
+		t.Error("removed source's Active = true, want false")
+	}
+}
+
+// TestExternalSourceRepository_ReconcileFromConfig_ReactivatesReaddedURI
+// covers the round trip: a URI removed (deactivated) in one round and
+// present again in a later one must resume being polled, reusing the
+// same row rather than creating a duplicate.
+func TestExternalSourceRepository_ReconcileFromConfig_ReactivatesReaddedURI(t *testing.T) {
+	db := newTestDB(t)
+	source := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), "rss", nil, time.Now()); err != nil {
+		t.Fatalf("reconcile (remove): %v", err)
+	}
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), "rss", []string{source.URI}, time.Now()); err != nil {
+		t.Fatalf("reconcile (re-add): %v", err)
+	}
+
+	active, err := db.ExternalSources.List(t.Context(), "rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != source.ID {
+		t.Fatalf("List after re-add = %+v, want the original row %s reactivated, not duplicated", active, source.ID)
+	}
+}
+
+// TestExternalSourceRepository_List_OmitsInactiveSources backs
+// ingest.Scheduler's own reliance on List already filtering to active
+// sources only.
+func TestExternalSourceRepository_List_OmitsInactiveSources(t *testing.T) {
+	db := newTestDB(t)
+	_ = mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), "rss", nil, time.Now()); err != nil {
+		t.Fatalf("reconcile (remove): %v", err)
+	}
+
+	active, err := db.ExternalSources.List(t.Context(), "rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Errorf("List = %+v, want no active sources", active)
 	}
 }
 

@@ -397,10 +397,43 @@ func TestTurnJob_ResolveWebSearchEnabled_PriorityRule(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			j := &TurnJob{cfg: TurnJobConfig{WebSearchOverride: tc.override}, featureCache: tc.featureCache}
-			if got := j.resolveWebSearchEnabled(tc.externalModelID); got != tc.want {
+			if got := j.resolveWebSearchEnabled(t.Context(), tc.externalModelID); got != tc.want {
 				t.Errorf("resolveWebSearchEnabled(%q) = %v, want %v", tc.externalModelID, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTurnJob_ResolveWebSearchEnabled_ReloadOverridesConstructionValue
+// backs Issue #76 PR4a's OPENWEBUI_WEB_SEARCH_ENABLED reload:
+// ReloadWebSearchOverride, when set, wins over cfg.WebSearchOverride
+// (and therefore over featureCache too), without needing a new TurnJob.
+func TestTurnJob_ResolveWebSearchEnabled_ReloadOverridesConstructionValue(t *testing.T) {
+	featureCache := NewFeatureDefaultCache()
+	featureCache.Replace(map[string]bool{"model-on": true})
+	constructionFalse := false
+	reloadedTrue := true
+
+	j := &TurnJob{
+		cfg: TurnJobConfig{
+			WebSearchOverride:       &constructionFalse,
+			ReloadWebSearchOverride: func(context.Context) *bool { return &reloadedTrue },
+		},
+		featureCache: featureCache,
+	}
+	if got := j.resolveWebSearchEnabled(t.Context(), "model-on"); got != true {
+		t.Errorf("resolveWebSearchEnabled = %v, want true (the reloaded value, not the construction-time false)", got)
+	}
+}
+
+// TestTurnJob_ResolveWebSearchEnabled_NilReloadFuncUsesConstructionValue
+// preserves this type's pre-Issue #76 behavior for a caller unaware of
+// the DB overlay.
+func TestTurnJob_ResolveWebSearchEnabled_NilReloadFuncUsesConstructionValue(t *testing.T) {
+	overrideTrue := true
+	j := &TurnJob{cfg: TurnJobConfig{WebSearchOverride: &overrideTrue}}
+	if got := j.resolveWebSearchEnabled(t.Context(), "any-model"); got != true {
+		t.Errorf("resolveWebSearchEnabled = %v, want true (construction-time WebSearchOverride)", got)
 	}
 }
 

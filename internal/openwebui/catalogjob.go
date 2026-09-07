@@ -59,8 +59,18 @@ func (j *CatalogSyncJob) Handle(ctx context.Context, job domain.Job) error {
 // CatalogSchedulerConfig bounds CatalogScheduler's ticking interval.
 type CatalogSchedulerConfig struct {
 	// Interval is how often CatalogScheduler enqueues a JobTypeCatalogSync
-	// job. Mirrors OPENWEBUI_CATALOG_SYNC_INTERVAL.
+	// job. Mirrors OPENWEBUI_CATALOG_SYNC_INTERVAL. This is only the
+	// *initial* value: Run reloads it on every tick via ReloadInterval,
+	// if set.
 	Interval time.Duration
+
+	// ReloadInterval, if non-nil, is called at the start of every tick
+	// (Issue #76 PR4a, ADR-0006 Tier A) to get the current effective
+	// OPENWEBUI_CATALOG_SYNC_INTERVAL; Run calls the ticker's Reset when
+	// it differs from the value currently in effect. Nil disables
+	// reload entirely: Interval never changes after construction,
+	// exactly this type's pre-#76 behavior.
+	ReloadInterval func(ctx context.Context) time.Duration
 }
 
 // CatalogScheduler periodically enqueues one JobTypeCatalogSync job — a
@@ -74,6 +84,14 @@ type CatalogScheduler struct {
 	cfg      CatalogSchedulerConfig
 	logger   *slog.Logger
 	now      func() time.Time
+	// interval is the sync interval currently in effect: cfg.Interval
+	// until ReloadInterval (if set) reports a different value. Only
+	// Run's own goroutine ever reads or writes it, so it needs no lock.
+	interval time.Duration
+	// ticker is Run's own ticker, stored here (rather than kept as a
+	// local variable in Run) purely so reloadInterval can Reset it; it
+	// is nil until Run starts.
+	ticker *time.Ticker
 }
 
 // NewCatalogScheduler builds a CatalogScheduler. A non-positive Interval
@@ -88,26 +106,41 @@ func NewCatalogScheduler(jobsRepo domain.JobRepository, cfg CatalogSchedulerConf
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &CatalogScheduler{jobsRepo: jobsRepo, cfg: cfg, logger: logger, now: time.Now}
+	return &CatalogScheduler{jobsRepo: jobsRepo, cfg: cfg, logger: logger, now: time.Now, interval: cfg.Interval}
 }
 
-// Run enqueues one sync job immediately, then again every Interval,
-// until ctx is cancelled — mirroring internal/ingest.Scheduler.Run's
-// "blocks until cancelled, then returns nil" contract, so cmd/server's
-// shared errCh/wg shutdown handling treats every long-running service
+// Run enqueues one sync job immediately, then again every interval
+// (initially cfg.Interval, reloaded via cfg.ReloadInterval), until ctx
+// is cancelled — mirroring internal/ingest.Scheduler.Run's "blocks
+// until cancelled, then returns nil" contract, so cmd/server's shared
+// errCh/wg shutdown handling treats every long-running service
 // identically.
 func (s *CatalogScheduler) Run(ctx context.Context) error {
 	s.tick(ctx)
 
-	ticker := time.NewTicker(s.cfg.Interval)
-	defer ticker.Stop()
+	s.ticker = time.NewTicker(s.interval)
+	defer s.ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
+		case <-s.ticker.C:
+			s.reloadInterval(ctx)
 			s.tick(ctx)
 		}
+	}
+}
+
+// reloadInterval applies cfg.ReloadInterval, if set, resetting s.ticker
+// when the effective interval actually changed. Split out from Run so
+// the reload decision is testable without waiting on a real ticker.
+func (s *CatalogScheduler) reloadInterval(ctx context.Context) {
+	if s.cfg.ReloadInterval == nil {
+		return
+	}
+	if next := s.cfg.ReloadInterval(ctx); next > 0 && next != s.interval {
+		s.interval = next
+		s.ticker.Reset(s.interval)
 	}
 }
 
@@ -117,7 +150,7 @@ func (s *CatalogScheduler) Run(ctx context.Context) error {
 // (mirrors internal/ingest.Scheduler.tick's own window truncation).
 func (s *CatalogScheduler) tick(ctx context.Context) {
 	now := s.now().UTC()
-	window := now.Truncate(s.cfg.Interval).Unix()
+	window := now.Truncate(s.interval).Unix()
 	idempotencyKey := fmt.Sprintf("%s:%d", JobTypeCatalogSync, window)
 	job := domain.Job{
 		ID:             domain.NewID(),
