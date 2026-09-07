@@ -165,6 +165,31 @@ func TestService_CreateFile_Success(t *testing.T) {
 	}
 }
 
+func TestService_CreateSystemFile_HasNoOwner(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	f, err := ts.CreateSystemFile(t.Context(), domain.FilePurposeSourceFavicon, "favicon.png", encodePNG(t, 4, 4))
+	if err != nil {
+		t.Fatalf("CreateSystemFile: %v", err)
+	}
+	if f.OwnerActorID != nil {
+		t.Errorf("OwnerActorID = %v, want nil", f.OwnerActorID)
+	}
+	if f.Purpose != domain.FilePurposeSourceFavicon {
+		t.Errorf("Purpose = %q, want %q", f.Purpose, domain.FilePurposeSourceFavicon)
+	}
+	if !ts.storage.has(f.StorageKey) {
+		t.Error("storage does not have the created file's key")
+	}
+}
+
+func TestService_CreateSystemFile_RejectsAttachmentPurpose(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	_, err := ts.CreateSystemFile(t.Context(), domain.FilePurposeAttachment, "x.png", encodePNG(t, 4, 4))
+	if err == nil {
+		t.Error("expected an error when using FilePurposeAttachment with CreateSystemFile")
+	}
+}
+
 func TestService_CreateFile_EmptyNameGetsADefault(t *testing.T) {
 	ts := newTestDriveService(t, Config{})
 	owner := mustCreateTestActor(t, ts.db)

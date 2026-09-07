@@ -41,6 +41,13 @@ type userDetailedNotMe struct {
 	// key so Aria's own `.whereType<UserDetailed>()` call sites never
 	// silently drop it (Issue #65).
 	Url *string `json:"url"`
+	// AvatarURL mirrors userLite's own field (noteapi_wire.go's
+	// avatarURLFromFileID) — nil until the projected actor has an
+	// AvatarFileID (Issue #77 PR5). Every call site below sets it
+	// explicitly after construction, the same pattern Host already uses
+	// (newUserDetailedNotMe itself has no localOrigin to build the URL
+	// with).
+	AvatarURL *string `json:"avatarUrl"`
 }
 
 func newUserDetailedNotMe(actorID, username, displayName string, createdAt time.Time, notesCount int) userDetailedNotMe {

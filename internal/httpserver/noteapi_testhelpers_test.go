@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/drive"
 	"github.com/nananek/miauth-private-portal/internal/health"
+	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
@@ -128,6 +131,17 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 
 	miauthSvc := miauth.NewService(db, db.Repos, miauthCfg)
 
+	// Wired unconditionally, matching cmd/server (neither Drive nor
+	// ExternalSources has a feature flag): Issue #77 PR5's POST
+	// /api/i/update avatarId handling needs s.drive non-nil to validate
+	// ownership, exactly as production always has it.
+	driveSvc := drive.NewService(
+		newDriveFakeStorage(),
+		safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: true, AllowIPForTesting: func(net.IP) bool { return true }}),
+		db.Repos,
+		drive.Config{MaxFileBytes: driveTestMaxFileBytes, MaxImageWidth: 8000, MaxImageHeight: 8000, CapacityBytes: 1 << 30},
+	)
+
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	srv := NewServer(logger, reg, Options{
@@ -140,7 +154,9 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 		// ADR-0008's design-A host display has no feature flag): only
 		// entries authored by an ActorExternalSource actor are affected,
 		// which no pre-PR4 test creates.
-		ExternalSources: db.Repos.ExternalSources,
+		ExternalSources:   db.Repos.ExternalSources,
+		Drive:             driveSvc,
+		DriveMaxFileBytes: driveTestMaxFileBytes,
 	})
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}

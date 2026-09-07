@@ -195,7 +195,8 @@ work:
   channels, chat, and every other non-MVP Misskey feature are
   unimplemented; unsupported endpoints fail explicitly rather than
   returning fabricated success. (Reactions and notifications shipped in
-  Issue #23; the Drive API shipped in Issue #77 PR3 — see
+  Issue #23; the Drive API shipped in Issue #77 PR3, and profile
+  avatars + RSS source favicons in Issue #77 PR5 — see
   [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Drive API
   and note attachments" section.)
 - **No note editing**: `notes/update` is not implemented.

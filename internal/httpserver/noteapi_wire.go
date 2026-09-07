@@ -24,6 +24,25 @@ type userLite struct {
 	ID       string  `json:"id"`
 	Username string  `json:"username"`
 	Host     *string `json:"host"`
+	// AvatarURL is nil until the projected actor has an AvatarFileID
+	// (Issue #77 PR5) — an absolute GET /files/{id} URL, never the bare
+	// avatarId key: docs/compat/aria-v1.5.11.md's avatarId-discriminator
+	// guardrail (plan-77 v1 §1.4) applies here exactly as it does to
+	// userDetailedNotMe.
+	AvatarURL *string `json:"avatarUrl"`
+}
+
+// avatarURLFromFileID resolves fileID to the absolute GET /files/{id}
+// URL internal/httpserver/drive_wire.go's projectDriveFile already uses
+// for DriveFile.url, or nil if fileID itself is nil. It is a pure
+// function (not a Server method) so noteapi_wire_test.go can exercise
+// wire projection without a live localOrigin-configured Server.
+func avatarURLFromFileID(localOrigin string, fileID *string) *string {
+	if fileID == nil {
+		return nil
+	}
+	u := localOrigin + "/files/" + *fileID
+	return &u
 }
 
 // VirtualActorResolver projects an Open WebUI model actor into the
@@ -243,8 +262,8 @@ func wireText(e domain.Entry) string {
 }
 
 // newUserLiteFromOwner projects a miauth.OwnerProfile onto userLite.
-func newUserLiteFromOwner(owner miauth.OwnerProfile) userLite {
-	return userLite{ID: owner.ActorID, Username: owner.Username}
+func newUserLiteFromOwner(localOrigin string, owner miauth.OwnerProfile) userLite {
+	return userLite{ID: owner.ActorID, Username: owner.Username, AvatarURL: avatarURLFromFileID(localOrigin, owner.AvatarFileID)}
 }
 
 // resolveUserLite builds the userLite projection for an entry's
@@ -266,7 +285,7 @@ func newUserLiteFromOwner(owner miauth.OwnerProfile) userLite {
 // nonexistent workspace.
 func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owner miauth.OwnerProfile) userLite {
 	if authorActorID == owner.ActorID {
-		return newUserLiteFromOwner(owner)
+		return newUserLiteFromOwner(s.localOrigin, owner)
 	}
 	if s.timeline != nil {
 		if actor, err := s.timeline.ResolveAuthor(ctx, authorActorID); err == nil {
@@ -286,7 +305,16 @@ func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owne
 				if s.externalSources != nil {
 					if src, err := s.externalSources.GetByActorID(ctx, authorActorID); err == nil && src.Username != nil && src.Host != nil {
 						host := *src.Host
-						return userLite{ID: authorActorID, Username: *src.Username, Host: &host}
+						return userLite{
+							ID: authorActorID, Username: *src.Username, Host: &host,
+							// AvatarURL projects the source's fetched
+							// favicon.ico (Issue #77 PR5) — actor.
+							// AvatarFileID, not any field on src itself:
+							// SetAvatarFileID writes straight to the
+							// actors row, mirroring how the owner's own
+							// avatar is stored.
+							AvatarURL: avatarURLFromFileID(s.localOrigin, actor.AvatarFileID),
+						}
 					}
 				}
 			}
@@ -353,10 +381,12 @@ func newStatsResponse(notesCount, reactionsCount int) statsResponse {
 	}
 }
 
-func newMeDetailed(owner miauth.OwnerProfile, notesCount int) meDetailed {
-	return meDetailed{
+func newMeDetailed(localOrigin string, owner miauth.OwnerProfile, notesCount int) meDetailed {
+	m := meDetailed{
 		userDetailedNotMe: newUserDetailedNotMe(owner.ActorID, owner.Username, owner.DisplayName, owner.CreatedAt, notesCount),
 		IsModerator:       true,
 		IsAdmin:           true,
 	}
+	m.AvatarURL = avatarURLFromFileID(localOrigin, owner.AvatarFileID)
+	return m
 }

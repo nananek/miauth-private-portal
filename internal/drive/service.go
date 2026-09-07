@@ -152,17 +152,69 @@ type CreateFileInput struct {
 // as "skip it," so there is no observed call path this behavior would
 // ever change.
 func (s *Service) CreateFile(ctx context.Context, in CreateFileInput) (domain.File, error) {
+	if in.FolderID != nil {
+		if _, err := s.getOwnedFolder(ctx, in.OwnerActorID, *in.FolderID); err != nil {
+			return domain.File{}, err
+		}
+	}
+	ownerActorID := in.OwnerActorID
+	return s.storeValidatedImage(ctx, storeValidatedImageInput{
+		OwnerActorID: &ownerActorID,
+		Purpose:      domain.FilePurposeAttachment,
+		FolderID:     in.FolderID,
+		Name:         in.Name,
+		Comment:      in.Comment,
+		IsSensitive:  in.IsSensitive,
+		Data:         in.Data,
+	})
+}
+
+// CreateSystemFile stores data as a files row with no owning actor and
+// no folder — infrastructure-authored files no Drive API caller
+// uploaded, currently only Issue #77 PR4/PR5's per-source favicon fetch
+// (internal/ingest/favicon, called from cmd/server). purpose must not be
+// FilePurposeAttachment: that value specifically means "a Drive API
+// caller uploaded this," which CreateFile is what performs (it also has
+// ownership/folder semantics CreateSystemFile deliberately does not).
+func (s *Service) CreateSystemFile(ctx context.Context, purpose domain.FilePurpose, name string, data []byte) (domain.File, error) {
+	if purpose == domain.FilePurposeAttachment {
+		return domain.File{}, errors.New("drive: CreateSystemFile must not be used for attachment-purpose files")
+	}
+	return s.storeValidatedImage(ctx, storeValidatedImageInput{
+		Purpose: purpose,
+		Name:    name,
+		Data:    data,
+	})
+}
+
+// storeValidatedImageInput is CreateFile/CreateSystemFile's shared
+// argument shape once each has resolved its own purpose/ownership rules
+// — see storeValidatedImage's doc comment.
+type storeValidatedImageInput struct {
+	OwnerActorID *string
+	Purpose      domain.FilePurpose
+	FolderID     *string
+	Name         string
+	Comment      *string
+	IsSensitive  bool
+	Data         []byte
+}
+
+// storeValidatedImage is CreateFile and CreateSystemFile's shared body:
+// validate as a raster image (ValidateImage — Issue #77 v2's "SVG/ベク
+// ター画像は許容しない" scope decision applies to every file this package
+// ever stores, not only Drive API uploads), store the bytes, and record
+// the files row. Unlike real Misskey's Drive API, this never performs
+// content-hash deduplication for CreateFile's own reasons (see that
+// method's doc comment); CreateSystemFile has no client-facing "force"
+// concept to begin with.
+func (s *Service) storeValidatedImage(ctx context.Context, in storeValidatedImageInput) (domain.File, error) {
 	if int64(len(in.Data)) > s.cfg.MaxFileBytes {
 		return domain.File{}, ErrFileTooLarge
 	}
 	info, err := ValidateImage(in.Data, s.cfg.MaxImageWidth, s.cfg.MaxImageHeight)
 	if err != nil {
 		return domain.File{}, err
-	}
-	if in.FolderID != nil {
-		if _, err := s.getOwnedFolder(ctx, in.OwnerActorID, *in.FolderID); err != nil {
-			return domain.File{}, err
-		}
 	}
 
 	id := domain.NewID()
@@ -174,8 +226,8 @@ func (s *Service) CreateFile(ctx context.Context, in CreateFileInput) (domain.Fi
 	width, height := info.Width, info.Height
 	f := domain.File{
 		ID:           id,
-		OwnerActorID: &in.OwnerActorID,
-		Purpose:      domain.FilePurposeAttachment,
+		OwnerActorID: in.OwnerActorID,
+		Purpose:      in.Purpose,
 		MIME:         MIMEForFormat(info.Format),
 		ByteSize:     int64(len(in.Data)),
 		SHA256:       hex.EncodeToString(sha256Sum[:]),
