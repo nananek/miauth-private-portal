@@ -1,0 +1,55 @@
+{
+  "id": "chatcmpl-mock-websearch-1",
+  "object": "chat.completion",
+  "created": 1788672410,
+  "model": "mock-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Go 1.24 removed the error path from crypto/rand.Read [1]."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 30,
+    "completion_tokens": 18,
+    "total_tokens": 48
+  },
+  "sources": [
+    {
+      "source": {
+        "name": "web_search",
+        "type": "web_search",
+        "urls": [
+          "https://go.dev/doc/go1.24"
+        ],
+        "queries": [
+          "crypto/rand.Read error Go 1.24"
+        ]
+      },
+      "metadata": [
+        {
+          "title": "Go 1.24 Release Notes",
+          "description": "crypto/rand.Read never returns an error on Go 1.24+.",
+          "source": "https://go.dev/doc/go1.24"
+        },
+        {
+          "title": "go.dev/issue/66821",
+          "description": "Second result chunk from the same search — deliberately not captured by normalizeSources (only the first metadata entry is read).",
+          "source": "https://go.dev/issue/66821"
+        }
+      ],
+      "distances": [
+        0.12,
+        0.31
+      ],
+      "document": [
+        "crypto/rand.Read never returns an error on Go 1.24+ (it crashes the process instead)...",
+        "See go.dev/issue/66821 for background on this change..."
+      ]
+    }
+  ]
+}

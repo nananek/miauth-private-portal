@@ -190,11 +190,12 @@ func newNoteAPITestServerOpenWebUIEnabledAt(t *testing.T, path, tokenSessionID s
 	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 	srv := NewServer(logger, reg, Options{
-		MiAuthService:   miauthSvc,
-		TimelineService: timelineSvc,
-		LocalOrigin:     testLocalOrigin,
-		VirtualActors:   registry,
-		OpenWebUIBridge: bridge.EnqueueTurn,
+		MiAuthService:      miauthSvc,
+		TimelineService:    timelineSvc,
+		LocalOrigin:        testLocalOrigin,
+		VirtualActors:      registry,
+		OpenWebUIBridge:    bridge.EnqueueTurn,
+		OpenWebUITurnLinks: db.Repos.OpenWebUITurnLinks,
 	})
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}

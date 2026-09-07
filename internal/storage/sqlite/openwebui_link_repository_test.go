@@ -1243,3 +1243,100 @@ func TestOpenWebUITurnLinkRepository_RecordOutcome(t *testing.T) {
 		t.Errorf("RecordOutcome on an unknown turn error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestOpenWebUITurnLinkRepository_RecordOutcome_TitleAndSources is Issues
+// #81/#84's own addition to RecordOutcome: Title and Sources persist and
+// round-trip through Get exactly like every other outcome field, and a
+// later write that omits them clears them the same way an omitted
+// FailureCategory already does (see
+// TestOpenWebUITurnLinkRepository_RecordOutcome above) — RecordOutcome
+// always overwrites, never merges.
+func TestOpenWebUITurnLinkRepository_RecordOutcome_TitleAndSources(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+	l := f.claim(t, db, "branch-1", testTime)
+	turn := mustCreateTurn(t, db, l.ID, l.BranchID, f.root, "request-1", testTime)
+
+	title := "A generated chat title"
+	url := "https://example.com/result"
+	sources := []domain.Source{
+		{Kind: "tool", DisplayName: "get_weather", Arguments: map[string]string{"city": "Tokyo"}},
+		{Kind: "web_search", DisplayName: "web_search", URL: &url},
+	}
+	at := testTime.Add(time.Minute)
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), turn.ID, domain.TurnOutcomeRecord{
+		Status: domain.TurnSucceeded, Title: &title, Sources: sources,
+	}, at); err != nil {
+		t.Fatalf("RecordOutcome(title+sources): %v", err)
+	}
+	got, err := db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemoteChatTitle == nil || *got.RemoteChatTitle != title {
+		t.Errorf("RemoteChatTitle = %v, want %q", got.RemoteChatTitle, title)
+	}
+	if len(got.Sources) != 2 {
+		t.Fatalf("Sources = %+v, want 2 entries", got.Sources)
+	}
+	if got.Sources[0].Kind != "tool" || got.Sources[0].Arguments["city"] != "Tokyo" {
+		t.Errorf("Sources[0] = %+v, want the tool source", got.Sources[0])
+	}
+	if got.Sources[1].URL == nil || *got.Sources[1].URL != url {
+		t.Errorf("Sources[1].URL = %v, want %q", got.Sources[1].URL, url)
+	}
+
+	// A later write that names neither clears both, the same
+	// always-overwrite rule FailureCategory already follows.
+	laterAt := testTime.Add(2 * time.Minute)
+	if err := db.OpenWebUITurnLinks.RecordOutcome(t.Context(), turn.ID, domain.TurnOutcomeRecord{
+		Status: domain.TurnSucceeded,
+	}, laterAt); err != nil {
+		t.Fatalf("RecordOutcome(no title/sources): %v", err)
+	}
+	got, err = db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemoteChatTitle != nil {
+		t.Errorf("RemoteChatTitle after an omitting write = %v, want nil", got.RemoteChatTitle)
+	}
+	if got.Sources != nil {
+		t.Errorf("Sources after an omitting write = %+v, want nil", got.Sources)
+	}
+}
+
+// TestOpenWebUITurnLinkRepository_GetByAssistantEntry is Issues #81/#84's
+// wire-projection enrichment lookup: it resolves a turn from the entry
+// its own reply authored, and ErrNotFound for any entry that is not one
+// (an Issue #9 plain LLM reply, or any other entry kind), matching the
+// interface doc comment's own contract.
+func TestOpenWebUITurnLinkRepository_GetByAssistantEntry(t *testing.T) {
+	db := newTestDB(t)
+	f := newLinkFixture(t, db)
+	l := f.claim(t, db, "branch-1", testTime)
+	turn := mustCreateTurn(t, db, l.ID, l.BranchID, f.root, "request-1", testTime)
+	virtualActorID := mustCreateVirtualActor(t, db)
+	assistantEntry := mustCreateReplyEntry(t, db, f.root, virtualActorID, domain.EntryLLMReply, testTime.Add(time.Minute))
+
+	if _, err := db.OpenWebUITurnLinks.GetByAssistantEntry(t.Context(), assistantEntry.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByAssistantEntry before SetAssistantEntry error = %v, want ErrNotFound", err)
+	}
+
+	if err := db.OpenWebUITurnLinks.SetAssistantEntry(t.Context(), turn.ID, assistantEntry.ID, testTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("SetAssistantEntry: %v", err)
+	}
+	got, err := db.OpenWebUITurnLinks.GetByAssistantEntry(t.Context(), assistantEntry.ID)
+	if err != nil {
+		t.Fatalf("GetByAssistantEntry: %v", err)
+	}
+	if got.ID != turn.ID {
+		t.Errorf("GetByAssistantEntry id = %q, want %q", got.ID, turn.ID)
+	}
+
+	// An Issue #9 plain LLM reply (or any other entry never named by
+	// SetAssistantEntry) has no turn at all.
+	if _, err := db.OpenWebUITurnLinks.GetByAssistantEntry(t.Context(), f.root.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByAssistantEntry(unrelated entry) error = %v, want ErrNotFound", err)
+	}
+}

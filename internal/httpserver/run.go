@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
@@ -89,6 +90,26 @@ type Options struct {
 	// timeline.EntryHook's signature structurally without this package
 	// importing internal/openwebui.
 	OpenWebUIBridge timeline.EntryHook
+
+	// OpenWebUITurnLinks backs Issues #81/#84's wire-projection
+	// enrichment (projectNote): looking up an Open WebUI-generated
+	// reply's turn (by its assistant entry) to attach citation
+	// footnotes, a generated chat title, and an owner-facing viewer
+	// link. A nil value (the safe default, OPENWEBUI_ENABLED off) leaves
+	// every EntryLLMReply projected exactly as wireText alone already
+	// produces it, unchanged from before this field existed. This is
+	// domain.OpenWebUITurnLinkRepository, the same domain-level
+	// interface internal/storage/sqlite already implements — not a
+	// storage package type — so this package's "no storage driver
+	// dependency" rule (see the package doc comment) is unaffected.
+	OpenWebUITurnLinks domain.OpenWebUITurnLinkRepository
+	// OpenWebUIViewerBaseURL mirrors OPENWEBUI_VIEWER_BASE_URL (Issue
+	// #84, ADR-0005 D23): when non-empty, projectNote appends
+	// "<OpenWebUIViewerBaseURL>/c/<remote_chat_id>" to a generated
+	// reply's text whenever its turn has a known remote chat id. Empty
+	// (the default, unset) never appends anything — D23's "leaving it
+	// unset reproduces today's behavior exactly" guarantee.
+	OpenWebUIViewerBaseURL string
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

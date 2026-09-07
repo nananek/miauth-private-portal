@@ -131,6 +131,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
+| `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1144,6 +1145,22 @@ forever, and `features.web_search` alone silently does nothing at all
 (Issue #74; see ADR-0005 D17 for the mechanism and
 `docs/compat/openwebui-0.11.3.md`'s Phase 0 record for the real-instance
 evidence).
+
+**Citation footnotes and chat title (Issues #81, #84).** When a tool call
+or web search actually ran (the `function_calling=legacy` path above),
+the completions response carries a top-level `sources[]` array;
+`internal/provider/openwebui.normalizeSources` turns each entry into a
+short `{kind, display_name, url, arguments}` record (never the raw,
+potentially large `document[]` text a tool or web page returned — ADR-0005
+D22) and `internal/httpserver`'s wire projection appends them to a
+generated reply as `[1] ...`/`[2] ...` footnotes, in the same array order
+the model's own `[n]` citation markers are assumed to follow — an
+explicit, **要実機確認** assumption for more than one source; see
+`docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D22 for what a
+wrong assumption would look like (a cosmetic footnote mismatch, never a
+`document[]` leak). `OPENWEBUI_VIEWER_BASE_URL` (above) additionally gates
+a generated chat title and an owner-facing viewer link on the same reply;
+both are opt-in and off by default.
 
 **Outcome and retry.** Every provider call this bridge makes is
 classified into a `failure_category` (never provider error text — the

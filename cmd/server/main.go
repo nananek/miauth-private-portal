@@ -110,6 +110,12 @@ func run() error {
 	var virtualActors httpserver.VirtualActorResolver
 	var openWebUIBridge timeline.EntryHook
 	var openWebUICatalogScheduler *openwebui.CatalogScheduler
+	// openWebUITurnLinks backs Issues #81/#84's wire-projection
+	// enrichment (httpserver.Options.OpenWebUITurnLinks); nil (the
+	// default, OPENWEBUI_ENABLED off) leaves every reply projected
+	// exactly as before these issues existed, the same nil-means-
+	// unchanged convention virtualActors/openWebUIBridge already use.
+	var openWebUITurnLinks domain.OpenWebUITurnLinkRepository
 	if cfg.OpenWebUI.Enabled {
 		registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
 			Enabled:           cfg.OpenWebUI.Enabled,
@@ -125,6 +131,7 @@ func run() error {
 			return fmt.Errorf("seed openwebui registry: %w", err)
 		}
 		virtualActors = registry
+		openWebUITurnLinks = db.Repos.OpenWebUITurnLinks
 
 		// catalogClient is built and used regardless of
 		// OPENWEBUI_GENERATION_ENABLED: catalog sync (Issue #75) keeps the
@@ -200,6 +207,7 @@ func run() error {
 				MaxAttempts:        cfg.Jobs.MaxAttempts,
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
 				WebSearchOverride:  cfg.OpenWebUI.WebSearchEnabled,
+				ViewerBaseURL:      cfg.OpenWebUI.ViewerBaseURL,
 			}, nil, logger)
 			openWebUIBridge = bridge.EnqueueTurn
 			jobsManager.Register(openwebui.JobType, turnJob.Handle)
@@ -221,6 +229,8 @@ func run() error {
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
 		VirtualActors:            virtualActors,
 		OpenWebUIBridge:          openWebUIBridge,
+		OpenWebUITurnLinks:       openWebUITurnLinks,
+		OpenWebUIViewerBaseURL:   cfg.OpenWebUI.ViewerBaseURL,
 	}
 
 	// Registered only when the feature is on: no Provider (and therefore

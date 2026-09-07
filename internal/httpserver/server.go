@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
@@ -50,6 +51,11 @@ type Server struct {
 	// Options.OpenWebUIBridge. A nil value leaves handleNotesCreate on
 	// its plain Create{Root,Reply} path.
 	openWebUIBridge timeline.EntryHook
+	// openWebUITurnLinks and openWebUIViewerBaseURL back Issues #81/#84's
+	// wire-projection enrichment; see Options.OpenWebUITurnLinks and
+	// Options.OpenWebUIViewerBaseURL.
+	openWebUITurnLinks     domain.OpenWebUITurnLinkRepository
+	openWebUIViewerBaseURL string
 
 	// streamSem bounds concurrent GET /streaming connections; see
 	// maxConcurrentStreamConnections (streaming_handlers.go).
@@ -95,6 +101,8 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
 		virtualActors:            opts.VirtualActors,
 		openWebUIBridge:          opts.OpenWebUIBridge,
+		openWebUITurnLinks:       opts.OpenWebUITurnLinks,
+		openWebUIViewerBaseURL:   opts.OpenWebUIViewerBaseURL,
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
 	}

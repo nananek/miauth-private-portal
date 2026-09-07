@@ -43,6 +43,17 @@ type TurnJobConfig struct {
 	// every model uniformly, on or off, regardless of that model's own
 	// default.
 	WebSearchOverride *bool
+	// ViewerBaseURL mirrors OPENWEBUI_VIEWER_BASE_URL (Issue #84,
+	// ADR-0005 D23). Empty (the default, unset) means the whole feature
+	// is off: StartChat never asks for title generation, and complete()
+	// never persists a title, so an unconfigured deployment reproduces
+	// pre-#84 behavior exactly. TurnJob itself never builds the
+	// "<ViewerBaseURL>/c/<remote_chat_id>" link text — that is the wire-
+	// projection layer's job (internal/httpserver's projectNote) — this
+	// field only gates whether a title is ever requested or recorded at
+	// all, deliberately the same on/off switch for both, per the plan's
+	// "the title and the URL are always enabled together" decision.
+	ViewerBaseURL string
 }
 
 // TurnJob implements internal/jobs.Handler for JobType. It depends on
@@ -268,14 +279,15 @@ func (j *TurnJob) handleCreationPending(
 	}
 
 	result, err := j.provider.StartChat(ctx, StartChatRequest{
-		ModelID:          model.ExternalModelID,
-		Messages:         ProviderMessages(path),
-		NewTurn:          Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
-		IDs:              TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID},
-		CorrelationID:    turn.RequestID,
-		SentAt:           now,
-		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
-		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
+		ModelID:               model.ExternalModelID,
+		Messages:              ProviderMessages(path),
+		NewTurn:               Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
+		IDs:                   TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID},
+		CorrelationID:         turn.RequestID,
+		SentAt:                now,
+		ToolIDs:               j.resolveToolIDs(model.ExternalModelID),
+		WebSearchEnabled:      j.resolveWebSearchEnabled(model.ExternalModelID),
+		EnableTitleGeneration: j.cfg.ViewerBaseURL != "",
 		OnChatCreated: func(hookCtx context.Context, remoteChatID string) error {
 			confirmedAt := j.clock.Now().UTC()
 			if err := j.repos.OpenWebUILinks.MarkReady(hookCtx, link.ID, remoteChatID, nil, confirmedAt); err != nil {
@@ -430,6 +442,11 @@ func (j *TurnJob) handleReadyRetry(
 		return j.complete(ctx, turn, link, model, entry, TurnResult{
 			Content: outcome.Content, RemoteCurrentID: outcome.RemoteCurrentID,
 			PromptTokens: outcome.PromptTokens, CompletionTokens: outcome.CompletionTokens,
+			// Title, but never Sources: a turn recovered through this
+			// lookup-only path never gets sources attached — see
+			// TurnOutcome.Sources's absence, documented on TurnOutcome
+			// itself, for why.
+			Title: outcome.Title,
 		}, true)
 	case outcome.HasError || !outcome.Found || (outcome.Done && outcome.Content == ""):
 		return j.resendContinue(ctx, job, turn, link, model, entry, path)
@@ -577,8 +594,21 @@ func (j *TurnJob) complete(
 			if err := repos.OpenWebUITurnLinks.SetAssistantEntry(cctx, turn.ID, assistantEntry.ID, now); err != nil {
 				return fmt.Errorf("set assistant entry: %w", err)
 			}
+			var title *string
+			if j.cfg.ViewerBaseURL != "" {
+				// Gated the same way EnableTitleGeneration is: an
+				// unconfigured deployment never persists a title, even
+				// if the provider's own response happened to carry one
+				// (Open WebUI is known to overwrite the placeholder with
+				// the raw first message on its own — see
+				// precreatedChatTitle's doc comment in
+				// internal/provider/openwebui/client.go), so #84 stays
+				// strictly opt-in end to end.
+				title = result.Title
+			}
 			if err := repos.OpenWebUITurnLinks.RecordOutcome(cctx, turn.ID, domain.TurnOutcomeRecord{
-				Status: domain.TurnSucceeded, PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens, FinishReason: result.FinishReason,
+				Status: domain.TurnSucceeded, PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
+				FinishReason: result.FinishReason, Title: title, Sources: convertSources(result.Sources),
 			}, now); err != nil {
 				return fmt.Errorf("record outcome: %w", err)
 			}
@@ -613,7 +643,24 @@ func (j *TurnJob) complete(
 		return fmt.Errorf("openwebui: turn: create generated reply: %w", err)
 	}
 	j.logger.Info("openwebui turn succeeded", "turn_id", turn.ID, "link_id", link.ID)
+	j.logSources(turn.ID, result.Sources)
 	return nil
+}
+
+// logSources records ADR-0005 D22's own logging requirement: one INFO
+// line per source this turn's completions response carried, naming only
+// its kind and display name — plus, for a tool call only, its arguments
+// — mirroring D6's existing rule that provider response bodies (here,
+// document[]'s raw tool/page text, never captured into Source at all;
+// see openwebui.Source's own doc comment) are never logged verbatim.
+func (j *TurnJob) logSources(turnID string, sources []Source) {
+	for _, src := range sources {
+		if src.Kind == SourceKindTool {
+			j.logger.Info("openwebui turn source", "turn_id", turnID, "kind", src.Kind, "display_name", src.DisplayName, "arguments", src.Arguments)
+			continue
+		}
+		j.logger.Info("openwebui turn source", "turn_id", turnID, "kind", src.Kind, "display_name", src.DisplayName)
+	}
 }
 
 // setCorrelation writes corr through SetRemoteCorrelation and mirrors
@@ -694,3 +741,19 @@ func (j *TurnJob) failAmbiguous(ctx context.Context, turn domain.OpenWebUITurnLi
 }
 
 func strPtr(s string) *string { return &s }
+
+// convertSources maps this package's own provider-facing Source (Issue
+// #81; see provider.go's doc comment on why it is a distinct type from
+// domain.Source) onto the persisted domain shape RecordOutcome takes. A
+// nil/empty input yields nil, matching domain.EncodeSources' own
+// "nothing to store" case.
+func convertSources(sources []Source) []domain.Source {
+	if len(sources) == 0 {
+		return nil
+	}
+	out := make([]domain.Source, len(sources))
+	for i, s := range sources {
+		out[i] = domain.Source{Kind: s.Kind, DisplayName: s.DisplayName, URL: s.URL, Arguments: s.Arguments}
+	}
+	return out
+}

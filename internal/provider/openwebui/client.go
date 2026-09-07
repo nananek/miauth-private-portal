@@ -126,6 +126,16 @@ type wireMessage struct {
 
 // --- POST /api/v1/chats/new ---
 
+// precreatedChatTitle is the fixed title createChat sends when it
+// precreates a chat (ADR-0005 D3): the value LookupTurnOutcome must see
+// move past before Issue #84's title feature treats a chat's own title
+// as meaningful. Open WebUI is known (Issue #84's own write-up) to
+// overwrite this with the raw first user message even without
+// background_tasks.title_generation ever being requested, so this
+// filter alone does not guarantee a *summarized* title — only that a
+// placeholder this adapter itself invented is never shown as one.
+const precreatedChatTitle = "bridge-precreated"
+
 type chatCreateRequestBody struct {
 	Chat chatCreateChatBody `json:"chat"`
 }
@@ -158,7 +168,7 @@ type chatCreateResponseBody struct {
 func (c *Client) createChat(ctx context.Context, modelID string, sentAt time.Time) (string, error) {
 	reqBody := chatCreateRequestBody{Chat: chatCreateChatBody{
 		ID:        "",
-		Title:     "bridge-precreated",
+		Title:     precreatedChatTitle,
 		Models:    []string{modelID},
 		Params:    map[string]any{},
 		History:   chatCreateHistoryBody{Messages: map[string]any{}, CurrentID: nil},
@@ -271,6 +281,129 @@ type completionsResponseBody struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	// Sources is Issue #81's addition: present whenever a tool call or
+	// web search actually ran (function_calling=legacy's own injection
+	// step — see paramsBody's doc comment). Left as json.RawMessage here
+	// — decoded into []wireSource separately, by decodeSources — so that
+	// an unexpected sources[] shape (a provider schema drift this
+	// adapter has not observed) degrades to "no citations for this
+	// reply" rather than failing the whole completions decode and, with
+	// it, a turn that otherwise succeeded: sources is enrichment, never
+	// load-bearing for turn success. There is deliberately no field
+	// anywhere in this decode path (typed or otherwise) for a source's
+	// own document[] member — ADR-0005 D22 requires that raw,
+	// potentially large tool/page text never be decoded into memory by
+	// this adapter at all, and omitting the field entirely from
+	// wireSource is what makes encoding/json's default
+	// unknown-field-skipping behavior enforce that for free.
+	Sources json.RawMessage `json:"sources"`
+}
+
+// decodeSources decodes raw (completionsResponseBody.Sources) into
+// wireSource entries, or nil — never an error — if raw is empty or does
+// not match the expected shape: a malformed/unknown sources[] entry must
+// never fail a turn that otherwise completed successfully (see Sources'
+// own doc comment). ok is false only to let a caller that wants to know
+// decide whether to log the anomaly; it is never treated as this
+// function's own failure.
+func decodeSources(raw json.RawMessage) (sources []wireSource, ok bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	if err := json.Unmarshal(raw, &sources); err != nil {
+		return nil, false
+	}
+	return sources, true
+}
+
+// wireSource is one raw sources[] entry (Issue #81's real-instance
+// check, 2026-09-07): ToolResult true distinguishes a tool-execution
+// source (source.name, metadata[].parameters as the call's arguments)
+// from a web-search one (source.{name,type,urls,queries}, metadata[].
+// {title,description,source} per result chunk). See normalizeSources
+// for how this collapses to one openwebui.Source, and openwebui.Source's
+// own doc comment for the multi-source ordering assumption this adapter
+// makes without real-instance confirmation.
+type wireSource struct {
+	Source struct {
+		Name string `json:"name"`
+	} `json:"source"`
+	ToolResult bool                 `json:"tool_result"`
+	Metadata   []wireSourceMetadata `json:"metadata"`
+}
+
+// wireSourceMetadata is one metadata[] entry. Parameters (tool call
+// arguments) and Source (a web-search result chunk's own URL) are the
+// only members normalizeSources reads; Title/Description exist here only
+// so a caller inspecting the raw fixture shape can see what this adapter
+// deliberately leaves unused rather than persisting a page's summary
+// text.
+type wireSourceMetadata struct {
+	Parameters map[string]any `json:"parameters"`
+	Source     string         `json:"source"`
+}
+
+// maxSourceFieldLen bounds every string this adapter copies out of a
+// sources[] entry into an openwebui.Source, the same defense-in-depth a
+// provider display name already gets (ADR-0005 D9): this is untrusted
+// provider/tool output, never assumed to be reasonably sized.
+const maxSourceFieldLen = 200
+
+func boundedString(s string) string {
+	if len(s) <= maxSourceFieldLen {
+		return s
+	}
+	return s[:maxSourceFieldLen]
+}
+
+// normalizeSources turns raw sources[] entries into openwebui.Source
+// records, one per array element, in order — see openwebui.Source's own
+// doc comment for why that 1:1 mapping is an unverified assumption for
+// more than one entry. document[] is never read at all (wireSource has
+// no field for it); a tool-execution source's Arguments come from its
+// first metadata entry's parameters, a web-search source's URL from its
+// first metadata entry's source field — later metadata entries (further
+// result chunks) are not represented, the concrete shape of this
+// function's own under-representation risk.
+func normalizeSources(raw []wireSource) []openwebui.Source {
+	if len(raw) == 0 {
+		return nil
+	}
+	sources := make([]openwebui.Source, 0, len(raw))
+	for _, s := range raw {
+		kind := openwebui.SourceKindWebSearch
+		if s.ToolResult {
+			kind = openwebui.SourceKindTool
+		}
+		src := openwebui.Source{Kind: kind, DisplayName: boundedString(s.Source.Name)}
+		if len(s.Metadata) > 0 {
+			m := s.Metadata[0]
+			if s.ToolResult {
+				src.Arguments = stringifyArguments(m.Parameters)
+			} else if m.Source != "" {
+				url := boundedString(m.Source)
+				src.URL = &url
+			}
+		}
+		sources = append(sources, src)
+	}
+	return sources
+}
+
+// stringifyArguments renders a tool call's raw JSON arguments as
+// display strings, bounded the same way every other source field is:
+// this is untrusted tool-controlled input reaching an owner-facing
+// reply and a log line (ADR-0005 D22), never re-parsed as JSON by
+// anything downstream.
+func stringifyArguments(params map[string]any) map[string]string {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[boundedString(k)] = boundedString(fmt.Sprint(v))
+	}
+	return out
 }
 
 // runTurn sends one completions call and then confirms its outcome with
@@ -280,7 +413,7 @@ type completionsResponseBody struct {
 // both funnel through this: the only difference between them is
 // parentID (nil for the former, the previous assistant message id for
 // the latter).
-func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string, webSearchEnabled bool) (openwebui.TurnResult, error) {
+func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string, webSearchEnabled, enableTitleGeneration bool) (openwebui.TurnResult, error) {
 	wireMessages := make([]wireMessage, 0, len(messages)+1)
 	for _, m := range messages {
 		wireMessages = append(wireMessages, wireMessage{Role: m.Role, Content: m.Content})
@@ -302,7 +435,7 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 			Timestamp:   sentAt.Unix(),
 		},
 		Messages:        wireMessages,
-		BackgroundTasks: backgroundTasksBody{},
+		BackgroundTasks: backgroundTasksBody{TitleGeneration: enableTitleGeneration},
 	}
 	if webSearchEnabled {
 		reqBody.Features = &featuresBody{WebSearch: true}
@@ -354,12 +487,19 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 		return openwebui.TurnResult{}, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
 			errors.New("done turn has empty content"))
 	default:
+		// A malformed/unrecognized sources[] shape (decodeSources' ok
+		// == false) yields nil sources for this reply, never a turn
+		// failure: the turn's actual content already decoded fine, and
+		// citations are enrichment, not core to success.
+		rawSources, _ := decodeSources(parsed.Sources)
 		return openwebui.TurnResult{
 			Content:          outcome.Content,
 			RemoteCurrentID:  outcome.RemoteCurrentID,
 			PromptTokens:     outcome.PromptTokens,
 			CompletionTokens: outcome.CompletionTokens,
 			FinishReason:     finishReason,
+			Title:            outcome.Title,
+			Sources:          normalizeSources(rawSources),
 		}, nil
 	}
 }
@@ -375,12 +515,15 @@ func (c *Client) StartChat(ctx context.Context, req openwebui.StartChatRequest) 
 			return openwebui.TurnResult{}, err
 		}
 	}
-	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled)
+	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled, req.EnableTitleGeneration)
 }
 
-// ContinueTurn implements openwebui.Provider.
+// ContinueTurn implements openwebui.Provider. Title generation is never
+// requested on a continuation: it is meaningful only once, for a chat's
+// first turn (ContinueTurnRequest has no EnableTitleGeneration field at
+// all — see its doc comment).
 func (c *Client) ContinueTurn(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error) {
-	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled)
+	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled, false)
 }
 
 // --- GET /api/models ---
@@ -486,6 +629,22 @@ type chatResponseBody struct {
 		} `json:"history"`
 	} `json:"chat"`
 	CurrentMessageID *string `json:"current_message_id"`
+	// Title is Issue #84's addition: the chat's own current title,
+	// top-level on this response the same way current_message_id is.
+	// resolvedTitle is what actually decides whether it means anything
+	// yet.
+	Title string `json:"title"`
+}
+
+// resolvedTitle reports c's title once it has moved past the
+// "bridge-precreated" placeholder createChat sets, or "" (meaning "not
+// yet meaningful") otherwise — the one gate LookupTurnOutcome applies
+// before ever surfacing a title to a caller.
+func (c chatResponseBody) resolvedTitle() string {
+	if c.Title == "" || c.Title == precreatedChatTitle {
+		return ""
+	}
+	return boundedString(c.Title)
 }
 
 func (c chatResponseBody) currentID() *string {
@@ -543,9 +702,14 @@ func (c *Client) LookupTurnOutcome(ctx context.Context, remoteChatID, assistantM
 			fmt.Errorf("decode chat response: %w", err))
 	}
 
+	var title *string
+	if t := chat.resolvedTitle(); t != "" {
+		title = &t
+	}
+
 	msg, ok := chat.Chat.History.Messages[assistantMessageID]
 	if !ok {
-		return openwebui.TurnOutcome{Found: false, RemoteCurrentID: chat.currentID()}, nil
+		return openwebui.TurnOutcome{Found: false, RemoteCurrentID: chat.currentID(), Title: title}, nil
 	}
 	return openwebui.TurnOutcome{
 		Found:            true,
@@ -555,6 +719,7 @@ func (c *Client) LookupTurnOutcome(ctx context.Context, remoteChatID, assistantM
 		RemoteCurrentID:  chat.currentID(),
 		PromptTokens:     msg.Usage.PromptTokens,
 		CompletionTokens: msg.Usage.CompletionTokens,
+		Title:            title,
 	}, nil
 }
 

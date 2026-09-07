@@ -183,6 +183,19 @@ Steps:
    keys above is invalid, not that something else broke (see "Starting and
    stopping" above) — check the startup log for the failing `OPENWEBUI_*`
    key before assuming otherwise.
+4. Optional (Issues #81/#84): citation footnotes render automatically
+   whenever a reply's turn actually ran a tool call or web search — no
+   config needed. To additionally show a generated chat title and an
+   owner-only "view in Open WebUI" link on replies, set
+   `OPENWEBUI_VIEWER_BASE_URL` to a browser-reachable HTTPS origin for the
+   same instance (see configuration.md) and restart. This is separate
+   from `OPENWEBUI_BASE_URL` and does **not** need to appear in
+   `OPENWEBUI_ALLOWED_ORIGINS` — the server never dials it. A title may
+   not appear on every reply even once this is set: whether the target
+   instance generates it synchronously or asynchronously is unverified
+   (docs/compat/openwebui-0.11.3.md point (i)), and a title that has not
+   appeared yet by the time this adapter checks is simply left off, not
+   shown incorrectly.
 
 Verification:
 

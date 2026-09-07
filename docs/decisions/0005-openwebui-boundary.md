@@ -727,6 +727,140 @@ contract this adapter already depends on for `tool_ids`, not inferring
 provider-internal configuration from a side channel Open WebUI never
 exposes to an API-key caller.
 
+### D22. `sources` is parsed and rendered as reply footnotes, never persisted as raw tool/document text
+
+Issue #81's real-instance check (2026-09-07, non-streaming +
+`params.function_calling=legacy`, the D17 path) found the completions
+response carries a top-level `sources[]` array whenever a tool call or web
+search actually ran, distinguished by the presence of `tool_result: true`.
+Two shapes were observed: a tool-execution source (`source.name`,
+`document[]` as the tool's raw JSON output, `metadata[].parameters` as the
+call arguments) and a web-search source (`source.{name,type,urls,queries}`,
+multiple `document[]` page-text chunks, `metadata[].{title,description,
+source}` per chunk, plus `distances`).
+
+This adapter normalizes both shapes into a small internal
+`openwebui.Source{Kind, DisplayName, URL, Arguments}` record
+(`internal/provider/openwebui/client.go`'s `normalizeSources`) before
+anything else touches them: `document[]` — untrusted tool/page text,
+potentially large — is **never stored, logged, or forwarded to Aria**;
+`wireSource`/`wireSourceMetadata` (the raw decode target) carry no field for
+it at all, so encoding/json's default unknown-field-skipping enforces that
+for free rather than depending on a caller to remember not to read it. Only
+each source's short descriptive fields survive, each bounded to
+`maxSourceFieldLen` (200 bytes) the same defense-in-depth D9 already gives a
+model display name. `sources` is captured from the completions response
+body itself, at the point `runTurn` decodes it — not re-derived from a later
+`GET /api/v1/chats/{id}` call: whether the chat-managed GET path also
+carries `sources` for a completed turn is unverified, so the adapter must
+not depend on being able to retrieve it a second time. `sources` is decoded
+as `json.RawMessage` at the top level and only then parsed into typed
+records (`decodeSources`); a shape this adapter cannot parse — schema
+drift, or a provider bug — yields no sources for that reply rather than
+failing the whole completions decode, since a turn whose actual content
+(`choices`) decoded fine must still succeed: citations are enrichment,
+never load-bearing for turn success. One consequence
+(documented on `TurnOutcome.Title`'s own field, not repeated here) is that a
+turn recovered through the uncertain-outcome lookup-and-adopt path (Issue
+#53's `handleReadyRetry`) never gets sources attached, even if the original
+completions call that produced it would have — a possibly-missing footnote
+list on an already-rare recovery path, not a correctness or security
+concern.
+
+The `[n]` citation markers Open WebUI writes into the model's own answer
+text are assumed to correspond to `sources[]` in array order — the only
+case verified so far (2026-09-07) has exactly one source. **This assumption
+is recorded here, not invented silently (D15), and — per the owner's
+2026-09-08 direction to implement Issues #81/#84 without further
+real-instance access — it ships as an explicit, documented, unverified
+assumption rather than blocking the feature:** `openwebui.Source`'s own doc
+comment, `internal/provider/openwebui/client.go`'s `normalizeSources`, and
+`internal/httpserver/noteapi_wire.go`'s `renderSourceFootnotes` each repeat
+the same warning at the point a reader would need it. The concrete failure
+mode if this assumption is wrong — for example, a real multi-source
+response nesting several web-search result chunks under one `sources[]`
+element rather than one element per chunk — is a footnote whose number
+disagrees with the reply text's own `[n]` markers, or a footnote that shows
+only the first chunk of a multi-chunk group. That is a cosmetic display
+defect only: `document[]` is never captured regardless of whether this
+assumption holds, so no additional data can leak from it being wrong, and a
+sources-normalization anomaly never fails the turn itself (`runTurn`'s
+success path does not depend on `sources` decoding to anything in
+particular). This must be re-verified against a real multi-source turn
+before the assumption note is removed from the referenced files.
+
+An INFO log records `turn_id`, source kind, and tool/display name, and —
+for a tool call only — its arguments, never `document`, never a web-search
+result's page text, mirroring D6's existing rule that provider response
+bodies are never logged verbatim.
+
+### D23. One narrow, opt-in exception to D2: an owner-facing "view in Open WebUI" link
+
+D2 states that `chat_id` and the other remote correlation ids never surface
+in an Aria payload, token, or URL. Issue #84 asks for exactly that, in one
+specific, bounded form: a link back to the same conversation on the same
+Open WebUI instance, shown only to the owner, only in the reply's own text.
+
+The decision is to allow it, narrowly:
+
+- The link is built only when the operator has explicitly set a new,
+  opt-in config key naming a browser-reachable origin for the same instance
+  (`OPENWEBUI_VIEWER_BASE_URL`) — distinct from `OPENWEBUI_BASE_URL` for the
+  same reason `OPENWEBUI_PRESENTATION_HOST` is already distinct from it
+  (D9): a value this server calls and a value a browser can reach are not
+  guaranteed to be the same address, and nothing may infer one from the
+  other. Leaving it unset reproduces today's behavior exactly — no link, no
+  `title_generation` call, no exception in effect.
+- The link is display-only: `remote_chat_id` is rendered into
+  `<OPENWEBUI_VIEWER_BASE_URL>/c/<remote_chat_id>` (`internal/httpserver/
+  noteapi_wire.go`'s `enrichOpenWebUIReplyText`) and nothing else. It is
+  never accepted back as input, never used to resolve a reply's parentage,
+  model, or workspace, and this feature adds no endpoint that reads a chat
+  id from an Aria request. D2's actual guarantee — that remote ids are never
+  authoritative for local identity, ordering, or authorization — is
+  completely unchanged; only the narrow "never surface... in URLs" clause
+  gets this one named exception.
+- The only viewer who ever sees this URL is the local owner, reading their
+  own Aria timeline — the same principal who already holds (or can be
+  issued) full access to the Open WebUI account the bridge uses. The link
+  discloses no capability the owner does not already have.
+- `OPENWEBUI_VIEWER_BASE_URL` is validated the same way `OPENWEBUI_BASE_URL`
+  is (HTTPS-only origin, no userinfo/path/query/fragment;
+  `validateOpenWebUIViewerBaseURL`, `internal/config/config.go`) but is
+  **not** added to `OPENWEBUI_ALLOWED_ORIGINS`/the SSRF allowlist: this
+  server never dials it, so D11's connection-time policy does not apply.
+  Validation exists to keep a malformed value out of rendered Note text, not
+  to gate an outbound request that never happens.
+
+Every other remote id this service holds — `message.id`, `parentId`,
+`currentId` — is unaffected and stays exactly as opaque and un-surfaced as
+D2 already requires.
+
+**The chat title half of the same issue is tied to the same config key, and
+is separately unverified.** Issue #84's own write-up recorded a known
+constraint: even with `background_tasks.title_generation` never requested,
+Open WebUI overwrites `createChat`'s `"bridge-precreated"` placeholder title
+with the raw first user message almost immediately — so this adapter's own
+`resolvedTitle` filters only the literal placeholder, never attempting to
+detect "is this actually a generated summary, or just the raw first
+message echoed back." Whether `title_generation: true` resolves
+synchronously (visible on the very next `GET /api/v1/chats/{id}` `runTurn`
+already performs for outcome confirmation) or asynchronously (visible only
+much later, if ever) was **never confirmed against a real instance** — per
+the owner's 2026-09-08 direction, this ships anyway, gated end to end by
+`OPENWEBUI_VIEWER_BASE_URL` being configured at all:
+`StartChatRequest.EnableTitleGeneration` is set from exactly that (Bridge
+never requests title generation, and `TurnJob.complete` never persists a
+title, while the key is unset — see `TurnJobConfig.ViewerBaseURL`'s own doc
+comment), and no extra polling call is added to chase a title that has not
+appeared yet. If generation turns out to be asynchronous in practice, the
+observable effect is that most replies simply show no title (the
+`"[reply]"` marker stays as it always was) rather than a summarized one —
+degraded to "feature quietly does nothing yet," never to a wrong title, a
+data leak, or a failed turn. This must be re-verified against a real
+instance before this note is removed from `EnableTitleGeneration`'s and
+`precreatedChatTitle`'s doc comments.
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
@@ -753,6 +887,18 @@ exposes to an API-key caller.
   again (web_search's own deployment-wide-only shape, confirmed once
   already by D20, is reversed into the same explicit-wins/unset-follows-
   model-default tri-state shape D17 originally gave `tool_ids`).
+- **#81 (citation resolution) and #84 (chat title / viewer link)**, shipped
+  as one PR on top of #75's branch, get D22 and D23. Both decisions carry an
+  explicit unverified-assumption note (2026-09-08): the owner directed that
+  they ship without further real-instance access, on the condition that
+  every place the assumption matters says so in writing and describes what
+  a wrong assumption would look like, rather than the D14 pattern of
+  blocking on re-verification first. D22 amends nothing structurally (it is
+  a new field, not a changed one) but extends D6's "provider response
+  bodies are never logged or persisted verbatim" rule to a new response
+  member (`sources[].document`). D23 is a narrow, named exception to D2 —
+  the first ever granted — scoped to exactly one rendered link, gated by one
+  new opt-in config key.
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Streaming, regeneration, remote branch management, and cancellation each
   need their own contract work before they can be picked up; none of them is

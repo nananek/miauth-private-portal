@@ -109,6 +109,18 @@ const (
 	// with no config override left at all), this key is kept, just no
 	// longer forced to a single deployment-wide boolean.
 	KeyOpenWebUIWebSearchEnabled = "OPENWEBUI_WEB_SEARCH_ENABLED"
+
+	// KeyOpenWebUIViewerBaseURL is Issues #81+#84's one new config key
+	// (ADR-0005 D23): a browser-reachable origin for the same Open WebUI
+	// instance OPENWEBUI_BASE_URL names, used only to render an
+	// owner-facing "<value>/c/<remote_chat_id>" link into a generated
+	// reply's own text — never dialed by this server (D23: not added to
+	// OPENWEBUI_ALLOWED_ORIGINS, D11's SSRF policy does not apply to it).
+	// Optional; unset (the default) also gates OPENWEBUI_ENABLED
+	// deployments' title-generation request entirely (see
+	// internal/openwebui.TurnJobConfig.ViewerBaseURL), so leaving it
+	// unset reproduces pre-#84 behavior exactly.
+	KeyOpenWebUIViewerBaseURL = "OPENWEBUI_VIEWER_BASE_URL"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -191,6 +203,7 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIMaxRequestBytes,
 	KeyOpenWebUIMaxContextMessages,
 	KeyOpenWebUIWebSearchEnabled,
+	KeyOpenWebUIViewerBaseURL,
 }
 
 func isKnownKey(key string) bool {

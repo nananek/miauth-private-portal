@@ -490,6 +490,402 @@ func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *t
 	}
 }
 
+// --- Issues #81/#84: citation sources and chat title ---
+//
+// UNVERIFIED ASSUMPTION (2026-09-08, no real-instance access — ADR-0005
+// D22): the multi-source shapes these tests exercise are hand-authored
+// synthetic fixtures (completions_response_sources_tool.json,
+// completions_response_sources_websearch.json), not a real capture. The
+// real 2026-09-07 capture behind Issue #81 observed exactly one source;
+// these tests pin normalizeSources' own documented 1:1-array-order
+// mapping, not a confirmed real-instance contract for more than one
+// source. See openwebui.Source's own doc comment.
+
+// TestClient_ContinueTurn_NormalizesToolSourceFromFixture backs the
+// tool-execution sources[] shape: source.name becomes DisplayName, the
+// first metadata entry's parameters become Arguments (stringified), and
+// Kind is SourceKindTool.
+func TestClient_ContinueTurn_NormalizesToolSourceFromFixture(t *testing.T) {
+	const assistantID = "assistant-1"
+	turnResp := loadFixture(t, "completions_response_sources_tool.json")
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, turnResp, http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if len(result.Sources) != 1 {
+		t.Fatalf("Sources = %+v, want exactly 1", result.Sources)
+	}
+	src := result.Sources[0]
+	if src.Kind != openwebui.SourceKindTool {
+		t.Errorf("Kind = %q, want %q", src.Kind, openwebui.SourceKindTool)
+	}
+	if src.DisplayName != "get_weather" {
+		t.Errorf("DisplayName = %q, want %q", src.DisplayName, "get_weather")
+	}
+	if src.URL != nil {
+		t.Errorf("URL = %v, want nil for a tool source", src.URL)
+	}
+	if src.Arguments["city"] != "Tokyo" {
+		t.Errorf("Arguments[city] = %q, want %q", src.Arguments["city"], "Tokyo")
+	}
+}
+
+// TestClient_ContinueTurn_NormalizesWebSearchSourceFromFixture backs the
+// web-search sources[] shape: the first metadata entry's own "source"
+// field becomes URL, and — the documented under-representation risk
+// (openwebui.Source's own doc comment) — a second metadata entry (a
+// further result chunk) is not represented at all.
+func TestClient_ContinueTurn_NormalizesWebSearchSourceFromFixture(t *testing.T) {
+	const assistantID = "assistant-1"
+	turnResp := loadFixture(t, "completions_response_sources_websearch.json")
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, turnResp, http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if len(result.Sources) != 1 {
+		t.Fatalf("Sources = %+v, want exactly 1 (one sources[] element, regardless of its 2 metadata chunks)", result.Sources)
+	}
+	src := result.Sources[0]
+	if src.Kind != openwebui.SourceKindWebSearch {
+		t.Errorf("Kind = %q, want %q", src.Kind, openwebui.SourceKindWebSearch)
+	}
+	if src.URL == nil || *src.URL != "https://go.dev/doc/go1.24" {
+		t.Errorf("URL = %v, want the first metadata entry's source, not the second chunk's go.dev/issue/66821", src.URL)
+	}
+	if src.Arguments != nil {
+		t.Errorf("Arguments = %v, want nil for a web-search source", src.Arguments)
+	}
+}
+
+// TestClient_ContinueTurn_SourcesDocumentNeverCaptured is the
+// security-regression pin for ADR-0005 D22's core guarantee: both
+// fixtures' document[] entries carry a distinctive marker string, and
+// none of it may reach TurnResult in any field — not Content, not any
+// Source field — because wireSource/wireSourceMetadata have no field
+// that could ever decode it in the first place.
+func TestClient_ContinueTurn_SourcesDocumentNeverCaptured(t *testing.T) {
+	const documentMarker = "temperature\": 22"
+	const assistantID = "assistant-1"
+	for _, fixture := range []string{
+		"completions_response_sources_tool.json",
+		"completions_response_sources_websearch.json",
+	} {
+		t.Run(fixture, func(t *testing.T) {
+			turnResp := loadFixture(t, fixture)
+			if !strings.Contains(string(turnResp), "document") {
+				t.Fatalf("fixture %s has no document[] field to test against", fixture)
+			}
+			getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodPost:
+					writeJSON(t, w, turnResp, http.StatusOK)
+				case http.MethodGet:
+					writeJSON(t, w, getResp, http.StatusOK)
+				}
+			}))
+			defer server.Close()
+			client := newTestClient(t, server, nil)
+
+			req := minimalContinueTurnReq("chat-1")
+			req.IDs.AssistantMessageID = assistantID
+			result, err := client.ContinueTurn(t.Context(), req)
+			if err != nil {
+				t.Fatalf("ContinueTurn: %v", err)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatalf("marshal TurnResult: %v", err)
+			}
+			for _, marker := range []string{"document", "page-text", "crypto/rand.Read never returns"} {
+				if strings.Contains(string(encoded), marker) {
+					t.Errorf("TurnResult = %s, must never contain document[]-derived text (%q)", encoded, marker)
+				}
+			}
+		})
+	}
+}
+
+// TestClient_ContinueTurn_NormalizeSourcesBoundsFieldLength is the
+// security-regression pin for the other half of D22's defense-in-depth:
+// an oversized DisplayName/URL/Arguments value (untrusted tool/provider
+// output) is truncated to maxSourceFieldLen, never copied through
+// unbounded.
+func TestClient_ContinueTurn_NormalizeSourcesBoundsFieldLength(t *testing.T) {
+	longName := strings.Repeat("a", maxSourceFieldLen+50)
+	longURL := "https://example.com/" + strings.Repeat("b", maxSourceFieldLen+50)
+	longArg := strings.Repeat("c", maxSourceFieldLen+50)
+
+	turnRespBody, err := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"content": "ok"}, "finish_reason": "stop"}},
+		"sources": []any{
+			map[string]any{
+				"source":      map[string]any{"name": longName},
+				"tool_result": true,
+				"metadata":    []any{map[string]any{"parameters": map[string]any{"query": longArg}}},
+			},
+			map[string]any{
+				"source":   map[string]any{"name": "web_search"},
+				"metadata": []any{map[string]any{"source": longURL}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal synthetic completions response: %v", err)
+	}
+
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, turnRespBody, http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if len(result.Sources) != 2 {
+		t.Fatalf("Sources = %+v, want 2", result.Sources)
+	}
+	if n := len(result.Sources[0].DisplayName); n != maxSourceFieldLen {
+		t.Errorf("Sources[0].DisplayName length = %d, want %d", n, maxSourceFieldLen)
+	}
+	if n := len(result.Sources[0].Arguments["query"]); n != maxSourceFieldLen {
+		t.Errorf("Sources[0].Arguments[query] length = %d, want %d", n, maxSourceFieldLen)
+	}
+	if result.Sources[1].URL == nil || len(*result.Sources[1].URL) != maxSourceFieldLen {
+		t.Errorf("Sources[1].URL length = %v, want %d", result.Sources[1].URL, maxSourceFieldLen)
+	}
+}
+
+// TestClient_ContinueTurn_MalformedSourcesNeverFailsTheTurn is the
+// robustness half of Issue #81's own test requirement (plan §7.8): a
+// sources[] shape this adapter cannot parse (schema drift, or simply a
+// provider bug) must degrade to "no citations for this reply," never to
+// a failed turn — the turn's actual content already decoded fine, and
+// citations are enrichment, not core to success. Before decodeSources
+// existed, completionsResponseBody decoded Sources as a typed
+// []wireSource field directly, so a single malformed element failed the
+// entire response decode (contract_failed) even though Choices/content
+// were perfectly fine; this pins the fix.
+func TestClient_ContinueTurn_MalformedSourcesNeverFailsTheTurn(t *testing.T) {
+	turnRespBody, err := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"content": "ok"}, "finish_reason": "stop"}},
+		// "source" is a string here, not the expected object — a shape
+		// this adapter has never observed for real.
+		"sources": []any{map[string]any{"source": "not-an-object", "tool_result": true}},
+	})
+	if err != nil {
+		t.Fatalf("marshal synthetic completions response: %v", err)
+	}
+
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, turnRespBody, http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn returned an error for a malformed sources[] shape, want the turn to still succeed: %v", err)
+	}
+	if result.Content != "ok" {
+		t.Errorf("Content = %q, want %q", result.Content, "ok")
+	}
+	if result.Sources != nil {
+		t.Errorf("Sources = %+v, want nil for an unparseable shape", result.Sources)
+	}
+}
+
+// --- Issue #84: chat title ---
+
+// TestClient_StartChat_EnableTitleGenerationSendsTitleGenerationTrue
+// backs StartChatRequest.EnableTitleGeneration: only when it is set does
+// the first turn's completions request carry
+// background_tasks.title_generation: true.
+func TestClient_StartChat_EnableTitleGenerationSendsTitleGenerationTrue(t *testing.T) {
+	const chatID = "chat-1"
+	createResp, err := json.Marshal(map[string]any{"id": chatID})
+	if err != nil {
+		t.Fatalf("marshal chats/new response: %v", err)
+	}
+	getResp := chatGetBody(t, "assistant-1", map[string]any{"done": true, "content": "ok"}, "assistant-1")
+
+	var sawBackgroundTasks struct {
+		TitleGeneration bool `json:"title_generation"`
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/chats/new", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, createResp, http.StatusOK)
+	})
+	mux.HandleFunc("POST /api/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			BackgroundTasks struct {
+				TitleGeneration bool `json:"title_generation"`
+			} `json:"background_tasks"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Fatalf("decode completions request: %v", err)
+		}
+		sawBackgroundTasks.TitleGeneration = body.BackgroundTasks.TitleGeneration
+		writeJSON(t, w, []byte(`{}`), http.StatusOK)
+	})
+	mux.HandleFunc("GET /api/v1/chats/"+chatID, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalStartChatReq()
+	req.EnableTitleGeneration = true
+	if _, err := client.StartChat(t.Context(), req); err != nil {
+		t.Fatalf("StartChat: %v", err)
+	}
+	if !sawBackgroundTasks.TitleGeneration {
+		t.Error("completions request background_tasks.title_generation = false, want true when EnableTitleGeneration is set")
+	}
+}
+
+// TestClient_ContinueTurn_NeverSendsTitleGeneration backs
+// ContinueTurn's own doc comment: title generation is never requested on
+// a continuation, since ContinueTurnRequest has no field for it at all —
+// this only re-confirms the request body's own zero value, since there
+// is no way to even ask ContinueTurn for the opposite.
+func TestClient_ContinueTurn_NeverSendsTitleGeneration(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawBackgroundTasks struct {
+		TitleGeneration bool `json:"title_generation"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			data, _ := io.ReadAll(r.Body)
+			var body struct {
+				BackgroundTasks struct {
+					TitleGeneration bool `json:"title_generation"`
+				} `json:"background_tasks"`
+			}
+			if err := json.Unmarshal(data, &body); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			sawBackgroundTasks.TitleGeneration = body.BackgroundTasks.TitleGeneration
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if sawBackgroundTasks.TitleGeneration {
+		t.Error("continuation's background_tasks.title_generation = true, want always false")
+	}
+}
+
+// TestClient_LookupTurnOutcome_TitleFiltersPrecreatedPlaceholder backs
+// resolvedTitle: the "bridge-precreated" placeholder createChat itself
+// sets is never surfaced as a real title, but any other non-empty value
+// is — including, per the documented 要実機確認 gap, a value that is
+// merely the raw first user message rather than an actually-summarized
+// title (this adapter cannot tell the two apart; see ADR-0005 D23).
+func TestClient_LookupTurnOutcome_TitleFiltersPrecreatedPlaceholder(t *testing.T) {
+	tests := []struct {
+		name      string
+		title     string
+		wantTitle *string
+	}{
+		{name: "placeholder is filtered", title: "bridge-precreated", wantTitle: nil},
+		{name: "empty is filtered", title: "", wantTitle: nil},
+		{name: "a real title passes through", title: "Weekend trip planning", wantTitle: strPtrForTest("Weekend trip planning")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(map[string]any{
+				"title": tt.title,
+				"chat":  map[string]any{"history": map[string]any{"messages": map[string]any{}, "currentId": nil}},
+			})
+			if err != nil {
+				t.Fatalf("marshal chat response: %v", err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(t, w, data, http.StatusOK)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server, nil)
+
+			outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", "assistant-1")
+			if err != nil {
+				t.Fatalf("LookupTurnOutcome: %v", err)
+			}
+			if (outcome.Title == nil) != (tt.wantTitle == nil) {
+				t.Fatalf("Title = %v, want %v", outcome.Title, tt.wantTitle)
+			}
+			if tt.wantTitle != nil && *outcome.Title != *tt.wantTitle {
+				t.Errorf("Title = %q, want %q", *outcome.Title, *tt.wantTitle)
+			}
+		})
+	}
+}
+
+func strPtrForTest(s string) *string { return &s }
+
 // --- Issue #74/#75: tool/model resolution ---
 
 // TestClient_ListAccessibleTools_ReturnsEveryToolID backs Phase 1:
