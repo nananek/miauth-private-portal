@@ -442,7 +442,15 @@ represents. Whatever value is configured is sent verbatim; adding a
 model-default fallback for web search would need
 `OPENWEBUI_WEB_SEARCH_ENABLED` to become a tri-state config key first,
 which this issue's scope does not require and which no other
-`OPENWEBUI_*` key in this codebase does today.
+`OPENWEBUI_*` key in this codebase does today. This is not only a
+config-shape gap: Issue #72 already decided, and this key's own row in
+[`docs/operations/configuration.md`](../operations/configuration.md)
+already states, that `OPENWEBUI_WEB_SEARCH_ENABLED` is "independent of,
+and never inferred from, any per-model web-search setting configured in
+the Open WebUI instance's own admin/web UI". A model-default fallback for
+the "unset" state would relitigate that decision, not merely extend it —
+so even a future tri-state upgrade should not wire `defaultFeatureIds`
+into this key without first revisiting Issue #72's own reasoning.
 
 ## Consequences
 
