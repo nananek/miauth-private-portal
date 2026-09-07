@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -156,17 +157,43 @@ func pathNodeRole(ctx context.Context, repos domain.Repos, node domain.Entry) (s
 	}
 }
 
+// mentionStripPattern matches a Misskey-style @mention token — a
+// leading "@", a username of letters/digits/underscores, and an
+// optional "@host" suffix — the same shape Aria/Misskey wire mentions
+// take (internal/timeline.Service's own self-mention detector uses the
+// same "(^|[^A-Za-z0-9_])@..." boundary convention, but pinned to one
+// known username; this pattern is deliberately generic since any
+// actor's mention — the owner, or an Open WebUI VirtualActor's
+// arbitrary slug@host — must be caught here). Requiring a non-word
+// character (or start of string) immediately before the leading "@"
+// means a plain email address's "@" — never itself preceded by another
+// "@" — is never matched.
+var mentionStripPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([A-Za-z0-9_]+)(@[A-Za-z0-9.\-]+)?`)
+
+// stripMentionTagsForProvider rewrites body's Misskey-style @mentions
+// (e.g. "@luna@ai.tail2c8c7.ts.net" or a bare "@owner") down to their
+// plain username before the text is sent to an external LLM provider:
+// the "@" and any "@host" suffix are Aria/Misskey wire syntax, never
+// something the model should see or need to address. This never
+// touches domain.Entry.Body itself — only the copy of the text placed
+// in a Provider-facing Message (Issue #70).
+func stripMentionTagsForProvider(body string) string {
+	return mentionStripPattern.ReplaceAllString(body, "$1$2")
+}
+
 // ProviderMessages converts path's root-to-parent nodes into the
 // data-minimized sequence a Provider call sends as context: role and
 // body only, never a local entry id, Misskey metadata, credentials, or a
 // system prompt (roadmap: "The sequence carries no local IDs, Misskey
-// metadata, credentials, system prompt"). Body is each entry's own text,
-// unmodified. The caller appends the new turn's own Message separately
+// metadata, credentials, system prompt"). Body is each entry's own text
+// with any Misskey-style @mention tags stripped down to a plain
+// username (Issue #70) — domain.Entry.Body itself is untouched. The
+// caller appends the new turn's own Message separately
 // (StartChatRequest.NewTurn / ContinueTurnRequest.NewTurn).
 func ProviderMessages(path TurnPath) []Message {
 	messages := make([]Message, len(path.Nodes))
 	for i, n := range path.Nodes {
-		messages[i] = Message{Role: n.Role, Content: n.Entry.Body}
+		messages[i] = Message{Role: n.Role, Content: stripMentionTagsForProvider(n.Entry.Body)}
 	}
 	return messages
 }
