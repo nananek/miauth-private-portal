@@ -28,6 +28,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -61,6 +62,10 @@ type Server struct {
 	// maxConcurrentStreamConnections (streaming_handlers.go).
 	streamSem          chan struct{}
 	streamPingInterval time.Duration
+	// streamHub is Issue #95 PR2's live push source; see Options.StreamHub.
+	// nil disables push delivery entirely, leaving GET /streaming as
+	// Issue #41's handshake/ack/keepalive-only stub.
+	streamHub *streamhub.Hub
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -105,6 +110,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		openWebUIViewerBaseURL:   opts.OpenWebUIViewerBaseURL,
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
+		streamHub:                opts.StreamHub,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

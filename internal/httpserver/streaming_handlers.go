@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 )
@@ -142,7 +144,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, r *http.Request) {
 		setter.SetHijackedStatus(http.StatusSwitchingProtocols)
 	}
 
-	serveStreamConn(conn, s.streamPingInterval, s.logger, logging.RequestIDFromContext(r.Context()))
+	s.serveStreamConn(conn, s.streamPingInterval, logging.RequestIDFromContext(r.Context()))
 }
 
 // streamEnvelope is the generic Misskey streaming wire envelope every
@@ -188,16 +190,32 @@ type connectedAckBody struct {
 
 // streamConnState tracks one /streaming connection's subscriptions in
 // memory. Deliberately minimal (AGENTS.md: no premature abstraction) —
-// no separate package, no persistence, no channel-name validation. This
-// handler never pushes a real note/notification event (this file's
-// Non-goals), so nothing reads these maps back today; they exist only so
-// a future real-event-push feature has an established place to look up
-// "which connect id(s) asked for this channel" / "is this note
-// subscribed" against, rather than needing its own per-socket state from
-// scratch.
+// no separate package, no persistence, no channel-name validation.
+// channels/notes were originally written and read only by
+// serveStreamConn's single read-loop goroutine; since Issue #95 PR2,
+// homeTimelineIDs also reads channels from the concurrent push-delivery
+// goroutine (pushHomeTimelineEvents), so every access now goes through
+// mu.
 type streamConnState struct {
+	mu       sync.Mutex
 	channels map[string]string   // connect body.id -> channel name
 	notes    map[string]struct{} // subscribed note IDs (opaque strings — AGENTS.md: "treat ... Misskey IDs as opaque strings")
+}
+
+// homeTimelineIDs returns every connect id currently subscribed to the
+// "homeTimeline" channel on this connection — the only channel Issue
+// #95 PR2 ever pushes a note to (docs/compat/aria-v1.5.11.md's traced
+// push shape). Safe for concurrent use with handleMessage.
+func (c *streamConnState) homeTimelineIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ids []string
+	for id, channel := range c.channels {
+		if channel == "homeTimeline" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // handleMessage applies one client-to-server frame to c and returns a
@@ -216,25 +234,33 @@ func (c *streamConnState) handleMessage(raw []byte) (reply any, ok bool) {
 		var body streamConnectBody
 		_ = json.Unmarshal(env.Body, &body)
 		if body.ID != "" {
+			c.mu.Lock()
 			c.channels[body.ID] = body.Channel
+			c.mu.Unlock()
 		}
 		return connectedAck{Type: "connected", Body: connectedAckBody{ID: nonEmptyStringPtr(body.ID)}}, true
 	case "disconnect":
 		var body streamIDBody
 		_ = json.Unmarshal(env.Body, &body)
+		c.mu.Lock()
 		delete(c.channels, body.ID)
+		c.mu.Unlock()
 		return nil, false
 	case "subNote", "sn":
 		var body streamIDBody
 		_ = json.Unmarshal(env.Body, &body)
 		if body.ID != "" {
+			c.mu.Lock()
 			c.notes[body.ID] = struct{}{}
+			c.mu.Unlock()
 		}
 		return nil, false
 	case "unsubNote", "un":
 		var body streamIDBody
 		_ = json.Unmarshal(env.Body, &body)
+		c.mu.Lock()
 		delete(c.notes, body.ID)
+		c.mu.Unlock()
 		return nil, false
 	default:
 		// Includes "readNotification" and "channel"/"ch", which
@@ -266,11 +292,13 @@ func nonEmptyStringPtr(s string) *string {
 // maxConcurrentStreamConnections slot per such connection (AGENTS.md:
 // "Bound request sizes, timeouts, concurrency").
 //
-// logger/requestID are used only to record how the connection ended
-// (see logStreamDisconnect) — Issue #95 PR1 observability for the
+// requestID is used only to record how the connection ended (see
+// logStreamDisconnect) — Issue #95 PR1 observability for the
 // pong-timeout zombie-connection hypothesis (maxConcurrentStreamConnections'
-// doc comment).
-func serveStreamConn(conn *websocket.Conn, pingInterval time.Duration, logger *slog.Logger, requestID string) {
+// doc comment). Since Issue #95 PR2, this is also where a homeTimeline
+// subscription starts receiving live note pushes (see
+// pushHomeTimelineEvents) whenever s.streamHub is configured.
+func (s *Server) serveStreamConn(conn *websocket.Conn, pingInterval time.Duration, requestID string) {
 	pongWait := pingInterval * streamPongGraceMultiplier
 	conn.SetReadLimit(streamReadLimit)
 	connectedAt := time.Now()
@@ -315,9 +343,22 @@ func serveStreamConn(conn *websocket.Conn, pingInterval time.Duration, logger *s
 	}()
 
 	var endErr error
-	defer func() { logStreamDisconnect(logger, requestID, endErr, time.Since(connectedAt)) }()
+	defer func() { logStreamDisconnect(s.logger, requestID, endErr, time.Since(connectedAt)) }()
 
 	state := &streamConnState{channels: map[string]string{}, notes: map[string]struct{}{}}
+
+	// s.timeline is nil-checked too, not just s.streamHub: GET /streaming
+	// registers whenever opts.MiAuthService is set, independent of
+	// opts.TimelineService (see NewServer's route registration), so a
+	// theoretical Options{StreamHub: ..., TimelineService: nil}
+	// misconfiguration must not panic pushHomeTimelineEvents' use of
+	// s.timeline. cmd/server/main.go always wires the two together.
+	if s.streamHub != nil && s.timeline != nil {
+		sub, unsubscribe := s.streamHub.Subscribe()
+		defer unsubscribe()
+		go s.pushHomeTimelineEvents(sub, state, writeJSON)
+	}
+
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -358,4 +399,92 @@ func logStreamDisconnect(logger *slog.Logger, requestID string, err error, conne
 		"error", err.Error(),
 		"connected_ms", connected.Milliseconds(),
 	)
+}
+
+// streamPushProjectTimeout bounds one push event's owner-resolution and
+// note-projection work (projectPushNote): this runs from a background
+// goroutine with no request deadline of its own to inherit, so it needs
+// its own bound (AGENTS.md: "Bound request sizes, timeouts, concurrency.
+// Propagate context cancellation.") rather than being able to hang
+// indefinitely on a stuck database call.
+const streamPushProjectTimeout = 5 * time.Second
+
+// channelNoteFrame is the traced server→client push shape for a new
+// home-timeline note (docs/compat/aria-v1.5.11.md's "Traced server→client
+// channel/note push event shape" section): misskey_dart's
+// StreamingResponse "channel" case wrapping its own ChannelStreamEvent
+// "note" case.
+type channelNoteFrame struct {
+	Type string               `json:"type"`
+	Body channelNoteFrameBody `json:"body"`
+}
+
+type channelNoteFrameBody struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	Body note   `json:"body"`
+}
+
+// newChannelNoteFrame builds the push frame for n, addressed to the
+// connect id that subscribed to homeTimeline.
+func newChannelNoteFrame(id string, n note) channelNoteFrame {
+	return channelNoteFrame{Type: "channel", Body: channelNoteFrameBody{ID: id, Type: "note", Body: n}}
+}
+
+// pushHomeTimelineEvents delivers Issue #95 PR2's live note-create push
+// to one /streaming connection: for every domain.Entry sub receives, it
+// projects the entry once and sends a channelNoteFrame to every connect
+// id state currently has subscribed to "homeTimeline". It returns when
+// sub is closed — serveStreamConn's deferred unsubscribe, itself tied to
+// the connection's own lifetime via s.streamHub.Subscribe — or as soon
+// as a write fails (the read loop will independently notice the same
+// dead connection and clean everything up).
+//
+// Any failure here (no homeTimeline subscriber on this connection, note
+// projection failing) is silently dropped rather than logged or
+// surfaced: a failed push must never affect this or any other
+// connection, this file's non-goal since Issue #41, and matches
+// AGENTS.md's "local post success must not depend on provider success"
+// applied to this best-effort delivery instead.
+func (s *Server) pushHomeTimelineEvents(sub <-chan domain.Entry, state *streamConnState, writeJSON func(any) error) {
+	for entry := range sub {
+		ids := state.homeTimelineIDs()
+		if len(ids) == 0 {
+			continue
+		}
+		n, err := s.projectPushNote(entry)
+		if err != nil {
+			continue
+		}
+		for _, id := range ids {
+			if writeJSON(newChannelNoteFrame(id, n)) != nil {
+				return
+			}
+		}
+	}
+}
+
+// projectPushNote builds the wire Note for a just-created entry, for
+// pushHomeTimelineEvents. It resolves the owner itself via s.timeline/
+// s.miauth rather than accepting a caller-supplied owner profile, since
+// it runs from a background goroutine with no HTTP request/context to
+// reuse (plan-issue-95 §3.4: owner resolution "リクエストコンテキストが
+// 無いbackgroundゴルーチンからでも呼べる、既存メソッドの組み合わせ").
+// viewerActorID is always the owner: a just-created entry can have no
+// reaction yet, so projectNote's MyReaction is always nil regardless of
+// who the real eventual viewer is.
+func (s *Server) projectPushNote(entry domain.Entry) (note, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), streamPushProjectTimeout)
+	defer cancel()
+
+	ownerActor, err := s.timeline.GetActorByType(ctx, domain.ActorOwner)
+	if err != nil {
+		return note{}, err
+	}
+	owner, err := s.miauth.DescribeOwner(ctx, ownerActor.ID)
+	if err != nil {
+		return note{}, err
+	}
+	user := s.resolveUserLite(ctx, entry.AuthorActorID, owner)
+	return s.projectNote(ctx, entry, user, owner.ActorID)
 }

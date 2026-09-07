@@ -29,6 +29,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/provider/openai"
 	owuiprovider "github.com/nananek/miauth-private-portal/internal/provider/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
+	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -88,7 +89,17 @@ func run() error {
 	if err := miauthSvc.BackfillOwnerDisplayName(ctx); err != nil {
 		return fmt.Errorf("backfill owner display name: %w", err)
 	}
-	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{OwnerUsername: cfg.Auth.OwnerUsername})
+	// streamHub is built before timelineSvc/httpserver.Options and given
+	// to both (timeline.Config.Broadcaster below, httpserver.Options.
+	// StreamHub further down): internal/streamhub depends on neither, so
+	// this ordering avoids the construction-order cycle a direct
+	// timeline<->httpserver dependency would otherwise need (Issue #95
+	// PR2, docs/compat/aria-v1.5.11.md's push event section).
+	streamHub := streamhub.NewHub()
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{
+		OwnerUsername: cfg.Auth.OwnerUsername,
+		Broadcaster:   streamHub,
+	})
 
 	// jobsManager is built here, ahead of the feature blocks below (rather
 	// than just before Run, as it was before Issue #53), so the Open
@@ -225,6 +236,7 @@ func run() error {
 		MiAuthService:            miauthSvc,
 		LocalOrigin:              cfg.Auth.LocalOrigin,
 		TimelineService:          timelineSvc,
+		StreamHub:                streamHub,
 		LLMEnabled:               cfg.LLM.Enabled,
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
 		VirtualActors:            virtualActors,

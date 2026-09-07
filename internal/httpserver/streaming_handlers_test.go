@@ -14,10 +14,13 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
+	"github.com/nananek/miauth-private-portal/internal/streamhub"
+	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
 // syncBuffer is a concurrency-safe io.Writer/String() pair for capturing
@@ -462,5 +465,227 @@ func TestHandleStreaming_DoesNotLogCleanClientClose(t *testing.T) {
 	if got := logs.String(); strings.Contains(got, "streaming connection ended abnormally") ||
 		strings.Contains(got, "streaming connection timed out") {
 		t.Errorf("expected no disconnect warning for a clean close, got: %s", got)
+	}
+}
+
+// newStreamingPushTestServer is newStreamingTestServer's Issue #95 PR2
+// counterpart: it additionally builds a timeline.Service and
+// streamhub.Hub sharing the same database as the running Server (wired
+// into Options.TimelineService/StreamHub, and into
+// timeline.Config.Broadcaster, exactly as cmd/server/main.go wires
+// them), and returns both so a test can create an entry directly and
+// observe the resulting push frame over a real WebSocket connection.
+func newStreamingPushTestServer(t *testing.T, tokenScope string) (addr, token string, timelineSvc *timeline.Service, hub *streamhub.Hub) {
+	t.Helper()
+	if tokenScope == "" {
+		tokenScope = miauth.ScopeReadAccount
+	}
+
+	db, err := sqlite.Open(t.Context(), sqlite.Config{
+		Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
+	})
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+	if err := db.Actors.EnsureReservedActors(t.Context()); err != nil {
+		t.Fatalf("ensure reserved actors: %v", err)
+	}
+
+	hub = streamhub.NewHub()
+	timelineSvc = timeline.NewService(db, db.Repos, timeline.Config{Broadcaster: hub})
+
+	miauthSvc := miauth.NewService(db, db.Repos, defaultMiAuthTestConfig())
+	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
+	reg := health.NewRegistry()
+
+	setupSrv := NewServer(logger, reg, Options{MiAuthService: miauthSvc})
+	token, _ = mustIssueToken(t, setupSrv, "streaming-push-setup", tokenScope)
+
+	ln := mustListen(t)
+	addr = ln.Addr().String()
+
+	opts := Options{
+		Listener:            ln,
+		MiAuthService:       miauthSvc,
+		TimelineService:     timelineSvc,
+		StreamHub:           hub,
+		StreamPingInterval:  time.Hour,
+		ShutdownGracePeriod: 2 * time.Second,
+		ReadHeaderTimeout:   2 * time.Second,
+		IdleTimeout:         2 * time.Second,
+		MaxRequestBodyBytes: 1024,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, opts, logger, reg) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned error during shutdown: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("server did not shut down")
+		}
+	})
+
+	waitForServing(t, addr)
+	return addr, token, timelineSvc, hub
+}
+
+func TestHandleStreaming_PushesNewHomeTimelineNoteToSubscribedConnection(t *testing.T) {
+	addr, token, timelineSvc, _ := newStreamingPushTestServer(t, "")
+
+	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
+	if err != nil {
+		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(map[string]any{
+		"type": "connect",
+		"body": map[string]any{"channel": "homeTimeline", "id": "home1", "params": map[string]any{}},
+	}); err != nil {
+		t.Fatalf("write connect: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ack struct {
+		Type string `json:"type"`
+	}
+	if err := conn.ReadJSON(&ack); err != nil {
+		t.Fatalf("read connected ack: %v", err)
+	}
+	if ack.Type != "connected" {
+		t.Fatalf("ack type = %q, want %q", ack.Type, "connected")
+	}
+
+	entry, err := timelineSvc.CreateRoot(t.Context(), domain.EntryUserPost, "hello push", nil)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var frame struct {
+		Type string `json:"type"`
+		Body struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+			Body struct {
+				ID   string  `json:"id"`
+				Text *string `json:"text"`
+			} `json:"body"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&frame); err != nil {
+		t.Fatalf("read push frame: %v", err)
+	}
+	if frame.Type != "channel" {
+		t.Errorf("frame.Type = %q, want %q", frame.Type, "channel")
+	}
+	if frame.Body.ID != "home1" {
+		t.Errorf("frame.Body.ID = %q, want %q (the connect id)", frame.Body.ID, "home1")
+	}
+	if frame.Body.Type != "note" {
+		t.Errorf("frame.Body.Type = %q, want %q", frame.Body.Type, "note")
+	}
+	if frame.Body.Body.ID != entry.ID {
+		t.Errorf("pushed note id = %q, want %q", frame.Body.Body.ID, entry.ID)
+	}
+	if frame.Body.Body.Text == nil || *frame.Body.Body.Text != "hello push" {
+		t.Errorf("pushed note text = %v, want %q", frame.Body.Body.Text, "hello push")
+	}
+}
+
+func TestHandleStreaming_DoesNotPushToConnectionNotSubscribedToHomeTimeline(t *testing.T) {
+	addr, token, timelineSvc, _ := newStreamingPushTestServer(t, "")
+
+	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
+	if err != nil {
+		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
+	}
+	defer conn.Close()
+
+	// Subscribed to a different channel, not homeTimeline: Issue #95's
+	// scope is homeTimeline note-create push only (plan-issue-95 §2).
+	if err := conn.WriteJSON(map[string]any{
+		"type": "connect",
+		"body": map[string]any{"channel": "localTimeline", "id": "local1", "params": map[string]any{}},
+	}); err != nil {
+		t.Fatalf("write connect: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ack struct {
+		Type string `json:"type"`
+	}
+	if err := conn.ReadJSON(&ack); err != nil {
+		t.Fatalf("read connected ack: %v", err)
+	}
+
+	if _, err := timelineSvc.CreateRoot(t.Context(), domain.EntryUserPost, "hello", nil); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("expected no push frame for a connection not subscribed to homeTimeline")
+	} else if !isTimeoutErr(err) {
+		t.Fatalf("expected a read-deadline timeout, got: %v", err)
+	}
+}
+
+// TestHandleStreaming_ReactionDoesNotTriggerPush pins Issue #95's own
+// non-goal (a continuation of Issue #41's — this document's WebSocket
+// "/streaming timeline channel" row): only a note's own creation is
+// pushed. timeline.Service.SetReaction never calls broadcastCreated at
+// all, so this is structurally guaranteed rather than merely untested,
+// but it is exactly the acceptance criterion plan-issue-95 §5 calls for
+// a test on, so it is pinned here against a real subscribed connection.
+func TestHandleStreaming_ReactionDoesNotTriggerPush(t *testing.T) {
+	addr, token, timelineSvc, _ := newStreamingPushTestServer(t, "")
+
+	entry, err := timelineSvc.CreateRoot(t.Context(), domain.EntryUserPost, "reactable", nil)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	owner, err := timelineSvc.GetActorByType(t.Context(), domain.ActorOwner)
+	if err != nil {
+		t.Fatalf("GetActorByType: %v", err)
+	}
+
+	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
+	if err != nil {
+		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(map[string]any{
+		"type": "connect",
+		"body": map[string]any{"channel": "homeTimeline", "id": "home1", "params": map[string]any{}},
+	}); err != nil {
+		t.Fatalf("write connect: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ack struct {
+		Type string `json:"type"`
+	}
+	if err := conn.ReadJSON(&ack); err != nil {
+		t.Fatalf("read connected ack: %v", err)
+	}
+
+	if err := timelineSvc.SetReaction(t.Context(), entry.ID, owner.ID, "👍"); err != nil {
+		t.Fatalf("SetReaction: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("expected no push frame for a reaction, only note creation pushes")
+	} else if !isTimeoutErr(err) {
+		t.Fatalf("expected a read-deadline timeout, got: %v", err)
 	}
 }

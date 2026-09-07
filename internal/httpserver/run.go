@@ -15,6 +15,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -65,6 +66,16 @@ type Options struct {
 	// defaultStreamPingInterval (streaming_handlers.go); tests shorten it
 	// to observe a ping/pong cycle without waiting 30+ seconds.
 	StreamPingInterval time.Duration
+	// StreamHub is Issue #95 PR2's live push delivery source: when
+	// non-nil, every GET /streaming connection subscribed to
+	// "homeTimeline" receives a push for each new entry StreamHub
+	// publishes (cmd/server/main.go wires the same *streamhub.Hub given
+	// to timeline.Config.Broadcaster here, so the two sides of one
+	// broadcast never drift apart). A nil value (the safe default —
+	// matching every httpserver test predating this field) leaves
+	// GET /streaming exactly as Issue #41 left it: handshake, acks, and
+	// keepalive only, no push.
+	StreamHub *streamhub.Hub
 
 	// VirtualActors resolves an Open WebUI model actor to the
 	// VirtualActor projection Aria sees (Issue #52). A nil value (the

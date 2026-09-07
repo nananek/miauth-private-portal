@@ -61,6 +61,31 @@ type Config struct {
 	// Config, matching every timeline.NewService caller before PR5)
 	// disables detection entirely rather than matching every post.
 	OwnerUsername string
+	// Broadcaster announces every newly created entry for Issue #95
+	// PR2's live push delivery (internal/streamhub.Hub satisfies this).
+	// nil (the zero Config, matching every timeline.NewService caller
+	// before this field existed) disables it entirely — the same
+	// nil-means-unchanged convention Clock/OwnerUsername already use.
+	// This package never imports internal/streamhub directly (AGENTS.md:
+	// "Domain/use-case code must not depend on HTTP handlers" — the same
+	// layering rule applies symmetrically to the neutral broker package
+	// both this package and internal/httpserver depend on); only this
+	// narrow EntryBroadcaster interface crosses the boundary.
+	Broadcaster EntryBroadcaster
+}
+
+// EntryBroadcaster is the narrow interface Service uses to announce a
+// just-committed entry for live push delivery. Its single method's name
+// and signature match internal/streamhub.Hub's Publish exactly, so a
+// *streamhub.Hub satisfies this interface structurally with no adapter
+// — cmd/server/main.go passes one straight into Config.Broadcaster.
+// Publish must never block or fail from the caller's point of view:
+// Service calls it only after the entry's own transaction has already
+// committed, as a best-effort side effect, mirroring AGENTS.md's "local
+// post success must not depend on provider success" applied to push
+// delivery instead of an LLM/external provider.
+type EntryBroadcaster interface {
+	Publish(entry domain.Entry)
 }
 
 // Service enforces timeline business rules while composing domain
@@ -72,6 +97,9 @@ type Service struct {
 	// mentionPattern is nil when Config.OwnerUsername is unset,
 	// disabling self-mention detection entirely.
 	mentionPattern *regexp.Regexp
+	// broadcaster is nil when Config.Broadcaster is unset, disabling
+	// live push delivery entirely (see broadcastCreated).
+	broadcaster EntryBroadcaster
 }
 
 // NewService builds a timeline Service. uow and repos commonly come
@@ -82,7 +110,7 @@ func NewService(uow domain.UnitOfWork, repos domain.Repos, cfg Config) *Service 
 	if clock == nil {
 		clock = realClock{}
 	}
-	svc := &Service{uow: uow, repos: repos, clock: clock}
+	svc := &Service{uow: uow, repos: repos, clock: clock, broadcaster: cfg.Broadcaster}
 	if cfg.OwnerUsername != "" {
 		// Word-bounded: the character immediately before "@" (if any)
 		// and immediately after the username (if any) must not be part
@@ -141,6 +169,20 @@ func recordNotification(ctx context.Context, repos domain.Repos, notifType domai
 		RelatedEntryID: relatedEntryID,
 		CreatedAt:      createdAt,
 	})
+}
+
+// broadcastCreated announces entry's creation for Issue #95 PR2's live
+// push delivery, if a Broadcaster is configured (see Config.Broadcaster
+// and EntryBroadcaster). Callers must invoke this only after entry's own
+// transaction has already committed successfully — never from inside
+// WithinTx — since a push is a confirmed-committed side effect, unlike
+// an EntryHook, which still runs as part of the transaction it might
+// roll back.
+func (s *Service) broadcastCreated(entry domain.Entry) {
+	if s.broadcaster == nil {
+		return
+	}
+	s.broadcaster.Publish(entry)
 }
 
 // EntryHook is a caller-supplied extension point invoked inside the same
@@ -220,6 +262,7 @@ func (s *Service) CreateRootWithHook(ctx context.Context, kind domain.EntryKind,
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	s.broadcastCreated(entry)
 	return entry, nil
 }
 
@@ -259,6 +302,7 @@ func (s *Service) CreateReplyWithHook(ctx context.Context, parentEntryID string,
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	s.broadcastCreated(entry)
 	return entry, nil
 }
 
@@ -298,6 +342,7 @@ func (s *Service) CreateGeneratedReply(ctx context.Context, targetEntryID string
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	s.broadcastCreated(entry)
 	return entry, nil
 }
 
@@ -374,6 +419,7 @@ func (s *Service) CreateGeneratedReplyBy(
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	s.broadcastCreated(entry)
 	return entry, nil
 }
 
@@ -527,6 +573,12 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 	})
 	if err != nil {
 		return domain.Entry{}, false, err
+	}
+	if created {
+		// Not for the created==false dedupe-replay branch above: a
+		// redelivered/raced duplicate must not push the same entry to
+		// live connections a second time (plan-issue-95 §3.3).
+		s.broadcastCreated(entry)
 	}
 	return entry, created, nil
 }

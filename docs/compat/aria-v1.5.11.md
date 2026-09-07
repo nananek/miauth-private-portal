@@ -1188,6 +1188,83 @@ would not have reproduced the class of error this issue fixes; it is sent
 because the sakurasato precedent and real Misskey servers do, not because
 Aria's pinned version depends on it.
 
+#### Traced server→client `channel`/`note` push event shape (Issue #95 PR2)
+
+Before Issue #95, `GET /streaming` never sent a server-initiated frame
+beyond the `connected` ack above. `plan-issue-95` §3.4 required this shape
+be confirmed from the pinned client source before implementation, the same
+method Issue #41 used for the client-to-server frames above — not guessed
+from the sakurasato precedent or from real Misskey server behavior alone.
+
+Source-traced against the pinned `misskey_dart`'s
+[`StreamingResponse`/`ChannelStreamEvent` union
+definitions](https://github.com/poppingmoon/misskey_dart/blob/14176c515a005a9fb01d3e6365a49b5a5d387a92/lib/src/data/streaming/streaming_response.dart)
+and Aria's own
+[`timeline_stream_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/streaming/timeline_stream_provider.dart),
+[`incoming_message_provider.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/provider/streaming/incoming_message_provider.dart),
+and
+[`model/streaming/incoming_message.dart`](https://github.com/poppingmoon/aria/blob/a66c9303995e7c964765cf382de6a9b0e3f4a3b6/lib/model/streaming/incoming_message.dart).
+
+Every server-to-client frame Aria's `incomingMessageProvider` decodes uses
+the same envelope as the client-to-server side, `{"type": ..., "body":
+...}` (`IncomingMessage.fromJson`): the outer `type` decodes to an
+`IncomingMessageType` enum (`channel`, `noteUpdated`, `emojiAdded`,
+`emojiUpdated`, `emojiDeleted`, `announcementCreated` — an unrecognized
+value decodes to `null` rather than throwing, same
+`unknownEnumValue: JsonKey.nullForUndefinedEnumValue` pattern as
+`UserDetailedNotMe`'s permissive fields elsewhere in this document), and
+`body` decodes as an **untyped** `Map<String, dynamic>` — Aria does not
+require `misskey_dart`'s own generated `StreamingResponse` union to parse
+an incoming frame at all; only this thin `IncomingMessage` envelope.
+
+For the home timeline tab specifically, `timeline_stream_provider.dart`'s
+`timelineStream` only reacts to a frame when the outer `type` is
+`IncomingMessageType.channel` **and** `body['id']` equals the `id` this
+same connection sent on its own `connect` call (this document's existing
+`connect` row — home timeline connects with `channel: "homeTimeline"`).
+When both match, it pattern-matches the inner `body` map itself as
+`{'type': 'note', 'body': final Map<String, dynamic> body}` and decodes
+that inner `body` with `Note.fromJson` — the same wire `Note` shape as
+every other note-returning endpoint in this document, decoded through
+`(*Server).projectNote` server-side. This inner shape is exactly
+`misskey_dart`'s own `ChannelStreamEvent.note` case
+(`@FreezedUnionValue("note")`, fields `id: String`, `body: Note`, plus an
+unused `type: ChannelEventType?` — a redundant re-decode of the same
+`"note"` discriminator string into `misskey_dart`'s own enum that Aria's
+hand-written pattern match above never reads).
+
+So the confirmed wire shape for a new home-timeline note push is:
+
+```json
+{
+  "type": "channel",
+  "body": {
+    "id": "<the id the client sent on its homeTimeline connect>",
+    "type": "note",
+    "body": { "...": "Note, identical shape to every other note-returning endpoint" }
+  }
+}
+```
+
+No other `ChannelStreamEvent` case (`reply`, `mention`, `renote`,
+`notification`, `reacted`/`unreacted` via `noteUpdated`, ...) is sent —
+this document's "WebSocket `/streaming` timeline channel" row's
+reaction/notification non-goal is unchanged by Issue #95; only
+`homeTimeline`-subscribed `connect` ids ever receive a `"note"` push, and
+only for that entry's own creation.
+
+**Implemented as** `internal/streamhub.Hub` (a neutral in-process
+publish/subscribe broker `internal/timeline` and `internal/httpserver`
+both depend on, satisfying AGENTS.md's "Domain/use-case code must not
+depend on HTTP handlers" without a construction-order cycle in
+`cmd/server/main.go`) and `serveStreamConn`'s new subscription select loop
+(`internal/httpserver/streaming_handlers.go`). Delivery failure of any
+kind (no subscriber, a full per-connection buffer, a WebSocket write
+error) never affects `POST /api/notes/create`'s own success — see
+`internal/timeline`'s `EntryBroadcaster` doc comment for why, mirroring
+this document's existing "a failed optional stream must not make HTTP
+timeline or post operations fail" rule.
+
 ## Requirement traceability
 
 The table maps Issue #1 requirements to roadmap children. Issue #2 freezes the
