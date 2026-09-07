@@ -425,6 +425,14 @@ func checkGeneratedReplyAuthorEligible(ctx context.Context, repos domain.Repos, 
 // entry's Body, kept separate from item because ExternalItem itself
 // carries no content, only provenance/dedupe metadata.
 //
+// The created entry's CreatedAt is derived from item.PublishedAt (the
+// source's own publish/receive time) rather than ingest time, so the
+// home timeline sorts by when content actually happened instead of by
+// poll/batch order. It falls back to ingest time when PublishedAt is nil
+// (unparseable or absent upstream) or in the future (a bad feed
+// timestamp should not vault an entry to the top as if it just
+// happened). item.CreatedAt/FetchedAt still record actual ingest time.
+//
 // Returns the existing, already-promoted entry and created=false when
 // item.DedupeKey already exists — the same duplicate-delivery safety net
 // CreateGeneratedReply gives Issue #9's job handler, applied here to
@@ -438,6 +446,17 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 	}
 
 	now := s.clock.Now().UTC()
+	createdAt := now
+	if item.PublishedAt != nil {
+		createdAt = item.PublishedAt.UTC()
+		if createdAt.After(now) {
+			// Feed-side timestamp is in the future (bad clock, flying
+			// publish date): fall back to ingest time rather than let
+			// the entry jump to the top of the timeline as if it just
+			// happened.
+			createdAt = now
+		}
+	}
 	id := domain.NewID()
 	entry := domain.Entry{
 		ID:               id,
@@ -445,7 +464,7 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 		Kind:             kind,
 		Body:             body,
 		ProcessingStatus: domain.ProcessingNone,
-		CreatedAt:        now,
+		CreatedAt:        createdAt,
 		UpdatedAt:        now,
 	}
 	item.ID = domain.NewID()

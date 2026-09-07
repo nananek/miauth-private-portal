@@ -761,6 +761,82 @@ func TestCreateExternalEntry_CreatesRootEntryAndPromotesItem(t *testing.T) {
 	}
 }
 
+// TestCreateExternalEntry_UsesPublishedAtAsCreatedAt is Issue #83's core
+// regression test: the home timeline sorts by Entries.CreatedAt, so an
+// ingested item's CreatedAt must reflect when the source published it,
+// not when the poll happened to run — otherwise a same-batch ingest of
+// several items (see the ingest package's own regression test) reverses
+// their timeline order relative to the feed's actual publish order.
+func TestCreateExternalEntry_UsesPublishedAtAsCreatedAt(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+
+	ts.clock.Advance(time.Hour)
+	published := ts.clock.Now().Add(-30 * time.Minute)
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", DedupeKey: "dedupe-1", PublishedAt: &published}
+
+	entry, created, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "body")
+	if err != nil {
+		t.Fatalf("CreateExternalEntry: %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	if !entry.CreatedAt.Equal(published) {
+		t.Errorf("entry.CreatedAt = %v, want PublishedAt %v", entry.CreatedAt, published)
+	}
+	if !entry.UpdatedAt.Equal(ts.clock.Now()) {
+		t.Errorf("entry.UpdatedAt = %v, want ingest time %v", entry.UpdatedAt, ts.clock.Now())
+	}
+
+	stored, err := ts.db.ExternalItems.GetByDedupeKey(t.Context(), "dedupe-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.FetchedAt.Equal(ts.clock.Now()) {
+		t.Errorf("stored item FetchedAt = %v, want ingest time %v (must not follow PublishedAt)", stored.FetchedAt, ts.clock.Now())
+	}
+}
+
+// TestCreateExternalEntry_ClampsFuturePublishedAtToNow guards against a
+// misbehaving or misconfigured feed publishing with a future timestamp:
+// without the clamp, such an item would jump to the top of the home
+// timeline as if it just happened, even though it has not "happened" yet
+// from the portal's point of view.
+func TestCreateExternalEntry_ClampsFuturePublishedAtToNow(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+
+	future := ts.clock.Now().Add(24 * time.Hour)
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", DedupeKey: "dedupe-1", PublishedAt: &future}
+
+	entry, _, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "body")
+	if err != nil {
+		t.Fatalf("CreateExternalEntry: %v", err)
+	}
+	if !entry.CreatedAt.Equal(ts.clock.Now()) {
+		t.Errorf("entry.CreatedAt = %v, want clamped to ingest time %v", entry.CreatedAt, ts.clock.Now())
+	}
+}
+
+// TestCreateExternalEntry_NilPublishedAtFallsBackToNow keeps the
+// pre-Issue-#83 behavior for sources where PublishedAt could not be
+// determined (unparseable or absent upstream date).
+func TestCreateExternalEntry_NilPublishedAtFallsBackToNow(t *testing.T) {
+	ts := newTestService(t)
+	source := mustCreateExternalSourceForTest(t, ts, "rss", "https://example.com/feed.xml")
+
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", DedupeKey: "dedupe-1"}
+
+	entry, _, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "body")
+	if err != nil {
+		t.Fatalf("CreateExternalEntry: %v", err)
+	}
+	if !entry.CreatedAt.Equal(ts.clock.Now()) {
+		t.Errorf("entry.CreatedAt = %v, want ingest time %v when PublishedAt is nil", entry.CreatedAt, ts.clock.Now())
+	}
+}
+
 // TestCreateExternalEntry_DuplicateDedupeKeyReturnsExistingEntryWithoutDuplicating
 // is the dedupe safety net Issue #11 requires: re-delivering the same
 // external item (a retried "external_source_poll" job, or the same item
