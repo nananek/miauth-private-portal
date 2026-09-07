@@ -1,6 +1,9 @@
--- Issue #77 PR1: the files table backing internal/drive's Storage
--- abstraction (ADR-0006). This migration only creates the table; no row
--- is written and nothing reads from it yet. PR3 (Misskey-compatible
+-- Issue #77 PR1 (renumbered to 0022 on rebase onto main: 0021 was taken
+-- by openwebui_turn_reply_metadata, Issue #81/#84, which landed on main
+-- after this PR was originally authored): the files table backing
+-- internal/drive's Storage abstraction (ADR-0006). This migration only
+-- creates the table; no row is written and nothing reads from it yet.
+-- PR3 (Misskey-compatible
 -- Drive API), PR4 (external-source favicons), PR5 (profile avatars), and
 -- PR6 (post attachments) are what populate and query it, each through
 -- its own repository added when that use case exists.

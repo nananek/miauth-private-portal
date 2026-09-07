@@ -149,7 +149,7 @@ of the pattern.
 
 ### D6: The `files` table ships now; its repository does not
 
-Migration `0021_files.sql` creates the `files` table (`id`,
+Migration `0022_files.sql` creates the `files` table (`id`,
 `owner_actor_id` nullable, `purpose` closed-enum, `mime`, `byte_size`,
 `sha256`, `storage_key` unique, `width`/`height` nullable, `created_at`)
 in this PR. No `domain.FileRepository` interface, no SQLite

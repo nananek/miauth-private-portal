@@ -130,7 +130,7 @@ table — unit tests only. This is the foundation PR3/PR4/PR5/PR6 build on.
   (`internal/drive/storage_contract_test.go`); `S3`'s own tests run
   against an in-process fake S3-compatible `httptest.Server`
   (`internal/drive/s3_test.go`), not a real MinIO/S3 endpoint.
-- `files` table (migration `0021_files.sql`): `id`, `owner_actor_id`
+- `files` table (migration `0022_files.sql`): `id`, `owner_actor_id`
   (nullable), `purpose` (closed enum: `avatar`/`source_favicon`/
   `attachment`/`app_icon`), `mime`, `byte_size`, `sha256`, `storage_key`
   (unique), `width`/`height` (nullable), `created_at`. No repository

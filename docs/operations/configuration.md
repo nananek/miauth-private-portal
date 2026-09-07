@@ -1449,7 +1449,7 @@ repository reads or writes through it yet.
   file extension. SVG is rejected by this same fails-to-decode path: it is
   XML, not any of these formats' binary header, so no dedicated
   SVG-detection code exists or is needed (ADR-0006).
-- The `files` table (migration `0021_files.sql`) holds one row per stored
+- The `files` table (migration `0022_files.sql`) holds one row per stored
   object's metadata (`purpose`, `mime`, `byte_size`, `sha256`,
   `storage_key`, optional `width`/`height`, optional `owner_actor_id`). No
   repository reads or writes it yet; PR3/PR4/PR5/PR6 add the use case that
