@@ -396,6 +396,19 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 			body: "cc\t@owner\tplease",
 			want: "cc please",
 		},
+		{
+			// U+3000 IDEOGRAPHIC SPACE (a full-width space) is a common
+			// word separator in Japanese input and plays the same role a
+			// regular space does around a mention.
+			name: "full-width space around a mention also collapses to one space",
+			body: "cc　@owner　please",
+			want: "cc please",
+		},
+		{
+			name: "mixed ascii and full-width space around a mention collapses to one space",
+			body: "cc 　@owner　 please",
+			want: "cc please",
+		},
 	}
 
 	for _, tt := range tests {

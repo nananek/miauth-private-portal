@@ -158,15 +158,18 @@ func pathNodeRole(ctx context.Context, repos domain.Repos, node domain.Entry) (s
 	}
 }
 
-// mentionGapPattern collapses a run of two or more horizontal whitespace
-// bytes (space or tab) into a single space. stripMentionTagsForProvider
-// runs it once, only when it actually omitted a mention, to clean up the
-// gap an omitted mention can leave between the whitespace that preceded
-// it and the whitespace that followed it (e.g. "cc @owner please" ->
-// "cc  please" -> "cc please"). It deliberately does not touch newlines
-// or punctuation spacing (e.g. a lone space left before a comma) — that
-// would be normalizing content this function never otherwise touches.
-var mentionGapPattern = regexp.MustCompile(`[ \t]{2,}`)
+// mentionGapPattern collapses a run of two or more horizontal spacing
+// characters — ASCII space, tab, or the U+3000 IDEOGRAPHIC SPACE that
+// Japanese input commonly uses in the same role — into a single ASCII
+// space. stripMentionTagsForProvider runs it once, only when it
+// actually omitted a mention, to clean up the gap an omitted mention
+// can leave between the spacing that preceded it and the spacing that
+// followed it (e.g. "cc @owner please" -> "cc  please" -> "cc please";
+// the same happens for a full-width-space-delimited "cc　@owner　please").
+// It deliberately does not touch newlines or punctuation spacing (e.g. a
+// lone space left before a comma) — that would be normalizing content
+// this function never otherwise touches.
+var mentionGapPattern = regexp.MustCompile(`[ \t\x{3000}]{2,}`)
 
 // mentionPattern matches one Misskey-style @mention token anchored at
 // its own start (the "^" matches the start of whatever suffix of body
