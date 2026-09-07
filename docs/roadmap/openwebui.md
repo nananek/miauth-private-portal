@@ -636,24 +636,26 @@ Placement: attached to #13 only when the outbound feature is promoted into
 the same release. It never blocks the original #1 MVP while the feature flag
 is off.
 
-Acceptance criteria:
+Acceptance criteria (evidence: `docs/operations/openwebui-release-gate.md`):
 
-- [ ] Feature-off regression proves the existing #1 auth, post, reply, thread,
+- [x] Feature-off regression proves the existing #1 auth, post, reply, thread,
   and source-ingestion behavior is unchanged.
-- [ ] Owner root → assistant → follow-up → assistant is restored after
+- [x] Owner root → assistant → follow-up → assistant is restored after
   restart, with the same local thread and local `reply_to_id` tree.
-- [ ] A reply to an earlier local ancestor remains a sibling in that same
+- [x] A reply to an earlier local ancestor remains a sibling in that same
   local thread and uses a distinct remote chat; no remote branch is silently
   mixed into the linear chat.
-- [ ] Provider outage still saves the Aria post; duplicate delivery creates no
+- [x] Provider outage still saves the Aria post; duplicate delivery creates no
   second assistant entry or remote chat.
-- [ ] Initial remote chat creation response loss becomes `ambiguous` (and may
+- [x] Initial remote chat creation response loss becomes `ambiguous` (and may
   become `dead` only through explicit recovery) and never silently creates a
   duplicate chat; no new creation, continuation, or automatic retry occurs
   until owner/operator recovery.
 - [ ] Target-instance evidence covers persistent chat creation/continuation,
   default-model permission, completion finish, and any enabled stream finish.
-- [ ] Raw provider credentials, session capabilities, cookies, prompts, and
+  **Deferred:** needs a real Open WebUI instance and provisioned service
+  account, both TBD in #50.
+- [x] Raw provider credentials, session capabilities, cookies, prompts, and
   stream chunks are absent from logs, traces, fixtures, and error responses.
   Encrypted,
   access-controlled backups may contain the local post/assistant bodies and
@@ -661,7 +663,14 @@ Acceptance criteria:
   provider secrets.
 - [ ] Same-remote-chat branch management, regeneration, provider edit/delete,
   existing-chat import/list/pull, and history-browsing behavior is not
-  advertised as successful API/UI capability.
+  advertised as successful API/UI capability. **Deferred:** not yet
+  independently verified/documented; tracked alongside the runbook and
+  target-instance work once #50's TBDs resolve.
+
+**Status (2026-09-07, Issue #54 OWUI-R PR3):** 6 of the 8 criteria above have
+fixture-based or documented-inspection evidence. The remaining 2 (target-
+instance evidence and the capability-advertising restriction) are pending
+Issue #50's TBD resolution; Issue #54 stays open until they are addressed.
 
 ## Auth, permission, and secret boundary
 
