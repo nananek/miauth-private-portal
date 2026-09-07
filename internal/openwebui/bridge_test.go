@@ -297,6 +297,254 @@ func TestEnqueueTurn_DuplicateDeliveryIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestEnqueueTurn_SingleMentionRoutesToThatModelNotTheDefault is Issue
+// #75's core routing rule: a post @mentioning exactly one active,
+// non-default model starts its branch against that model, never the
+// workspace's configured default.
+func TestEnqueueTurn_SingleMentionRoutesToThatModelNotTheDefault(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	other := env.mustCreateSecondModel(t, "gpt-oss:120b", "other_model")
+
+	root := env.mustCreateRoot(t, "@other_model help me")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links = %v, want exactly 1", links)
+	}
+	if links[0].ModelID != other.ID {
+		t.Errorf("link.ModelID = %q, want the mentioned model %q, not the default %q", links[0].ModelID, other.ID, env.model.ID)
+	}
+}
+
+// TestEnqueueTurn_NoMentionRoutesToDefault pins the fallback half of the
+// same rule against a regression: no baseline test above ever exercised
+// a body containing an "@" at all.
+func TestEnqueueTurn_NoMentionRoutesToDefault(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	env.mustCreateSecondModel(t, "gpt-oss:120b", "other_model")
+
+	root := env.mustCreateRoot(t, "no mention here")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].ModelID != env.model.ID {
+		t.Fatalf("links = %v, want exactly 1 bound to the default model %q", links, env.model.ID)
+	}
+}
+
+// TestEnqueueTurn_ReplyMentioningDifferentModelStartsNewBranch is Issue
+// #75's cross-model-reply rule end to end: replying to an existing
+// model's assistant message while @mentioning a *different* model must
+// not attach to the first model's remote chat — it starts a second,
+// independent branch bound to the mentioned model.
+func TestEnqueueTurn_ReplyMentioningDifferentModelStartsNewBranch(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	other := env.mustCreateSecondModel(t, "gpt-oss:120b", "other_model")
+
+	m0 := env.mustCreateRoot(t, "m0")
+	a0 := env.mustCreateReplyAs(t, m0, env.model.ActorID, domain.EntryLLMReply, "a0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+	env.mustSucceededTurn(t, link, m0, a0)
+
+	m1 := env.mustCreateReply(t, a0, "@other_model take over from here")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, m1); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), m0.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 2 {
+		t.Fatalf("links = %v, want 2 (the original plus a new one for the mentioned model)", links)
+	}
+	var newLink *domain.OpenWebUIConversationLink
+	for i := range links {
+		if links[i].ID != link.ID {
+			newLink = &links[i]
+		}
+	}
+	if newLink == nil {
+		t.Fatal("the original link's row disappeared")
+	}
+	if newLink.ModelID != other.ID {
+		t.Errorf("newLink.ModelID = %q, want the mentioned model %q", newLink.ModelID, other.ID)
+	}
+	if newLink.State != domain.LinkCreationPending {
+		t.Errorf("newLink.State = %q, want creation_pending", newLink.State)
+	}
+
+	// The original link is untouched: still ready, still exactly its one
+	// succeeded turn.
+	originalTurns, err := env.db.OpenWebUITurnLinks.ListByLink(t.Context(), link.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(originalTurns) != 1 {
+		t.Errorf("original link turns = %v, want exactly 1 (untouched)", originalTurns)
+	}
+}
+
+// TestEnqueueTurn_AmbiguousMentionRecordsFailedLinkAndTurnWithoutEnqueueing
+// is the ambiguous_model_selection decision table entry (owner decision,
+// Issue #75): mentioning two distinct active models at once must not
+// enqueue any job or guess between them, but must leave an owner-visible
+// record of what happened.
+func TestEnqueueTurn_AmbiguousMentionRecordsFailedLinkAndTurnWithoutEnqueueing(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	second := env.mustCreateSecondModel(t, "gpt-oss:120b", "big_model")
+
+	body := "hey @" + env.model.ActorSlug + " and @" + second.ActorSlug + ", which of you wants this?"
+	root := env.mustCreateRoot(t, body)
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	jobRows, err := env.db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobRows {
+		if j.JobType == JobType {
+			t.Errorf("found an %q job %+v, want none for an ambiguous mention", JobType, j)
+		}
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links = %v, want exactly 1 (recorded failed for visibility)", links)
+	}
+	link := links[0]
+	if link.State != domain.LinkFailed {
+		t.Errorf("link.State = %q, want failed", link.State)
+	}
+	if link.FailureCategory == nil || *link.FailureCategory != domain.FailureCategoryAmbiguousModelSelection {
+		t.Errorf("link.FailureCategory = %v, want %q", link.FailureCategory, domain.FailureCategoryAmbiguousModelSelection)
+	}
+	if link.ClaimJobID != nil {
+		t.Errorf("link.ClaimJobID = %v, want nil (no job was ever enqueued)", link.ClaimJobID)
+	}
+
+	turns, err := env.db.OpenWebUITurnLinks.ListByLink(t.Context(), link.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("turns = %v, want exactly 1", turns)
+	}
+	turn := turns[0]
+	if turn.Status != domain.TurnFailed {
+		t.Errorf("turn.Status = %q, want failed", turn.Status)
+	}
+	if turn.FailureCategory == nil || *turn.FailureCategory != domain.FailureCategoryAmbiguousModelSelection {
+		t.Errorf("turn.FailureCategory = %v, want %q", turn.FailureCategory, domain.FailureCategoryAmbiguousModelSelection)
+	}
+	if turn.LocalMessageID != root.ID {
+		t.Errorf("turn.LocalMessageID = %q, want %q", turn.LocalMessageID, root.ID)
+	}
+}
+
+// TestEnqueueTurn_AmbiguousMentionOnlyPostIsNotSkippedAsEmpty pins the
+// Issue #75 rebase decision (plan §8-3) that ambiguous_model_selection
+// takes priority over the empty-provider-body skip
+// (TestEnqueueTurn_SkipsMentionOnlyPost's case): a post that is nothing
+// but two distinct model mentions — no other text at all, so its
+// provider-facing body strips down to empty exactly like a single bare
+// mention does — must still surface as an explicit, owner-visible
+// ambiguous_model_selection failure, never be silently dropped as if it
+// had nothing to send.
+func TestEnqueueTurn_AmbiguousMentionOnlyPostIsNotSkippedAsEmpty(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	second := env.mustCreateSecondModel(t, "gpt-oss:120b", "big_model")
+
+	body := "@" + env.model.ActorSlug + " @" + second.ActorSlug
+	root := env.mustCreateRoot(t, body)
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	jobRows, err := env.db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobRows {
+		if j.JobType == JobType {
+			t.Errorf("found an %q job %+v, want none for an ambiguous mention-only post", JobType, j)
+		}
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("links = %v, want exactly 1 (recorded failed for visibility, not silently skipped)", links)
+	}
+	link := links[0]
+	if link.State != domain.LinkFailed {
+		t.Errorf("link.State = %q, want failed", link.State)
+	}
+	if link.FailureCategory == nil || *link.FailureCategory != domain.FailureCategoryAmbiguousModelSelection {
+		t.Errorf("link.FailureCategory = %v, want %q", link.FailureCategory, domain.FailureCategoryAmbiguousModelSelection)
+	}
+
+	turns, err := env.db.OpenWebUITurnLinks.ListByLink(t.Context(), link.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("turns = %v, want exactly 1", turns)
+	}
+	if turns[0].FailureCategory == nil || *turns[0].FailureCategory != domain.FailureCategoryAmbiguousModelSelection {
+		t.Errorf("turn.FailureCategory = %v, want %q", turns[0].FailureCategory, domain.FailureCategoryAmbiguousModelSelection)
+	}
+}
+
+// TestEnqueueTurn_MentionOfInactiveModelFallsBackToDefault backs the
+// decision table's "inactive model" row folding into the same bucket as
+// "no mention at all" or an unknown slug — never an error, never
+// ambiguous.
+func TestEnqueueTurn_MentionOfInactiveModelFallsBackToDefault(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	other := env.mustCreateSecondModel(t, "gpt-oss:120b", "other_model")
+	if err := env.db.OpenWebUIModels.SetActive(t.Context(), other.ID, false, env.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	root := env.mustCreateRoot(t, "@other_model are you there?")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+
+	links, err := env.db.OpenWebUILinks.ListByThread(t.Context(), root.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].ModelID != env.model.ID {
+		t.Fatalf("links = %v, want exactly 1 bound to the default model %q (mentioning an inactive model falls back)", links, env.model.ID)
+	}
+}
+
 // requireNoTurnRows asserts EnqueueTurn wrote none of its three rows: no
 // "openwebui_turn" job, and no conversation link at all.
 func requireNoTurnRows(t *testing.T, env *turnTestEnv) {

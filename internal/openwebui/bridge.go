@@ -66,18 +66,28 @@ type turnJobPayload struct {
 // optional at the type level — see cmd/server's wiring). It runs inside
 // the transaction that just created entry.
 //
-// Steps (plan §5.1): (1) restrict to a loginable author's user_post; (2)
-// skip a post whose provider-facing text — entry.Body with every
-// @mention omitted (Issue #70) — is empty or whitespace-only, since
-// that is nothing for the provider to reply to; (3) require an enabled,
-// generation-enabled workspace with an active default model and the one
-// known secret_ref; (4) build entry's reply-tree path, skipping (not
-// failing) the post when it is ineligible for this bridge; (5) apply
-// ADR-0005 D4's branch rule; (6) enqueue the job and claim the link (new
-// branch) or reuse it (continuation); (7) treat a conflict on any of
-// those writes as "this turn is already enqueued" rather than an error,
-// so a retried delivery of the same entry-creation path never
-// double-enqueues.
+// Steps (plan §5.1, generalized by Issue #75 PR3's model routing, and
+// reordered by the Issue #75 rebase onto Issue #70/#80/#82's empty-body
+// skip so the two never race — see the ambiguous-vs-empty priority note
+// below): (1) restrict to a loginable author's user_post; (2) require an
+// enabled, generation-enabled workspace with the one known secret_ref
+// and a registered default model; (3) build entry's reply-tree path,
+// skipping (not failing) the post when it is ineligible for this
+// bridge; (4) resolve which model entry.Body @mentions, if any
+// (ResolveModelMentions) — two or more distinct mentioned models is the
+// "ambiguous_model_selection" case, which records a failed link/turn and
+// returns without enqueueing anything, checked *before* the empty-body
+// skip in step (5) so a mention-only post with an ambiguous selection is
+// always reported rather than silently dropped as empty; no mention
+// falls back to the default model, exactly one mention uses that model;
+// (5) for the non-ambiguous cases, skip a post whose provider-facing
+// text — entry.Body with every @mention omitted (Issue #70) — is empty
+// or whitespace-only, since that is nothing for the provider to reply
+// to; (6) apply ADR-0005 D4's branch rule against the resolved model
+// (SelectBranch); (7) enqueue the job and claim the link (new branch) or
+// reuse it (continuation); (8) treat a conflict on any of those writes
+// as "this turn is already enqueued" rather than an error, so a retried
+// delivery of the same entry-creation path never double-enqueues.
 func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry domain.Entry) error {
 	if entry.Kind != domain.EntryUserPost {
 		return nil
@@ -87,14 +97,6 @@ func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry doma
 		return fmt.Errorf("openwebui: bridge: resolve entry author: %w", err)
 	}
 	if !author.IsLoginable() {
-		return nil
-	}
-	if strings.TrimSpace(stripMentionTagsForProvider(entry.Body)) == "" {
-		// Nothing but @mentions (and/or whitespace): once the mentions
-		// are omitted for the provider (Issue #70), there is no text
-		// left to send as this turn's own message. Skip quietly, the
-		// same as every other enqueue-time gate below — this is not a
-		// failure, just nothing to start a turn over.
 		return nil
 	}
 
@@ -111,15 +113,12 @@ func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry doma
 	if workspace.DefaultModelID == nil {
 		return nil
 	}
-	model, err := repos.OpenWebUIModels.Get(ctx, *workspace.DefaultModelID)
+	defaultModel, err := repos.OpenWebUIModels.Get(ctx, *workspace.DefaultModelID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("openwebui: bridge: get default model: %w", err)
-	}
-	if !model.Active {
-		return nil
 	}
 	if workspace.SecretRef != SecretRefAPIKey {
 		return fmt.Errorf("openwebui: bridge: workspace secret_ref %q is not %q", workspace.SecretRef, SecretRefAPIKey)
@@ -134,7 +133,40 @@ func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry doma
 		return nil
 	}
 
-	continuation, err := SelectBranch(ctx, repos, entry)
+	matched, err := ResolveModelMentions(ctx, repos, workspace, entry.Body)
+	if err != nil {
+		return fmt.Errorf("openwebui: bridge: resolve model mentions: %w", err)
+	}
+
+	var model domain.OpenWebUIModel
+	switch len(matched) {
+	case 0:
+		model = defaultModel
+		if !model.Active {
+			return nil
+		}
+	case 1:
+		model = matched[0]
+	default:
+		b.logger.Debug("openwebui bridge: ambiguous model selection, recording failed and skipping enqueue",
+			"entry_id", entry.ID, "matched_models", len(matched))
+		return b.recordAmbiguousModelSelection(ctx, repos, entry, workspace, defaultModel.ID)
+	}
+
+	if strings.TrimSpace(stripMentionTagsForProvider(entry.Body)) == "" {
+		// Nothing but @mentions (and/or whitespace): once the mentions
+		// are omitted for the provider (Issue #70), there is no text
+		// left to send as this turn's own message. Skip quietly, the
+		// same as every other enqueue-time gate in this function — this
+		// is not a failure, just nothing to start a turn over. Checked
+		// only here, after the ambiguous-selection case above has had
+		// its chance to record its own explicit failure: a post that is
+		// only "@modelA @modelB" must surface as
+		// ambiguous_model_selection, not be swallowed by this check.
+		return nil
+	}
+
+	continuation, err := SelectBranch(ctx, repos, entry, model.ID)
 	if err != nil {
 		return fmt.Errorf("openwebui: bridge: select branch: %w", err)
 	}
@@ -228,6 +260,77 @@ func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry doma
 			return nil
 		}
 		return fmt.Errorf("openwebui: bridge: create turn: %w", err)
+	}
+	return nil
+}
+
+// recordAmbiguousModelSelection is EnqueueTurn's response to an owner
+// post @mentioning two or more distinct active models at once: rather
+// than guess between them, it records — for owner-facing visibility
+// only (cmd/openwebuictl, docs/operations/runbook.md) — a link and its
+// one turn, both immediately failed with
+// domain.FailureCategoryAmbiguousModelSelection, and enqueues no job at
+// all, so no provider call is ever made for this post.
+//
+// A link row requires a model_id (the composite foreign key backing
+// openwebui_workspaces.default_model_id, and the roadmap's "a branch
+// records the model it was started with", both assume a link is always
+// bound to exactly one real model). placeholderModelID — the workspace's
+// own configured default model, which by this point is already known to
+// exist — fills that requirement; it is never a claim about which model
+// the post was "really" for; the link never leaves the failed state, so
+// nothing ever reads placeholderModelID back as a decision.
+func (b *Bridge) recordAmbiguousModelSelection(ctx context.Context, repos domain.Repos, entry domain.Entry, workspace domain.OpenWebUIWorkspace, placeholderModelID string) error {
+	now := b.clock.Now().UTC()
+	linkID := domain.NewID()
+	branchID := domain.NewID()
+
+	link := domain.OpenWebUIConversationLink{
+		ID:               linkID,
+		ThreadID:         entry.ThreadID,
+		BranchID:         branchID,
+		WorkspaceID:      workspace.ID,
+		ModelID:          placeholderModelID,
+		ClaimedAt:        now,
+		LastTransitionAt: now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repos.OpenWebUILinks.Claim(ctx, link); err != nil {
+		if errors.Is(err, domain.ErrConflict) {
+			return nil
+		}
+		return fmt.Errorf("openwebui: bridge: claim link for ambiguous selection: %w", err)
+	}
+	if err := repos.OpenWebUILinks.MarkFailed(ctx, linkID, domain.FailureCategoryAmbiguousModelSelection, now); err != nil {
+		return fmt.Errorf("openwebui: bridge: mark link failed for ambiguous selection: %w", err)
+	}
+
+	turnID := domain.NewID()
+	turn := domain.OpenWebUITurnLink{
+		ID:             turnID,
+		LinkID:         linkID,
+		BranchID:       branchID,
+		LocalMessageID: entry.ID,
+		LocalParentID:  entry.ParentEntryID,
+		RequestID:      domain.NewID(),
+		Revision:       1,
+		Attempt:        0,
+		Status:         domain.TurnPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repos.OpenWebUITurnLinks.Create(ctx, turn); err != nil {
+		if errors.Is(err, domain.ErrConflict) {
+			return nil
+		}
+		return fmt.Errorf("openwebui: bridge: create turn for ambiguous selection: %w", err)
+	}
+	category := domain.FailureCategoryAmbiguousModelSelection
+	if err := repos.OpenWebUITurnLinks.RecordOutcome(ctx, turnID, domain.TurnOutcomeRecord{
+		Status: domain.TurnFailed, FailureCategory: &category,
+	}, now); err != nil {
+		return fmt.Errorf("openwebui: bridge: record ambiguous selection outcome: %w", err)
 	}
 	return nil
 }

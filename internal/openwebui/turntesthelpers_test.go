@@ -97,6 +97,38 @@ func (e *turnTestEnv) mustCreateReplyAs(t *testing.T, parent domain.Entry, autho
 	return entry
 }
 
+// mustCreateSecondModel registers a second active model in e's seeded
+// workspace, for tests that need two distinct models to mention or to
+// bind two different links to (cross-model reply/continuation, ambiguous
+// mention resolution). It mints its own VirtualActor row the same way
+// Registry.SyncCatalog's createSyncedModel does, but directly through
+// the repository rather than through a fake CatalogProvider — the
+// model's own registration mechanics are catalog.go's tests' concern,
+// not these callers'.
+func (e *turnTestEnv) mustCreateSecondModel(t *testing.T, externalModelID, actorSlug string) domain.OpenWebUIModel {
+	t.Helper()
+	now := e.clock.Now()
+	actor := domain.Actor{ID: domain.NewID(), Type: domain.ActorOpenWebUIModel, CreatedAt: now}
+	if err := e.db.Actors.Create(t.Context(), actor); err != nil {
+		t.Fatalf("create second model actor: %v", err)
+	}
+	model := domain.OpenWebUIModel{
+		ID:              domain.NewID(),
+		WorkspaceID:     e.workspace.ID,
+		ExternalModelID: externalModelID,
+		DisplayName:     externalModelID,
+		ActorSlug:       actorSlug,
+		ActorID:         actor.ID,
+		Active:          true,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := e.db.OpenWebUIModels.Create(t.Context(), model); err != nil {
+		t.Fatalf("create second model: %v", err)
+	}
+	return model
+}
+
 // mustReadyLink claims and confirms a ready conversation link for
 // threadID against e's seeded workspace/model, as if a completed
 // StartChat had produced it.

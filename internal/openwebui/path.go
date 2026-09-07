@@ -189,6 +189,33 @@ var mentionPattern = regexp.MustCompile(
 	`^@[A-Za-z0-9_]+(?:@(?:\[[0-9A-Za-z:]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)(?::[0-9]+)?)?`,
 )
 
+// mentionTokens returns every substring of body that qualifies as a
+// Misskey-style @mention token by mentionPattern, in the same
+// left-to-right, boundary-aware scan stripMentionTagsForProvider uses
+// (a mention immediately following a previous one, with no separating
+// byte, still counts) — the token text itself, not the stripped
+// output. ResolveModelMentions (Issue #75 PR3, mentionresolve.go) scans
+// with this to find @mention candidates for model routing without
+// duplicating stripMentionTagsForProvider's own boundary logic.
+func mentionTokens(body string) []string {
+	var tokens []string
+	justStrippedMention := false
+	for i := 0; i < len(body); {
+		c := body[i]
+		if c == '@' && (i == 0 || justStrippedMention || isMentionBoundaryByte(body[i-1])) {
+			if loc := mentionPattern.FindStringIndex(body[i:]); loc != nil {
+				tokens = append(tokens, body[i:i+loc[1]])
+				i += loc[1]
+				justStrippedMention = true
+				continue
+			}
+		}
+		i++
+		justStrippedMention = false
+	}
+	return tokens
+}
+
 // isMentionBoundaryByte reports whether b can never itself be part of a
 // username, i.e. b immediately preceding an "@" cannot make that "@"
 // the middle of a longer token (email-local-part@host and the like).
@@ -265,15 +292,23 @@ type LinkContinuation struct {
 	Link domain.OpenWebUIConversationLink
 }
 
-// SelectBranch applies ADR-0005 D4's branch rule: target continues a
-// ready link only when target's parent is exactly that link's current
-// head (its latest non-tombstoned succeeded turn's assistant entry) and
-// no non-tombstoned turn already replies to that same parent. Every
-// other case — a thread root, a reply to an earlier node, a second reply
-// to the same head, or a re-ask after a failed turn — returns (nil, nil)
-// so the caller starts a new branch instead, matching the roadmap's
-// "must not mix another branch into the same remote chat".
-func SelectBranch(ctx context.Context, repos domain.Repos, target domain.Entry) (*LinkContinuation, error) {
+// SelectBranch applies ADR-0005 D4's branch rule, generalized by Issue
+// #75 to a workspace that can have more than one active model: target
+// continues a ready link only when that link is bound to targetModelID
+// (the model @mention resolution — or the workspace default, absent any
+// — has already decided this post is for), target's parent is exactly
+// that link's current head (its latest non-tombstoned succeeded turn's
+// assistant entry), and no non-tombstoned turn already replies to that
+// same parent. Every other case — a thread root, a reply to an earlier
+// node, a second reply to the same head, a re-ask after a failed turn,
+// or a reply that @mentions a *different* model than the one its parent
+// link is bound to — returns (nil, nil) so the caller starts a new
+// branch instead, matching the roadmap's "must not mix another branch
+// into the same remote chat" and its cross-model-reply rule alike: a
+// reply addressed to a different model always reads as starting a fresh
+// conversation with it, never as continuing the original model's chat
+// under a new name.
+func SelectBranch(ctx context.Context, repos domain.Repos, target domain.Entry, targetModelID string) (*LinkContinuation, error) {
 	if target.ParentEntryID == nil {
 		return nil, nil
 	}
@@ -285,6 +320,9 @@ func SelectBranch(ctx context.Context, repos domain.Repos, target domain.Entry) 
 	}
 	for _, link := range links {
 		if link.State != domain.LinkReady {
+			continue
+		}
+		if link.ModelID != targetModelID {
 			continue
 		}
 		turns, err := repos.OpenWebUITurnLinks.ListByLink(ctx, link.ID)

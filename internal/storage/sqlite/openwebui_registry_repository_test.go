@@ -513,6 +513,19 @@ func TestOpenWebUIModelRepository_CreateGetAndLookups(t *testing.T) {
 	if _, err := db.OpenWebUIModels.GetByActor(t.Context(), "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("GetByActor(unknown) error = %v, want ErrNotFound", err)
 	}
+
+	bySlug, err := db.OpenWebUIModels.GetByActorSlug(t.Context(), w.ID, "model")
+	if err != nil || bySlug.ID != model.ID {
+		t.Fatalf("GetByActorSlug = %+v, err = %v, want model %q", bySlug, err, model.ID)
+	}
+	// The slug is only meaningful within its workspace, exactly like the
+	// external id.
+	if _, err := db.OpenWebUIModels.GetByActorSlug(t.Context(), other.ID, "model"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByActorSlug in another workspace error = %v, want ErrNotFound", err)
+	}
+	if _, err := db.OpenWebUIModels.GetByActorSlug(t.Context(), w.ID, "does-not-exist"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByActorSlug(unknown slug) error = %v, want ErrNotFound", err)
+	}
 }
 
 // TestOpenWebUIModelRepository_Create_UniquenessConstraints covers the
