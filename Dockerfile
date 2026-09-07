@@ -8,10 +8,24 @@
 FROM golang:1.25-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+# /go/pkg/mod (GOPATH/pkg/mod, GOPATH=/go in this base image) and
+# /root/.cache/go-build (GOCACHE, HOME=/root as builder runs as root) are
+# BuildKit cache mounts, not image layers: their contents persist across
+# builds (docker-publish.yml's cache-to: type=gha,mode=max exports them
+# alongside the ordinary layer cache) without ever being baked into this
+# stage's own filesystem — so, unlike the COPY layers above and below,
+# they keep working even though COPY . . invalidates on nearly every
+# commit. Every RUN below mounts the same /go/pkg/mod so `go build` sees
+# exactly what `go mod download` just populated (Issue #92).
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/miauthctl ./cmd/miauthctl
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/miauthctl ./cmd/miauthctl
 
 # Runtime: distroless static + nonroot (uid 65532). No shell, so /data
 # must already be writable by that uid when the container starts — see
