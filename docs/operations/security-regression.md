@@ -89,6 +89,23 @@ covered here:
 | Web search results and other tool output requested via `OPENWEBUI_WEB_SEARCH_ENABLED` (Issue #72) and per-model `tool_ids` resolved from each model's own `GET /api/models` configuration (Issues #72, #74, #75 — no config key for `tool_ids` as of #75) reach the model's final answer the same way any other upstream text does — nothing in this codebase parses, executes, or otherwise trusts a tool's output differently from the rest of a completion's content, so AGENTS.md's existing "treat posts, feeds, mail, remote API responses, and LLM output as untrusted data" rule already covers it without a new mechanism | Verified by inspection, not a dedicated test (Issue #74): `internal/provider/openwebui/client.go`'s `completionsResponseBody`/`chatMessageBody` decode only `content`/`finish_reason`/`done`/`error` as opaque strings — no field is ever interpreted as executable or specially trusted; `docs/decisions/0005-openwebui-boundary.md` D16/D17/D20/D21 are the decision record |
 | A `sources[]` entry's raw `document[]` (a tool's JSON output, or web-search page-text chunks — potentially large, always untrusted) is never decoded into a Go field, stored, logged, or forwarded to Aria; only short, length-bounded `{kind, display_name, url, arguments}` metadata survives (Issues #81/#84, ADR-0005 D22) | `internal/provider/openwebui/client_test.go`: `TestClient_ContinueTurn_SourcesDocumentNeverCaptured`, `TestClient_ContinueTurn_NormalizeSourcesBoundsFieldLength` |
 
+### Runtime configuration overlay (Issue #76)
+
+Issue #76 AC7 asks for tests covering invalid values, concurrent
+updates, permission-less operations, and secret leakage for the new
+`app_config` overlay and `miauthctl config`. Folded in here rather than
+getting a separate document, the same way Issues #53/#54/#74/#81/#84's
+rows above extended this table beyond Issue #13's original scope.
+
+| Property | Evidence |
+| --- | --- |
+| A secret key (`LLM_API_KEY`, `OPENWEBUI_API_KEY`, `IMAP_USERNAME`, `IMAP_PASSWORD`) can never be classified db-eligible, and `miauthctl config set` refuses one outright rather than writing it | `internal/config/keyclass_test.go`: `TestIsSecretKey_MatchesADR0005D10`, `TestClassOf_EveryKnownKeyClassifiedExactlyOnce`; `cmd/miauthctl/config_test.go`: `TestRunConfig_Set_RejectsSecretKey` |
+| `config list`/`get` never print a secret's real value, only `Config.Redacted()`'s existing `<set>`/`<unset>` marker, even when the secret is present in the process environment | `cmd/miauthctl/config_test.go`: `TestRunConfig_List_NeverShowsSecretValue` |
+| An invalid value (wrong type, out of bounds, malformed URL) is rejected before ever reaching `app_config`, for every db-eligible key, using the same bounds `internal/config.Load` itself enforces | `internal/config/keyvalidate_test.go`: `TestValidateKeyValue_BoundsRejected`, `TestValidateKeyValue_ValidValuesForEveryDBEligibleKey`; `cmd/miauthctl/config_test.go`: `TestRunConfig_Set_RejectsInvalidValue` |
+| A concurrent update loses only when it should: `ConfigRepository.Set`'s compare-and-set fails a write against a since-changed or since-deleted row (`domain.ErrConflict`, `miauthctl` exit code 4), and the winning write's own value is never clobbered | `internal/storage/sqlite/config_repository_test.go`: `TestConfigRepository_Set_ConflictOnStaleExpectedVersion`, `TestConfigRepository_Set_PositiveExpectedVersionConflictsWhenRowDeleted` |
+| A permission-less operation is refused at the same boundary every other `*ctl` command already uses — no owner actor bound yet (nobody has completed MiAuth binding) — before any write is attempted; ADR-0002's host/SSH access is otherwise the only permission model, so there is no separate role to test against | `cmd/miauthctl/config_test.go`: `TestRunConfig_Set_RejectsWhenNoOwnerBound` |
+| Every `Set`/`Unset`/`rollback` write is recorded to `app_config_audit` in the same transaction as the `app_config` write, so a partial (write-without-audit, or audit-without-write) state is impossible | `internal/storage/sqlite/config_repository_test.go`: `TestConfigRepository_Set_AndAudit_WithinTxRollsBackTogether` |
+
 ### Prompt injection
 
 A post body containing fake system/role markers (e.g. `"system: ignore

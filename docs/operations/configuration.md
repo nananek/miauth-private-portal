@@ -6,12 +6,15 @@ authentication flow added by Issues #5 and #28, the Aria/Misskey-compatible
 note API added by Issue #7, the durable job worker added by Issue #8, the
 LLM reply/follow-up generation added by Issue #9, the LLM post
 classification added by Issue #10, the RSS/Atom ingestion framework
-added by Issue #11, and the read-only IMAP mail ingestion added by
-Issue #12. The normative design for MiAuth is
+added by Issue #11, the read-only IMAP mail ingestion added by
+Issue #12, and the DB-backed runtime configuration overlay and
+`miauthctl config` added by Issue #76. The normative design for MiAuth is
 [`docs/decisions/0002-ssh-cli-auth.md`](../decisions/0002-ssh-cli-auth.md)
 (ADR-0002), for IMAP/mailfetch process isolation is
 [`docs/decisions/0003-imap-mailfetch-isolation.md`](../decisions/0003-imap-mailfetch-isolation.md)
-(ADR-0003), and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md)
+(ADR-0003), for the runtime configuration overlay is
+[`docs/decisions/0006-runtime-config-store.md`](../decisions/0006-runtime-config-store.md)
+(ADR-0006), and [`docs/compat/aria-v1.5.11.md`](../compat/aria-v1.5.11.md)
 documents Aria's wire contract; this document covers only the
 operational surface (config keys, routes, the operator tool), not the
 protocol design itself.
@@ -30,6 +33,16 @@ A missing config file is not an error. An unknown key, an invalid value, or
 a missing required field fails startup immediately with a redacted error
 that names the offending key and reason, never the value that was
 supplied.
+
+This three-step resolution is what ADR-0006 calls a key's *bootstrap*
+value. For a fixed subset of keys (the "db-eligible"/Tier A keys — see
+[Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
+below), a fourth, higher-priority source exists on top of these three: a
+row in the `app_config` table, written by `miauthctl config set` or by
+the automatic startup seed. Effective precedence for those keys is
+**DB (when a row exists) > environment variable > config file >
+default**; every other key is resolved exactly as above, with no DB
+layer at all.
 
 An environment variable that is *set but empty* (for example an unresolved
 `${VAR}` in a `docker-compose.yml` or systemd `EnvironmentFile`) is also a
@@ -140,6 +153,15 @@ settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
 
+29 of the keys above (Issue #76's Tier A) can additionally be read and
+changed at runtime, without a restart, via `miauthctl config` — see
+[Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
+below for the full list and how. Every other key remains env/config-file
+only, either because it is a secret (never stored in the database —
+ADR-0005 D10), a network destination or credential (ADR-0006's own
+carve-out), or a value only ever read once before any live-reloadable
+consumer exists.
+
 ## Production hardening
 
 When `APP_ENV=production`, `Config.Validate` additionally requires
@@ -172,6 +194,149 @@ those values in the first place (see
 `Config.Redacted()` is the one place that decides which config fields are
 safe to print. Authentication secrets are not configuration fields in the
 SSH+CLI design.
+
+## Runtime configuration overlay (`miauthctl config`)
+
+Issue #76 (ADR-0006) adds a DB-backed overlay on top of the file/env/
+default resolution above, for a fixed subset of keys, and a `miauthctl
+config` subcommand to read and change it. The goal is narrow: change a
+handful of frequently-tuned values (an RSS feed list, a poll interval, an
+LLM model) without a restart, with an audit trail — not to move every
+setting into the database.
+
+### The three-way key classification
+
+Every known key (`internal/config.ClassOf`, `internal/config/keyclass.go`
+is the single source of truth) falls into exactly one class:
+
+- **secret** — `LLM_API_KEY`, `OPENWEBUI_API_KEY`, `IMAP_USERNAME`,
+  `IMAP_PASSWORD`. Never written to `app_config` at all (ADR-0005 D10):
+  `miauthctl config set/import` reject these keys outright, so "cannot be
+  stored" is a property of the schema, not a check every caller must
+  remember.
+- **db-eligible** (Tier A, 29 keys) — may have an `app_config` row that
+  overrides the bootstrap value, reloaded live by the component that
+  consumes it. Listed by component below.
+- **bootstrap-only** — every other key: process topology, every network
+  destination and credential, the five `*_ENABLED` subsystem-construction
+  flags, and anything read only once before a live-reloadable consumer
+  exists. Stays env/config-file-only exactly as before this issue.
+
+The 29 db-eligible keys, grouped by the component that reloads them:
+
+| Component | Keys |
+| --- | --- |
+| `internal/jobs.Manager` | `JOBS_POLL_INTERVAL`, `JOBS_CLAIM_BATCH_SIZE`, `JOBS_LEASE_DURATION`, `JOBS_LEASE_RENEW_MARGIN`, `JOBS_MAX_ATTEMPTS`, `JOBS_BACKOFF_BASE`, `JOBS_BACKOFF_MAX`, `JOBS_MAX_CONCURRENT`, `JOBS_SHUTDOWN_GRACE_PERIOD` |
+| `internal/ingest.Scheduler` (RSS and IMAP share this type) | `RSS_POLL_INTERVAL`, `RSS_FEED_URLS`, `RSS_SUMMARY_MAX_CHARS`, `IMAP_POLL_INTERVAL` |
+| IMAP fetch job handler (`internal/ingest/imap.Adapter`) | `IMAP_FETCH_TIMEOUT`, `IMAP_MAX_MESSAGE_BYTES`, `IMAP_SNIPPET_MAX_CHARS`, `IMAP_STORE_FULL_BODY`, `IMAP_FULL_BODY_MAX_CHARS` |
+| `internal/llmreply.Service` / `internal/llmclassify.Service` | `LLM_MODEL`, `LLM_TIMEOUT`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_THREAD_CONTEXT_MAX_MESSAGES`, `LLM_THREAD_CONTEXT_MAX_CHARS`, `LLM_CLASSIFICATION_MODEL`, `LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS`, `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES`, `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS` |
+| Open WebUI catalog scheduler / turn job | `OPENWEBUI_CATALOG_SYNC_INTERVAL`, `OPENWEBUI_WEB_SEARCH_ENABLED` |
+
+Notably absent, on purpose: `JOBS_WORKER_ID` (identifies this process's
+own in-flight lease ownership — changing it mid-run would make an
+existing lease's owner ambiguous), every network-destination/credential
+key (`OPENWEBUI_BASE_URL`, `IMAP_HOST`, `LLM_BASE_URL`, ...: switching a
+connection target at runtime without repeating the SSRF-allowlist
+scrutiny `Validate` applies once at startup is out of scope), the five
+`*_ENABLED` flags (toggling one would require dynamically starting and
+stopping goroutines `cmd/server` only ever builds once — a materially
+larger design problem than reloading a tunable, left for a future issue
+if ever needed), and `OPENWEBUI_GENERATION_ENABLED` (already
+independently live via the `openwebui_workspaces` row —
+`Registry.Seed`/`SetGenerationEnabled` — outside this mechanism
+entirely).
+
+### `miauthctl config` subcommands
+
+```sh
+go run ./cmd/miauthctl config list [--json]
+go run ./cmd/miauthctl config get [--json] <key>
+go run ./cmd/miauthctl config set [--dry-run] <key> <value>
+go run ./cmd/miauthctl config unset <key>
+go run ./cmd/miauthctl config validate <key> <value>
+go run ./cmd/miauthctl config validate --file <path>
+go run ./cmd/miauthctl config export [--json]
+go run ./cmd/miauthctl config import [--from-env] [--file <path>]
+go run ./cmd/miauthctl config history [--json] <key>
+go run ./cmd/miauthctl config rollback --to-version <N> <key>
+```
+
+`list`/`get`/`export` never print a secret's real value: a secret key can
+never have an `app_config` row (see classification above), so its
+displayed value is always `Config.Redacted()`'s existing `<set>`/`<unset>`
+marker, the same one every other `miauthctl`/log output already uses.
+`list`/`get` additionally show each key's *source* — `db`, `env`,
+`file`, or `default` — so an operator can tell at a glance whether a
+value came from the database overlay or the bootstrap resolution.
+
+Every `set`/`unset`/`rollback` is attributed to the bound owner actor
+(ADR-0002: whoever can SSH to the host and run the CLI) and recorded to
+an append-only audit table (`app_config_audit`) in the same transaction
+as the `app_config` write, so a change and its audit trail can never
+disagree. `set` is optimistically locked on the row's current version: a
+concurrent `set` racing another one fails with exit code 4 rather than
+silently clobbering it (see [Exit codes](#exit-codes) below).
+
+`config import`'s three mutually exclusive sources: no flag imports the
+currently resolved bootstrap config (file+env+default merged — the same
+values the automatic startup seed below would use); `--from-env` imports
+only what is explicitly set in the process environment right now,
+ignoring the config file and defaults; `--file <path>` imports a given
+dotenv-style file directly, for carrying another host's settings over
+when moving to a new one. In every mode, a key with an existing
+`app_config` row is left untouched — import only fills in what is
+missing.
+
+#### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | Usage error, or another general failure (including: no owner actor is bound yet). |
+| `2` | Validation error — an invalid value, or a key that is a secret or otherwise not db-eligible. |
+| `3` | An unrecognized key, or (for `unset`/`rollback`) a key/version with nothing to act on. |
+| `4` | A concurrent update: the row's version changed since it was last read. Re-read with `config get` and retry. |
+
+### Migration from `.env`/environment to the database
+
+Every server startup idempotently seeds every db-eligible key that has no
+`app_config` row yet, from that startup's own resolved bootstrap value —
+an existing row is never touched. `miauthctl config import` (above) is
+the same operation, run manually.
+
+**This has one consequence worth calling out explicitly, because it is
+easy to be surprised by:** because a key gets an `app_config` row from
+its very first startup — even when that value is empty (an unset/
+disabled feature's own default) — and the DB overlay's precedence is
+*DB-when-a-row-exists* over environment, **a key becomes "sticky" the
+moment it is first seeded.** From then on, editing `.env` or the
+process environment for that key has **no effect** until an operator
+also runs `miauthctl config set` (to push the new value into the
+database) or `miauthctl config unset` (to remove the DB row and fall
+back to the bootstrap resolution again). This is the intended,
+approved behavior of the automatic seed — not a bug — but it is the
+single most likely point of operator confusion this feature introduces:
+*"I changed `LLM_MODEL` in `.env` and restarted, and nothing changed"*
+almost always means that key already has a stale `app_config` row.
+`miauthctl config get <key>` shows `source: db` in exactly that
+situation; `miauthctl config unset <key>` resolves it.
+
+### RSS feed additions and removals take effect without a restart
+
+`RSS_FEED_URLS` is db-eligible specifically because it is this issue's
+own motivating example. `external_sources` gained an `active` column
+(migration 0023) so this could be done safely: on every
+`internal/ingest.Scheduler` tick, `ExternalSourceRepository.
+ReconcileFromConfig` reconciles the *current* (DB-overlaid) feed list
+against existing rows — a new URL is created (or reactivated if it was
+previously removed), and a URL no longer listed is deactivated. An
+inactive source **is never deleted**: this service's append-only-history
+convention means everything it already fetched, and every timeline
+`Entry` promoted from it, survives untouched — removing a feed only
+stops future polling of it. IMAP's single mailbox source is reconciled
+through the same method for consistency, but since `IMAP_HOST`/`PORT`/
+`MAILBOX` stay bootstrap-only, its own reconciliation only ever runs once,
+at startup.
 
 ## HTTP routing
 
@@ -429,6 +594,14 @@ Worker liveness is not registered as a separate health checker: readiness
 already verifies the shared SQLite dependency, while queue inactivity by
 itself is not a reliable failure signal.
 
+Every `JOBS_*` key except `JOBS_WORKER_ID` is Issue #76 db-eligible:
+`miauthctl config set` takes effect on the Manager's next poll
+(`JOBS_POLL_INTERVAL` resets the poll ticker itself), with no restart —
+see [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config).
+`JOBS_MAX_CONCURRENT` required replacing the worker's fixed-capacity
+semaphore channel with an atomic counter, since a channel's capacity
+cannot change after creation.
+
 ## LLM reply generation
 
 Issue #9 generates versioned LLM replies and follow-up questions to a
@@ -499,6 +672,15 @@ Every provider-classified error is logged only by its `Category`
 constant; the request body, response body, and any upstream error text
 (which can echo request content back) never reach a log line, matching
 this service's existing "never log LLM prompts or response bodies" rule.
+
+`LLM_MODEL`, `LLM_TIMEOUT`, `LLM_MAX_OUTPUT_TOKENS`, and
+`LLM_THREAD_CONTEXT_MAX_MESSAGES`/`_MAX_CHARS` are Issue #76 db-eligible:
+`Handle` resolves the live value once per job, and the same resolved
+model is what both the outbound request and the recorded
+`LLMGeneration.Model` use, so the two can never disagree — see
+[Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config).
+The equivalent `LLM_CLASSIFICATION_*` keys work the same way for post
+classification below.
 
 ### Replying to a follow-up question
 
@@ -704,18 +886,23 @@ on `Jobs.Enqueue` rather than double-enqueueing. `cmd/server` runs it
 alongside the HTTP server and job worker under the same shutdown context
 only while `RSS_ENABLED=true`.
 
-### Startup seeding
+### Startup seeding and live reconciliation
 
 While `RSS_ENABLED=true`, `cmd/server` seeds one `external_sources` row
-(`kind="rss"`) per `RSS_FEED_URLS` entry at startup via
-`ExternalSourceRepository.EnsureFromConfig`, which is idempotent: a
-`(kind, uri)` pair already present is left untouched (including its
-`display_name`, `cursor`, and failure-tracking fields), never modified or
-re-seeded. **To add a source**, add its URL to `RSS_FEED_URLS` and restart
-the server; the next startup seeds it and the scheduler begins polling it
-on its next tick. There is no HTTP endpoint or CLI command for managing
-sources — like `LLM_MODEL` and the other single-owner settings in this
-document, source configuration is env/config-file only.
+(`kind="rss"`) per `RSS_FEED_URLS` entry at startup, and the scheduler
+reconciles the same set on every subsequent tick, via
+`ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a, replacing
+the old create-only `EnsureFromConfig`): a `(kind, uri)` pair already
+present is left untouched (including its `display_name`, `cursor`, and
+failure-tracking fields, never modified or re-seeded), a new one is
+created, and one no longer listed is deactivated (`active=0`), never
+deleted. Since `RSS_FEED_URLS` is one of Issue #76's db-eligible keys,
+**adding or removing a feed URL via `miauthctl config set/unset
+RSS_FEED_URLS` takes effect on the scheduler's next tick, no restart
+required** — see
+[Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
+above. Editing `.env`/the environment directly and restarting still works
+too, exactly as before this issue.
 
 ### Untrusted external content
 
@@ -844,6 +1031,13 @@ adapter, and `docs/compat/aria-v1.5.11.md` for the per-kind `Body` shapes.
   Rotate them the same way as any other config-file/environment secret;
   Issue #13's release-gate secret-rotation runbook is expected to note
   this alongside the LLM/other credentials it already covers.
+- `IMAP_FETCH_TIMEOUT`, `IMAP_MAX_MESSAGE_BYTES`, `IMAP_SNIPPET_MAX_CHARS`,
+  `IMAP_STORE_FULL_BODY`, and `IMAP_FULL_BODY_MAX_CHARS` are Issue #76
+  db-eligible and reloaded fresh on every fetch by
+  `internal/ingest/imap.Adapter`; `IMAP_HOST`/`PORT`/`TLS_MODE`/
+  `USERNAME`/`PASSWORD`/`MAILBOX` stay bootstrap-only (they name a
+  network destination or a credential) — see
+  [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config).
 
 ### Deploying `cmd/mailfetch`
 
