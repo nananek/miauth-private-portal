@@ -66,6 +66,13 @@ as contract:
 - tool/function/MCP execution, `/api/chat/completed` outlet semantics beyond
   "it echoes the posted body", and attachment/file handling.
 
+Issue #72 adds `features.web_search`/`tool_ids` as opt-in request fields
+based on the pinned backend's own source (not a live-instance observation);
+the actual behavior of a real search backend, a real MCP Tool Server,
+tool-call error handling, and `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`-
+bounded loop latency against a real target instance remain **要実機確認**,
+tracked in Issue #50.
+
 ## Endpoint classification and allowlist
 
 | Endpoint | Classification | Why | Boundary note |

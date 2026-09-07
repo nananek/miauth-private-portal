@@ -69,6 +69,16 @@ type Config struct {
 	// production deployment never sets it: OPENWEBUI_BASE_URL is
 	// validated as an HTTPS origin before a Client is ever built.
 	AllowInsecureHTTPForTesting bool
+	// WebSearchEnabled sets features.web_search on every completions
+	// call this Client makes (Issue #72). false (the default) sends no
+	// "features" key at all, identical to this client's pre-#72 shape.
+	WebSearchEnabled bool
+	// ToolIDs is sent verbatim as tool_ids on every completions call
+	// this Client makes (Issue #72) — Open WebUI tool ids this
+	// deployment's dedicated adapter account is allowed to invoke (a
+	// builtin like "web_search", or an MCP Tool Server's own
+	// "server:mcp:<id>"). Nil/empty sends no "tool_ids" key at all.
+	ToolIDs []string
 }
 
 // Client calls the three endpoints docs/compat/openwebui-0.11.3.md
@@ -81,6 +91,8 @@ type Client struct {
 	maxResponseBytes int64
 	maxRequestBytes  int64
 	httpClient       *safehttp.Client
+	webSearchEnabled bool
+	toolIDs          []string
 }
 
 // NewClient builds a Client against cfg. It errors if BaseURL is not a
@@ -113,6 +125,8 @@ func NewClient(cfg Config) (*Client, error) {
 			AllowInsecureHTTP: cfg.AllowInsecureHTTPForTesting,
 			AllowIPForTesting: cfg.AllowIPForTesting,
 		}),
+		webSearchEnabled: cfg.WebSearchEnabled,
+		toolIDs:          cfg.ToolIDs,
 	}, nil
 }
 
@@ -211,6 +225,23 @@ type completionsRequestBody struct {
 	UserMessage     userMessageBody     `json:"user_message"`
 	Messages        []wireMessage       `json:"messages"`
 	BackgroundTasks backgroundTasksBody `json:"background_tasks"`
+	// Features and ToolIDs are Issue #72's opt-in: both omitted (nil/
+	// empty) by default, which is byte-for-byte the same request shape
+	// this client already sent — Open WebUI's own `features.pop(...) or
+	// {}` and `tool_ids = form_data.pop('tool_ids', None)` treat an
+	// absent key exactly like an empty/false one, so there is no
+	// behavior change until an operator opts in via config.
+	Features *featuresBody `json:"features,omitempty"`
+	ToolIDs  []string      `json:"tool_ids,omitempty"`
+}
+
+// featuresBody is the subset of Open WebUI's `features` request object
+// this adapter sets. Open WebUI recognizes several more keys (voice,
+// memory, image_generation, code_interpreter) — Issue #72's scope is
+// web_search only; add more only when a future issue's own request
+// traces the same client-caller behavior for one of them.
+type featuresBody struct {
+	WebSearch bool `json:"web_search"`
 }
 
 type userMessageBody struct {
@@ -267,6 +298,12 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 		},
 		Messages:        wireMessages,
 		BackgroundTasks: backgroundTasksBody{},
+	}
+	if c.webSearchEnabled {
+		reqBody.Features = &featuresBody{WebSearch: true}
+	}
+	if len(c.toolIDs) > 0 {
+		reqBody.ToolIDs = c.toolIDs
 	}
 
 	data, err := c.post(ctx, openwebui.PhaseTurn, "/api/chat/completions", reqBody)

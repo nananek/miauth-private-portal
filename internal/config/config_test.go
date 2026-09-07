@@ -1545,6 +1545,50 @@ func TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled(t *testing.T) {
 	}
 }
 
+// TestLoad_OpenWebUIWebSearchEnabledDefaultsFalse backs Issue #72:
+// OPENWEBUI_WEB_SEARCH_ENABLED is a plain opt-in bool defaulting to
+// false, the same shape OPENWEBUI_GENERATION_ENABLED has.
+func TestLoad_OpenWebUIWebSearchEnabledDefaultsFalse(t *testing.T) {
+	def, err := loadWithOpenWebUI(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if def.OpenWebUI.WebSearchEnabled {
+		t.Error("WebSearchEnabled default = true, want false")
+	}
+
+	cfg, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIWebSearchEnabled: "true"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.OpenWebUI.WebSearchEnabled {
+		t.Error("WebSearchEnabled = false, want true")
+	}
+}
+
+// TestLoad_OpenWebUIToolIDsParsesCommaSeparatedList backs Issue #72:
+// OPENWEBUI_TOOL_IDS is a comma-separated list of opaque tokens, trimmed
+// of surrounding whitespace, with no format validation (this service has
+// no way to check a tool id against Open WebUI's own registry).
+func TestLoad_OpenWebUIToolIDsParsesCommaSeparatedList(t *testing.T) {
+	def, err := loadWithOpenWebUI(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if def.OpenWebUI.ToolIDs != nil {
+		t.Errorf("ToolIDs default = %v, want nil", def.OpenWebUI.ToolIDs)
+	}
+
+	cfg, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIToolIDs: "web_search, server:mcp:example ,,"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"web_search", "server:mcp:example"}
+	if !reflect.DeepEqual(cfg.OpenWebUI.ToolIDs, want) {
+		t.Errorf("ToolIDs = %v, want %v", cfg.OpenWebUI.ToolIDs, want)
+	}
+}
+
 // TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled covers §4's five
 // client-side bounds: each must reject an out-of-range value once
 // OPENWEBUI_ENABLED=true (mirroring how RSS/IMAP's analogous byte/count

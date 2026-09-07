@@ -286,6 +286,93 @@ func TestClient_ContinueTurn_LinearAgainstFixtures(t *testing.T) {
 	}
 }
 
+// --- Issue #72: opt-in web search / tool_ids ---
+
+// TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys backs
+// plan §7's "existing fixture-matching tests keep passing" requirement:
+// with Config.WebSearchEnabled/ToolIDs left at their zero values, the
+// completions request body must carry neither a "features" nor a
+// "tool_ids" key at all, not merely false/empty values — the exact
+// request shape this client sent before Issue #72.
+func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawKeys map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &sawKeys); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if _, ok := sawKeys["features"]; ok {
+		t.Error(`completions request has a "features" key, want it entirely absent when WebSearchEnabled is false`)
+	}
+	if _, ok := sawKeys["tool_ids"]; ok {
+		t.Error(`completions request has a "tool_ids" key, want it entirely absent when ToolIDs is empty`)
+	}
+}
+
+// TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth backs
+// plan §1.3: an operator who sets WebSearchEnabled/ToolIDs gets
+// features.web_search=true and tool_ids sent verbatim on every
+// completions call.
+func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawBody struct {
+		Features *struct {
+			WebSearch bool `json:"web_search"`
+		} `json:"features"`
+		ToolIDs []string `json:"tool_ids"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &sawBody); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.WebSearchEnabled = true
+		cfg.ToolIDs = []string{"web_search", "server:mcp:example"}
+	})
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if sawBody.Features == nil || !sawBody.Features.WebSearch {
+		t.Errorf("completions request features = %+v, want {web_search: true}", sawBody.Features)
+	}
+	wantToolIDs := []string{"web_search", "server:mcp:example"}
+	if !reflect.DeepEqual(sawBody.ToolIDs, wantToolIDs) {
+		t.Errorf("completions request tool_ids = %v, want %v", sawBody.ToolIDs, wantToolIDs)
+	}
+}
+
 // --- error classification ---
 
 func TestClient_StartChat_ChatsNewReturns401_AuthFailed(t *testing.T) {
