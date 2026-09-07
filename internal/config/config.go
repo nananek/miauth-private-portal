@@ -312,6 +312,13 @@ type OpenWebUIConfig struct {
 	// null means "local to this service", so reusing the local host for
 	// a remote-presented actor would make the two indistinguishable.
 	PresentationHost string
+	// CatalogSyncInterval mirrors OPENWEBUI_CATALOG_SYNC_INTERVAL (Issue
+	// #75): how often Registry.SyncCatalog re-lists GET /api/models and
+	// reconciles the registry, independent of GenerationEnabled — catalog
+	// sync keeps the VirtualActor projection and search results in step
+	// with the provider's own model list even on a deployment that never
+	// turns outbound generation on.
+	CatalogSyncInterval time.Duration
 
 	// The fields below are Issue #53's (OWUI-B) client-side bounds and
 	// generation gate. They are parsed and validated from this PR
@@ -625,6 +632,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	// (ADR-0005 D9), so this must not case-fold or otherwise reshape it.
 	cfg.OpenWebUI.DefaultModelID = strings.TrimSpace(parseOptionalString(values, KeyOpenWebUIDefaultModelID, ""))
 	cfg.OpenWebUI.PresentationHost = parseOptionalString(values, KeyOpenWebUIPresentationHost, "")
+	cfg.OpenWebUI.CatalogSyncInterval = parseOptionalDuration(values, KeyOpenWebUICatalogSyncInterval, 10*time.Minute, &errs)
 	cfg.OpenWebUI.GenerationEnabled = parseOptionalBool(values, KeyOpenWebUIGenerationEnabled, false, &errs)
 	cfg.OpenWebUI.Timeout = parseOptionalDuration(values, KeyOpenWebUITimeout, 120*time.Second, &errs)
 	cfg.OpenWebUI.MaxResponseBytes = parseOptionalInt64(values, KeyOpenWebUIMaxResponseBytes, 4_194_304, openWebUIMaxResponseBytesMin, &errs)
@@ -782,6 +790,7 @@ func (c Config) Validate() error {
 			errs = append(errs, FieldError{Key: KeyOpenWebUIDefaultModelID, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
 		}
 		validateOpenWebUIPresentationHost(&errs, KeyOpenWebUIPresentationHost, c.OpenWebUI.PresentationHost, c.Auth.LocalOrigin)
+		validatePositiveDuration(&errs, KeyOpenWebUICatalogSyncInterval, c.OpenWebUI.CatalogSyncInterval)
 		validatePositiveDuration(&errs, KeyOpenWebUITimeout, c.OpenWebUI.Timeout)
 		validateInt64Min(&errs, KeyOpenWebUIMaxResponseBytes, c.OpenWebUI.MaxResponseBytes, openWebUIMaxResponseBytesMin)
 		validateInt64Min(&errs, KeyOpenWebUIMaxRequestBytes, c.OpenWebUI.MaxRequestBytes, openWebUIMaxRequestBytesMin)
@@ -885,10 +894,11 @@ func (c Config) Redacted() map[string]string {
 		// set is shown. The database stores this key's *name* as a
 		// workspace's secret_ref (ADR-0005 D10), never the value shown
 		// here as <set>.
-		KeyOpenWebUIAPIKey:           redactedSetOrUnset(c.OpenWebUI.APIKey),
-		KeyOpenWebUIWorkspaceName:    c.OpenWebUI.WorkspaceName,
-		KeyOpenWebUIDefaultModelID:   c.OpenWebUI.DefaultModelID,
-		KeyOpenWebUIPresentationHost: c.OpenWebUI.PresentationHost,
+		KeyOpenWebUIAPIKey:              redactedSetOrUnset(c.OpenWebUI.APIKey),
+		KeyOpenWebUIWorkspaceName:       c.OpenWebUI.WorkspaceName,
+		KeyOpenWebUIDefaultModelID:      c.OpenWebUI.DefaultModelID,
+		KeyOpenWebUIPresentationHost:    c.OpenWebUI.PresentationHost,
+		KeyOpenWebUICatalogSyncInterval: c.OpenWebUI.CatalogSyncInterval.String(),
 
 		KeyOpenWebUIGenerationEnabled:  strconv.FormatBool(c.OpenWebUI.GenerationEnabled),
 		KeyOpenWebUITimeout:            c.OpenWebUI.Timeout.String(),

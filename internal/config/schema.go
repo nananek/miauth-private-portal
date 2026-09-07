@@ -84,6 +84,10 @@ const (
 	KeyOpenWebUIDefaultModelID   = "OPENWEBUI_DEFAULT_MODEL_ID"
 	KeyOpenWebUIPresentationHost = "OPENWEBUI_PRESENTATION_HOST"
 
+	// KeyOpenWebUICatalogSyncInterval is Issue #75's model catalog sync
+	// interval (Registry.SyncCatalog, run by CatalogScheduler).
+	KeyOpenWebUICatalogSyncInterval = "OPENWEBUI_CATALOG_SYNC_INTERVAL"
+
 	// The five keys below are Issue #53's (OWUI-B) client-side bounds and
 	// generation gate. They exist from this PR (Issue #53 PR1) on, but
 	// nothing reads them yet: no bridge, job, or provider adapter is
@@ -173,6 +177,7 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIWorkspaceName,
 	KeyOpenWebUIDefaultModelID,
 	KeyOpenWebUIPresentationHost,
+	KeyOpenWebUICatalogSyncInterval,
 	KeyOpenWebUIGenerationEnabled,
 	KeyOpenWebUITimeout,
 	KeyOpenWebUIMaxResponseBytes,

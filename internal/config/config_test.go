@@ -76,12 +76,13 @@ func defaultIMAPConfig() IMAPConfig {
 
 func defaultOpenWebUIConfig() OpenWebUIConfig {
 	return OpenWebUIConfig{
-		Enabled:            false,
-		WorkspaceName:      "Open WebUI",
-		Timeout:            120 * time.Second,
-		MaxResponseBytes:   4_194_304,
-		MaxRequestBytes:    1_048_576,
-		MaxContextMessages: 100,
+		Enabled:             false,
+		WorkspaceName:       "Open WebUI",
+		CatalogSyncInterval: 10 * time.Minute,
+		Timeout:             120 * time.Second,
+		MaxResponseBytes:    4_194_304,
+		MaxRequestBytes:     1_048_576,
+		MaxContextMessages:  100,
 	}
 }
 
@@ -1380,17 +1381,18 @@ func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := OpenWebUIConfig{
-		Enabled:            true,
-		BaseURL:            "https://openwebui.example.net",
-		AllowedOrigins:     []string{"https://openwebui.example.net"},
-		APIKey:             "sk-openwebui-secret",
-		WorkspaceName:      "Home Instance",
-		DefaultModelID:     "gpt-oss:20b",
-		PresentationHost:   "openwebui.example.net",
-		Timeout:            120 * time.Second,
-		MaxResponseBytes:   4_194_304,
-		MaxRequestBytes:    1_048_576,
-		MaxContextMessages: 100,
+		Enabled:             true,
+		BaseURL:             "https://openwebui.example.net",
+		AllowedOrigins:      []string{"https://openwebui.example.net"},
+		APIKey:              "sk-openwebui-secret",
+		WorkspaceName:       "Home Instance",
+		DefaultModelID:      "gpt-oss:20b",
+		PresentationHost:    "openwebui.example.net",
+		CatalogSyncInterval: 10 * time.Minute,
+		Timeout:             120 * time.Second,
+		MaxResponseBytes:    4_194_304,
+		MaxRequestBytes:     1_048_576,
+		MaxContextMessages:  100,
 	}
 	if !reflect.DeepEqual(cfg.OpenWebUI, want) {
 		t.Errorf("OpenWebUI = %+v, want %+v", cfg.OpenWebUI, want)
@@ -1594,6 +1596,7 @@ func TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled(t *testing.T) {
 		key  string
 		val  string
 	}{
+		{"catalog sync interval not positive", KeyOpenWebUICatalogSyncInterval, "0s"},
 		{"timeout not positive", KeyOpenWebUITimeout, "0s"},
 		{"max response bytes below floor", KeyOpenWebUIMaxResponseBytes, "1"},
 		{"max request bytes below floor", KeyOpenWebUIMaxRequestBytes, "0"},
