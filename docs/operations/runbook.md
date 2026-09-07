@@ -40,6 +40,43 @@ it took effect — a rejected config value fails startup immediately (see
 does not come back up almost always means the new config is invalid, not
 that something else broke.
 
+## Changing a runtime setting without a restart
+
+29 configuration keys (RSS feed list and poll interval, job worker
+tuning, LLM model/timeout/context bounds, Open WebUI catalog sync
+interval and web search) can be changed live, without stopping the
+process, via `miauthctl config` — see
+[configuration.md](configuration.md#runtime-configuration-overlay-miauthctl-config)
+for the full key list and how each one is reloaded. The everyday
+sequence:
+
+```sh
+go run ./cmd/miauthctl config get RSS_POLL_INTERVAL          # check the current value and its source (db/env/file/default)
+go run ./cmd/miauthctl config set RSS_POLL_INTERVAL 5m       # change it — no restart needed
+go run ./cmd/miauthctl config history RSS_POLL_INTERVAL      # see who changed what, and when
+go run ./cmd/miauthctl config unset RSS_POLL_INTERVAL        # revert to whatever .env/the environment/the default would give
+go run ./cmd/miauthctl config rollback --to-version 2 RSS_POLL_INTERVAL  # or roll back to a specific prior value
+```
+
+**A setting `.env`/environment-variable change that "does not seem to
+take effect" after a restart is the single most common surprise here.**
+Every db-eligible key gets an `app_config` database row automatically on
+this deployment's very first startup (even if that value is empty), and
+the database, once a row exists, always wins over the environment. So
+after that first startup, editing `.env` for one of these 29 keys and
+restarting has **no effect** by itself — first check
+`miauthctl config get <key>`: if `source: db`, either
+`miauthctl config set <key> <new value>` (push the new value into the
+database) or `miauthctl config unset <key>` (remove the DB row so
+`.env`/the environment take over again) before restarting.
+
+`miauthctl config set` refuses a secret key (`LLM_API_KEY`,
+`OPENWEBUI_API_KEY`, `IMAP_USERNAME`, `IMAP_PASSWORD`) and a network-
+destination/credential key (`OPENWEBUI_BASE_URL`, `IMAP_HOST`,
+`LLM_BASE_URL`, ...) outright — those remain `.env`/environment-only and
+still require a restart, exactly as before this feature; see "Secret
+rotation" below.
+
 ## Incident response / troubleshooting
 
 - **`/readyz` returns 503**: the process has either not finished startup
@@ -525,3 +562,10 @@ documented restore procedure are Issue #13 AC6's evidence. See
 `backupctl verify` usage and the manual restore steps — this runbook's
 "Incident response" section above only points to it for the corruption/
 restore scenario, rather than duplicating the procedure.
+
+Issue #76's `app_config`/`app_config_audit` tables (the runtime
+configuration overlay above) live in the same SQLite database as
+everything else, so this same backup/restore procedure already covers
+them; no separate export is needed beyond `miauthctl config export`,
+which is for moving values to a *different* host, not for disaster
+recovery.

@@ -96,6 +96,26 @@ func TestRunConfig_Set_RejectsBootstrapOnlyKey(t *testing.T) {
 	}
 }
 
+// TestRunConfig_Set_RejectsWhenNoOwnerBound backs Issue #76 AC7's
+// "権限なし操作" (permission-less operation) test: config subcommands
+// attribute every write to the bound owner actor (ADR-0002), so a host
+// with no owner bound yet — nobody has completed MiAuth binding — must
+// refuse the write rather than attributing it to no one.
+func TestRunConfig_Set_RejectsWhenNoOwnerBound(t *testing.T) {
+	_, db, _ := setupCLI(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, err := runExitCode(t, []string{"config", "set", "JOBS_MAX_ATTEMPTS", "5"})
+	if err == nil {
+		t.Fatal("set with no owner actor bound succeeded, want an error")
+	}
+	if code != exitUsage {
+		t.Errorf("exit code = %d, want %d (exitUsage)", code, exitUsage)
+	}
+}
+
 func TestRunConfig_Set_RejectsUnknownKey(t *testing.T) {
 	setupConfigCLI(t)
 	code, _, err := runExitCode(t, []string{"config", "set", "NOT_A_REAL_KEY", "1"})
