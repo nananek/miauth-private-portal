@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -78,16 +79,21 @@ type RegistryConfig struct {
 	// key, never the key itself. Seed rejects anything but
 	// SecretRefAPIKey.
 	SecretRef string
-	// WorkspaceName, PresentationHost, ModelDisplayName and ModelSlug
-	// are presentation values Seed reconciles onto the existing rows.
+	// WorkspaceName and PresentationHost are presentation values Seed
+	// reconciles onto the existing workspace row.
 	WorkspaceName    string
 	PresentationHost string
-	ModelDisplayName string
-	ModelSlug        string
 	// DefaultModelID is the provider's own opaque model id. It is the
 	// identity Seed reconciles a model row on, so changing it registers
 	// a different model rather than renaming this one.
 	DefaultModelID string
+	// OwnerUsername is OWNER_USERNAME, reserved alongside "assistant" and
+	// "system" so a generated actor_slug (GenerateActorSlug) can never
+	// collide with a handle a client would read as the owner's own — the
+	// same collision rule OPENWEBUI_MODEL_SLUG's own validation used to
+	// enforce before Issue #75 made slugs a generated value instead of an
+	// operator-supplied one.
+	OwnerUsername string
 	// GenerationEnabled mirrors OPENWEBUI_GENERATION_ENABLED. Issue #52
 	// creates the workspace column and the write this reconciles onto it
 	// but has no bridge to gate yet (Issue #53's); Seed still reconciles
@@ -140,20 +146,29 @@ func NewRegistry(uow domain.UnitOfWork, repos domain.Repos, cfg RegistryConfig, 
 // It performs, in order: find-or-create the workspace by base URL;
 // find-or-create the model by the provider's opaque model id, minting
 // its VirtualActor row on first sight; point the workspace's default at
-// it; deactivate every other model in the workspace, since the MVP
-// publishes only the default one; disable every *other* workspace (and
-// deactivate its models) — this deployment supports exactly one enabled
-// workspace, so a re-seed after OPENWEBUI_BASE_URL changes must not
-// leave the previous instance's workspace enabled alongside the new
-// one; enable the workspace; and reconcile GenerationEnabled onto it
-// (Issue #53's gate — Issue #52 has no bridge to gate yet, but Seed
-// still keeps the stored value in step with config on every run).
+// it; disable every *other* workspace (and deactivate its models) — this
+// deployment supports exactly one enabled workspace, so a re-seed after
+// OPENWEBUI_BASE_URL changes must not leave the previous instance's
+// workspace enabled alongside the new one; enable the workspace; and
+// reconcile GenerationEnabled onto it (Issue #53's gate — Issue #52 has
+// no bridge to gate yet, but Seed still keeps the stored value in step
+// with config on every run).
+//
+// Unlike before Issue #75, Seed never deactivates any *other* model in
+// the workspace: SyncCatalog owns that decision now, from whichever
+// models the provider's own catalog currently reports, and Seed's job is
+// reduced to guaranteeing the one config-named fallback model exists and
+// is active — the row every deployment can rely on even if the provider
+// has never once answered a catalog sync (docs/roadmap/openwebui.md's
+// "bounded startup refresh, otherwise keep the last successfully synced
+// registry").
 //
 // Two identities are deliberately never rewritten by a re-run: the
 // workspace id and the model's actor id. That is the roadmap's stable
 // actor ID requirement — renaming a model or changing its handle must
 // not orphan the entries its actor already authored — and it is why
-// display name and slug are the only presentation fields updated here.
+// Seed never rewrites an existing model's display name or slug either
+// (both are catalog-sync-owned presentation values now; see seedModel).
 //
 // It is a single transaction because a half-applied registry is worse
 // than none: a workspace enabled before its default model exists would
@@ -178,9 +193,6 @@ func (r *Registry) Seed(ctx context.Context) error {
 		}
 		if err := repos.OpenWebUIWorkspaces.SetDefaultModel(ctx, workspace.ID, model.ID, now); err != nil {
 			return fmt.Errorf("set default model: %w", err)
-		}
-		if err := r.deactivateOtherModels(ctx, repos, workspace.ID, model.ID, now); err != nil {
-			return err
 		}
 		if err := r.deactivateOtherWorkspaces(ctx, repos, workspace.ID, now); err != nil {
 			return err
@@ -234,6 +246,18 @@ func (r *Registry) seedWorkspace(ctx context.Context, repos domain.Repos, now ti
 // seedModel finds the model by the provider's opaque id or creates it,
 // minting the VirtualActor row on first sight.
 //
+// Since Issue #75, the only thing Seed itself knows about this model is
+// its opaque id (OPENWEBUI_DEFAULT_MODEL_ID) — display name and slug are
+// catalog-sync-owned presentation values now (SyncCatalog, catalog.go),
+// so an *existing* row's DisplayName and ActorSlug are left exactly as
+// they are: whatever the last successful sync (or a prior Seed run, on
+// a deployment upgrading from before this issue) wrote. A brand *new*
+// row gets a provisional DisplayName of the opaque id itself — nothing
+// better is known synchronously, and Seed intentionally has no provider
+// dependency of its own — plus a slug GenerateActorSlug derives from
+// that same id, which (per its own contract) becomes this model's
+// permanent handle even after a later sync learns its real name.
+//
 // The actor row's display_name is deliberately left unset. A
 // VirtualActor's display name lives in the registry
 // (openwebui_models.display_name), because actors.display_name is the
@@ -244,15 +268,9 @@ func (r *Registry) seedModel(ctx context.Context, repos domain.Repos, workspaceI
 	existing, err := repos.OpenWebUIModels.GetByExternalID(ctx, workspaceID, r.cfg.DefaultModelID)
 	switch {
 	case err == nil:
-		existing.DisplayName = r.cfg.ModelDisplayName
-		existing.ActorSlug = r.cfg.ModelSlug
-		existing.UpdatedAt = now
-		if err := repos.OpenWebUIModels.Update(ctx, existing); err != nil {
-			return domain.OpenWebUIModel{}, fmt.Errorf("update model: %w", err)
-		}
 		// A model that had been deactivated by an earlier run (because
-		// it was not the default then) becomes usable again on being
-		// configured as the default.
+		// it was not the default then, or a catalog sync stopped seeing
+		// it) becomes usable again on being configured as the default.
 		if !existing.Active {
 			if err := repos.OpenWebUIModels.SetActive(ctx, existing.ID, true, now); err != nil {
 				return domain.OpenWebUIModel{}, fmt.Errorf("reactivate model: %w", err)
@@ -261,6 +279,15 @@ func (r *Registry) seedModel(ctx context.Context, repos domain.Repos, workspaceI
 		}
 		return existing, nil
 	case errors.Is(err, domain.ErrNotFound):
+		others, err := repos.OpenWebUIModels.ListByWorkspace(ctx, workspaceID)
+		if err != nil {
+			return domain.OpenWebUIModel{}, fmt.Errorf("list workspace models: %w", err)
+		}
+		takenSlugs := make(map[string]bool, len(others))
+		for _, m := range others {
+			takenSlugs[strings.ToLower(m.ActorSlug)] = true
+		}
+
 		actor := domain.Actor{ID: domain.NewID(), Type: domain.ActorOpenWebUIModel, CreatedAt: now}
 		if err := repos.Actors.Create(ctx, actor); err != nil {
 			return domain.OpenWebUIModel{}, fmt.Errorf("create model actor: %w", err)
@@ -269,8 +296,8 @@ func (r *Registry) seedModel(ctx context.Context, repos domain.Repos, workspaceI
 			ID:              domain.NewID(),
 			WorkspaceID:     workspaceID,
 			ExternalModelID: r.cfg.DefaultModelID,
-			DisplayName:     r.cfg.ModelDisplayName,
-			ActorSlug:       r.cfg.ModelSlug,
+			DisplayName:     r.cfg.DefaultModelID,
+			ActorSlug:       GenerateActorSlug(r.cfg.DefaultModelID, "", r.reservedActorSlug(takenSlugs)),
 			ActorID:         actor.ID,
 			Active:          true,
 			CreatedAt:       now,
@@ -283,26 +310,6 @@ func (r *Registry) seedModel(ctx context.Context, repos domain.Repos, workspaceI
 	default:
 		return domain.OpenWebUIModel{}, fmt.Errorf("look up model: %w", err)
 	}
-}
-
-// deactivateOtherModels marks every model but the default inactive. The
-// MVP publishes only the default model as an actor (roadmap OWUI-P), and
-// deactivating rather than deleting keeps the actor row that entries
-// already reference.
-func (r *Registry) deactivateOtherModels(ctx context.Context, repos domain.Repos, workspaceID, defaultModelID string, now time.Time) error {
-	models, err := repos.OpenWebUIModels.ListByWorkspace(ctx, workspaceID)
-	if err != nil {
-		return fmt.Errorf("list workspace models: %w", err)
-	}
-	for _, m := range models {
-		if m.ID == defaultModelID || !m.Active {
-			continue
-		}
-		if err := repos.OpenWebUIModels.SetActive(ctx, m.ID, false, now); err != nil {
-			return fmt.Errorf("deactivate model: %w", err)
-		}
-	}
-	return nil
 }
 
 // deactivateOtherWorkspaces disables every workspace but targetWorkspaceID

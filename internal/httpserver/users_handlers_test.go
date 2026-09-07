@@ -49,9 +49,10 @@ func usernames(users []userDetailedNotMe) []string {
 //
 // The query ("o") is chosen to match both a local actor (the owner,
 // username "owner") and the Open WebUI model actor
-// (newNoteAPITestServerOpenWebUIEnabled's seeded model has username
-// "model" and display name "GPT-OSS 20B", both containing "o"), so one
-// assertion covers a Host == nil and a Host != nil projection alike.
+// (newNoteAPITestServerOpenWebUIEnabled's seeded model has a generated
+// username and a display name equal to its own external id
+// "gpt-oss:20b", both containing "o"), so one assertion covers a
+// Host == nil and a Host != nil projection alike.
 func TestUsersSearch_ResponseCarriesURLKeyDiscriminatorForEveryUser(t *testing.T) {
 	ts := newNoteAPITestServerOpenWebUIEnabled(t)
 
@@ -95,16 +96,18 @@ func TestUsersSearch_MatchesUsernameAndDisplayNameCaseInsensitively(t *testing.T
 		t.Fatalf("usernames = %v, want exactly [assistant]", got)
 	}
 
-	// "gpt-oss" only appears in the model's display name ("GPT-OSS
-	// 20B"), never its username ("model"), so a hit here is specifically
-	// a display-name match.
+	// "gpt-oss" only appears in the model's display name (its own
+	// external id "gpt-oss:20b" — no catalog sync has run to give it a
+	// nicer one), never its generated username, so a hit here is
+	// specifically a display-name match.
 	rec = ts.post(t, "/api/users/search", map[string]any{"query": "gpt-oss"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("users/search: %d %s", rec.Code, rec.Body.String())
 	}
 	got = usernames(decodeUsers(t, rec))
-	if len(got) != 1 || got[0] != "model" {
-		t.Fatalf("usernames = %v, want exactly [model] (a display-name match)", got)
+	wantSlug := openWebUITestModelSlug()
+	if len(got) != 1 || got[0] != wantSlug {
+		t.Fatalf("usernames = %v, want exactly [%s] (a display-name match)", got, wantSlug)
 	}
 }
 
@@ -114,15 +117,16 @@ func TestUsersSearch_MatchesUsernameAndDisplayNameCaseInsensitively(t *testing.T
 // and an omitted/"combined" origin must return both.
 func TestUsersSearch_OriginFilterScopesLocalVsRemote(t *testing.T) {
 	ts := newNoteAPITestServerOpenWebUIEnabled(t)
+	modelSlug := openWebUITestModelSlug()
 
 	cases := []struct {
 		origin any
 		want   []string
 	}{
-		{nil, []string{"owner", "model"}},
-		{"combined", []string{"owner", "model"}},
+		{nil, []string{"owner", modelSlug}},
+		{"combined", []string{"owner", modelSlug}},
 		{"local", []string{"owner"}},
-		{"remote", []string{"model"}},
+		{"remote", []string{modelSlug}},
 	}
 	for _, c := range cases {
 		body := map[string]any{"query": "o"}
@@ -242,30 +246,31 @@ func TestUsersSearchByUsernameAndHost_ExactUsernameMatchIsCaseInsensitive(t *tes
 // username that otherwise matches).
 func TestUsersSearchByUsernameAndHost_HostScopesLocalVsRemoteModel(t *testing.T) {
 	ts := newNoteAPITestServerOpenWebUIEnabled(t)
+	modelSlug := openWebUITestModelSlug()
 
-	rec := ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": "model"})
+	rec := ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": modelSlug})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("no host: %d %s", rec.Code, rec.Body.String())
 	}
 	if got := decodeUsers(t, rec); len(got) != 0 {
-		t.Errorf("username=model, no host: usernames = %v, want none (host omitted means local-only)", usernames(got))
+		t.Errorf("username=%s, no host: usernames = %v, want none (host omitted means local-only)", modelSlug, usernames(got))
 	}
 
-	rec = ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": "model", "host": "openwebui.example.net"})
+	rec = ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": modelSlug, "host": "openwebui.example.net"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("matching host: %d %s", rec.Code, rec.Body.String())
 	}
 	got := usernames(decodeUsers(t, rec))
-	if len(got) != 1 || got[0] != "model" {
-		t.Fatalf("username=model, host=openwebui.example.net: usernames = %v, want exactly [model]", got)
+	if len(got) != 1 || got[0] != modelSlug {
+		t.Fatalf("username=%s, host=openwebui.example.net: usernames = %v, want exactly [%s]", modelSlug, got, modelSlug)
 	}
 
-	rec = ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": "model", "host": "different.example.net"})
+	rec = ts.post(t, "/api/users/search-by-username-and-host", map[string]any{"username": modelSlug, "host": "different.example.net"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("mismatched host: %d %s", rec.Code, rec.Body.String())
 	}
 	if got := decodeUsers(t, rec); len(got) != 0 {
-		t.Errorf("username=model, host=different.example.net: usernames = %v, want none", usernames(got))
+		t.Errorf("username=%s, host=different.example.net: usernames = %v, want none", modelSlug, usernames(got))
 	}
 }
 

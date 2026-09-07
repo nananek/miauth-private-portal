@@ -52,9 +52,8 @@ func validRegistryConfig() RegistryConfig {
 		SecretRef:        SecretRefAPIKey,
 		WorkspaceName:    "Open WebUI",
 		PresentationHost: "openwebui.example.net",
-		ModelDisplayName: "GPT-OSS 20B",
-		ModelSlug:        "model",
 		DefaultModelID:   "gpt-oss:20b",
+		OwnerUsername:    "owner",
 	}
 }
 
@@ -85,6 +84,16 @@ func newTestRegistry(t *testing.T, cfg RegistryConfig) *testRegistry {
 		db:       db,
 		clock:    clock,
 	}
+}
+
+// reservedForValidRegistryConfig is validRegistryConfig's own reserved
+// set (its OwnerUsername plus the fixed assistant/system names), for
+// tests that need to predict what GenerateActorSlug will derive for the
+// config's DefaultModelID with no display name known yet — exactly what
+// Seed itself cannot avoid doing since Issue #75 removed the
+// config-supplied slug.
+func reservedForValidRegistryConfig(candidate string) bool {
+	return candidate == "owner" || candidate == "assistant" || candidate == "system"
 }
 
 // mustCreateOwner inserts the owner actor and returns its ID, for tests

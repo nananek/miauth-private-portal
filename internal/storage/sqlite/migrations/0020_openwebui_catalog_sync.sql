@@ -1,0 +1,15 @@
+-- Issue #75 PR1: catalog sync's one schema change. Registry.SyncCatalog
+-- (internal/openwebui) periodically reconciles every model GET
+-- /api/models reports for the configured account against
+-- openwebui_models, deactivating rows a sync round did not see and
+-- reactivating ones that reappear. last_seen_at is when a sync round most
+-- recently reported a given row, kept for operator visibility
+-- (docs/operations/runbook.md) — SyncCatalog itself decides active/
+-- inactive from whether a model appeared in the round just completed,
+-- never from how recently, so nothing reads this column to make that
+-- call.
+--
+-- NULL for a model Registry.Seed created but no catalog sync has ever
+-- reported yet (including every model row that existed before this
+-- migration).
+ALTER TABLE openwebui_models ADD COLUMN last_seen_at TEXT;

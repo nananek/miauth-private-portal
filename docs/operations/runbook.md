@@ -158,10 +158,13 @@ key table):
 - `OPENWEBUI_PRESENTATION_HOST` — a bare hostname distinct from
   `LOCAL_ORIGIN`'s host
 
-`OPENWEBUI_WORKSPACE_NAME`/`OPENWEBUI_MODEL_DISPLAY_NAME` are cosmetic
-(both have defaults); `OPENWEBUI_MODEL_SLUG` defaults to `model` and, either
-way, must not collide (case-insensitively) with `OWNER_USERNAME` or the
-reserved `assistant`/`system` names.
+`OPENWEBUI_WORKSPACE_NAME` is cosmetic (it has a default). A model's
+display name and handle slug (the `@<slug>@<presentation host>` local
+half) are no longer configuration keys as of Issue #75: they are derived
+automatically — from the provider's own model name once a catalog sync
+succeeds, generated (never colliding, case-insensitively, with
+`OWNER_USERNAME` or the reserved `assistant`/`system` names) the first
+time each model is registered, and never recomputed afterward.
 
 Steps:
 
@@ -185,9 +188,12 @@ Verification:
 
 1. `/readyz` returns `200` — confirms `Registry.Seed` completed without
    error (a `Seed` failure prevents the process from starting at all).
-2. `POST /api/users/search` (as the owner) with a query matching
-   `OPENWEBUI_MODEL_SLUG` returns the model as a user whose `host` is
-   `OPENWEBUI_PRESENTATION_HOST` — confirms the VirtualActor projects.
+2. `POST /api/users/search` (as the owner) with a query matching the
+   model's display name or generated handle slug — read
+   `openwebui_models.display_name`/`actor_slug` directly if nothing has
+   mentioned the model yet to have surfaced its slug some other way —
+   returns the model as a user whose `host` is
+   `OPENWEBUI_PRESENTATION_HOST`. Confirms the VirtualActor projects.
 3. With generation also enabled: post a note as the owner and confirm a
    reply from that VirtualActor appears within `OPENWEBUI_TIMEOUT`. If it
    doesn't, `go run ./cmd/jobsctl list --type=openwebui_turn` and

@@ -405,7 +405,15 @@ type modelsResponseBody struct {
 
 type modelResponseEntry struct {
 	ID   string `json:"id"`
-	Info *struct {
+	Name string `json:"name"`
+	// Arena is the built-in "arena-model" entry's own signal (compat: "A
+	// built-in arena-model entry is present alongside real models",
+	// fixtures/openwebui/models_response.json's second entry) — checked
+	// alongside the literal id in ListModels' eligibility filter as
+	// defense in depth, since GET /api/models's field list is the
+	// compat document's own "weakest-evidenced part".
+	Arena bool `json:"arena"`
+	Info  *struct {
 		Meta struct {
 			ToolIDs           []string `json:"toolIds"`
 			DefaultFeatureIDs []string `json:"defaultFeatureIds"`
@@ -446,6 +454,41 @@ func (c *Client) GetModelTools(ctx context.Context, modelID string) (toolIDs []s
 		return m.Info.Meta.ToolIDs, m.Info.Meta.DefaultFeatureIDs, nil
 	}
 	return nil, nil, nil
+}
+
+// ListModels implements openwebui.CatalogProvider (Issue #75 PR1) by
+// calling GET /api/models and translating every entry the configured
+// account can see — everything GetModelTools already reads a single
+// model's info.meta out of, but for the whole catalog at once, which is
+// what Registry.SyncCatalog needs to reconcile every model in one round
+// rather than one per-model call apiece.
+//
+// It applies no eligibility filtering of its own (blank/duplicate ids,
+// the built-in arena-model entry): that is Registry.SyncCatalog's
+// decision, made from the openwebui.RemoteModel values this returns
+// verbatim.
+func (c *Client) ListModels(ctx context.Context) ([]openwebui.RemoteModel, error) {
+	data, err := c.get(ctx, openwebui.PhaseTurn, "/api/models")
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed modelsResponseBody
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
+			fmt.Errorf("decode models response: %w", err))
+	}
+
+	models := make([]openwebui.RemoteModel, 0, len(parsed.Data))
+	for _, m := range parsed.Data {
+		rm := openwebui.RemoteModel{ID: m.ID, Name: m.Name, IsArena: m.Arena}
+		if m.Info != nil {
+			rm.ToolIDs = m.Info.Meta.ToolIDs
+			rm.DefaultFeatureIDs = m.Info.Meta.DefaultFeatureIDs
+		}
+		models = append(models, rm)
+	}
+	return models, nil
 }
 
 // --- GET /api/v1/tools/ ---

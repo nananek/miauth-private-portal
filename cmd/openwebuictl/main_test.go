@@ -56,9 +56,8 @@ func seedOpenwebuictlLink(t *testing.T, dbPath, body string) (linkID string) {
 		SecretRef:        openwebui.SecretRefAPIKey,
 		WorkspaceName:    "Open WebUI",
 		PresentationHost: "openwebui.example.net",
-		ModelDisplayName: "GPT-OSS 20B",
-		ModelSlug:        "model",
 		DefaultModelID:   "gpt-oss:20b",
+		OwnerUsername:    "owner",
 	}, nil, nil, nil)
 	if err := registry.Seed(t.Context()); err != nil {
 		t.Fatalf("seed registry: %v", err)

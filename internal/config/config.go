@@ -305,15 +305,8 @@ type OpenWebUIConfig struct {
 	// makes it opaque, so nothing here lowercases, splits, or otherwise
 	// reshapes it.
 	DefaultModelID string
-	// ModelDisplayName is the model's display name. Empty falls back to
-	// DefaultModelID; see ModelDisplayNameOrDefault.
-	ModelDisplayName string
-	// ModelSlug is the local half of the VirtualActor handle
-	// (@<slug>@<presentation host>). It must not collide with
-	// OWNER_USERNAME or with the reserved assistant/system presentation
-	// names, all of which already appear as a UserLite username.
-	ModelSlug string
-	// PresentationHost is the host half of that handle. It is a fixed
+	// PresentationHost is the host half of a VirtualActor's
+	// @<slug>@<presentation host> handle. It is a fixed
 	// deployment-provisioned value, never inferred from BaseURL, and it
 	// must differ from LOCAL_ORIGIN's host: a UserLite whose host is
 	// null means "local to this service", so reusing the local host for
@@ -363,18 +356,6 @@ type OpenWebUIConfig struct {
 	// list it — so a typo'd id simply never matches anything server-side
 	// rather than failing closed here.
 	ToolIDs []string
-}
-
-// ModelDisplayNameOrDefault returns ModelDisplayName, falling back to
-// the opaque provider model id when unset. The same shape as
-// LLMConfig.ClassificationModelOrDefault: a deployment that has not
-// bothered to name the model still gets something meaningful rather than
-// an empty display name.
-func (c OpenWebUIConfig) ModelDisplayNameOrDefault() string {
-	if c.ModelDisplayName != "" {
-		return c.ModelDisplayName
-	}
-	return c.DefaultModelID
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -643,8 +624,6 @@ func parse(values map[string]string) (Config, []FieldError) {
 	// Trimmed but otherwise untouched: the provider's model id is opaque
 	// (ADR-0005 D9), so this must not case-fold or otherwise reshape it.
 	cfg.OpenWebUI.DefaultModelID = strings.TrimSpace(parseOptionalString(values, KeyOpenWebUIDefaultModelID, ""))
-	cfg.OpenWebUI.ModelDisplayName = parseOptionalString(values, KeyOpenWebUIModelDisplayName, "")
-	cfg.OpenWebUI.ModelSlug = parseOptionalString(values, KeyOpenWebUIModelSlug, "model")
 	cfg.OpenWebUI.PresentationHost = parseOptionalString(values, KeyOpenWebUIPresentationHost, "")
 	cfg.OpenWebUI.GenerationEnabled = parseOptionalBool(values, KeyOpenWebUIGenerationEnabled, false, &errs)
 	cfg.OpenWebUI.Timeout = parseOptionalDuration(values, KeyOpenWebUITimeout, 120*time.Second, &errs)
@@ -802,7 +781,6 @@ func (c Config) Validate() error {
 		if c.OpenWebUI.DefaultModelID == "" {
 			errs = append(errs, FieldError{Key: KeyOpenWebUIDefaultModelID, Reason: "required when " + KeyOpenWebUIEnabled + "=true"})
 		}
-		validateOpenWebUIModelSlug(&errs, KeyOpenWebUIModelSlug, c.OpenWebUI.ModelSlug, c.Auth.OwnerUsername)
 		validateOpenWebUIPresentationHost(&errs, KeyOpenWebUIPresentationHost, c.OpenWebUI.PresentationHost, c.Auth.LocalOrigin)
 		validatePositiveDuration(&errs, KeyOpenWebUITimeout, c.OpenWebUI.Timeout)
 		validateInt64Min(&errs, KeyOpenWebUIMaxResponseBytes, c.OpenWebUI.MaxResponseBytes, openWebUIMaxResponseBytesMin)
@@ -910,8 +888,6 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIAPIKey:           redactedSetOrUnset(c.OpenWebUI.APIKey),
 		KeyOpenWebUIWorkspaceName:    c.OpenWebUI.WorkspaceName,
 		KeyOpenWebUIDefaultModelID:   c.OpenWebUI.DefaultModelID,
-		KeyOpenWebUIModelDisplayName: c.OpenWebUI.ModelDisplayName,
-		KeyOpenWebUIModelSlug:        c.OpenWebUI.ModelSlug,
 		KeyOpenWebUIPresentationHost: c.OpenWebUI.PresentationHost,
 
 		KeyOpenWebUIGenerationEnabled:  strconv.FormatBool(c.OpenWebUI.GenerationEnabled),
@@ -1250,14 +1226,6 @@ func validateOwnerUsername(errs *[]FieldError, key, v string) bool {
 	return true
 }
 
-// openWebUIModelSlugPattern bounds OPENWEBUI_MODEL_SLUG to the local
-// half of a Misskey-style handle: lowercase ASCII letters, digits and
-// underscores. It is deliberately narrower than ownerUsernamePattern
-// (which allows uppercase): the handle's host half is a DNS name, which
-// is case-insensitive, so allowing case here would let two visually
-// distinct handles mean the same thing.
-var openWebUIModelSlugPattern = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
-
 // openWebUIPresentationHostPattern bounds OPENWEBUI_PRESENTATION_HOST to
 // a lowercase DNS hostname: labels of letters, digits and hyphens
 // separated by dots, with no scheme, port, path, or trailing dot. It is
@@ -1315,26 +1283,6 @@ func isHTTPSOrigin(v string) bool {
 		return false
 	}
 	return u.User == nil && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == ""
-}
-
-// validateOpenWebUIModelSlug checks OPENWEBUI_MODEL_SLUG's character set
-// and that it does not collide with a username this service already
-// projects. The owner's username and the reserved assistant/system names
-// all appear in a UserLite.username, so a VirtualActor reusing one would
-// present two different actors under one handle.
-func validateOpenWebUIModelSlug(errs *[]FieldError, key, v, ownerUsername string) bool {
-	if !openWebUIModelSlugPattern.MatchString(v) {
-		*errs = append(*errs, FieldError{Key: key, Reason: "must be 1-32 lowercase ASCII letters, digits, or underscores"})
-		return false
-	}
-	// Compared case-insensitively against the owner's username, which
-	// may contain uppercase: "Owner" and "owner" would read as the same
-	// handle to a person even though the bytes differ.
-	if strings.EqualFold(v, ownerUsername) || v == "assistant" || v == "system" {
-		*errs = append(*errs, FieldError{Key: key, Reason: "must not collide with " + KeyOwnerUsername + " or the reserved names assistant/system"})
-		return false
-	}
-	return true
 }
 
 // validateOpenWebUIPresentationHost checks OPENWEBUI_PRESENTATION_HOST

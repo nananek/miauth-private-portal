@@ -170,8 +170,17 @@ type OpenWebUIModel struct {
 	// it reports one. It is metadata: nothing local orders or expires by
 	// it.
 	ExternalUpdatedAt *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// LastSeenAt is when a catalog sync (Issue #75 PR1's SyncCatalog)
+	// most recently reported this model in the configured account's
+	// GET /api/models response. It is nil for a model Registry.Seed
+	// created that no sync round has reported yet, and it is operator
+	// visibility only (docs/operations/runbook.md) — SyncCatalog decides
+	// a model's Active flag from whether it appeared in the sync round
+	// just completed, never from how recently, so nothing reads this
+	// field to make that call.
+	LastSeenAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // VirtualActor is the Aria-facing projection of one model: the presented
@@ -618,10 +627,10 @@ type OpenWebUIModelRepository interface {
 	// (created_at, id) order.
 	ListByWorkspace(ctx context.Context, workspaceID string) ([]OpenWebUIModel, error)
 	// Update writes only the mutable fields: display name, actor slug,
-	// capabilities, and the provider's external timestamp. WorkspaceID,
-	// ExternalModelID and ActorID are immutable — the roadmap's stable
-	// actor ID requirement is that a rename cannot move a model onto a
-	// different actor row.
+	// capabilities, the provider's external timestamp, and last_seen_at.
+	// WorkspaceID, ExternalModelID and ActorID are immutable — the
+	// roadmap's stable actor ID requirement is that a rename cannot move
+	// a model onto a different actor row.
 	Update(ctx context.Context, m OpenWebUIModel) error
 	SetActive(ctx context.Context, modelID string, active bool, at time.Time) error
 }

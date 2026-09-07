@@ -78,7 +78,6 @@ func defaultOpenWebUIConfig() OpenWebUIConfig {
 	return OpenWebUIConfig{
 		Enabled:            false,
 		WorkspaceName:      "Open WebUI",
-		ModelSlug:          "model",
 		Timeout:            120 * time.Second,
 		MaxResponseBytes:   4_194_304,
 		MaxRequestBytes:    1_048_576,
@@ -1350,8 +1349,8 @@ func TestLoad_OpenWebUIDisabledByDefaultAndDoesNotRequireAnyField(t *testing.T) 
 	if cfg.OpenWebUI.Enabled {
 		t.Error("OPENWEBUI_ENABLED should default to false")
 	}
-	if cfg.OpenWebUI.WorkspaceName != "Open WebUI" || cfg.OpenWebUI.ModelSlug != "model" {
-		t.Errorf("defaults = %+v, want workspace name %q and slug %q", cfg.OpenWebUI, "Open WebUI", "model")
+	if cfg.OpenWebUI.WorkspaceName != "Open WebUI" {
+		t.Errorf("defaults = %+v, want workspace name %q", cfg.OpenWebUI, "Open WebUI")
 	}
 }
 
@@ -1363,7 +1362,6 @@ func TestLoad_OpenWebUIDisabledIgnoresInvalidFields(t *testing.T) {
 		KeyOpenWebUIEnabled:          "false",
 		KeyOpenWebUIBaseURL:          "http://insecure.example.net/path",
 		KeyOpenWebUIAllowedOrigins:   "not-a-url",
-		KeyOpenWebUIModelSlug:        "Not A Slug",
 		KeyOpenWebUIPresentationHost: "https://scheme.example.net",
 	})
 	if err != nil {
@@ -1376,9 +1374,7 @@ func TestLoad_OpenWebUIDisabledIgnoresInvalidFields(t *testing.T) {
 
 func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
 	cfg, err := loadWithOpenWebUI(t, map[string]string{
-		KeyOpenWebUIWorkspaceName:    "Home Instance",
-		KeyOpenWebUIModelDisplayName: "GPT-OSS 20B",
-		KeyOpenWebUIModelSlug:        "gpt_oss",
+		KeyOpenWebUIWorkspaceName: "Home Instance",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1390,8 +1386,6 @@ func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
 		APIKey:             "sk-openwebui-secret",
 		WorkspaceName:      "Home Instance",
 		DefaultModelID:     "gpt-oss:20b",
-		ModelDisplayName:   "GPT-OSS 20B",
-		ModelSlug:          "gpt_oss",
 		PresentationHost:   "openwebui.example.net",
 		Timeout:            120 * time.Second,
 		MaxResponseBytes:   4_194_304,
@@ -1619,41 +1613,6 @@ func TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestLoad_OpenWebUIRejectsInvalidModelSlug(t *testing.T) {
-	tests := map[string]string{
-		"uppercase":                 "Model",
-		"punctuation":               "my.model",
-		"longer than 32 characters": strings.Repeat("m", 33),
-		"collides with owner":       "owner",
-		"reserved assistant":        "assistant",
-		"reserved system":           "system",
-	}
-	for name, slug := range tests {
-		t.Run(name, func(t *testing.T) {
-			_, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIModelSlug: slug})
-			if err == nil {
-				t.Fatalf("slug %q should be rejected", slug)
-			}
-			if !strings.Contains(err.Error(), KeyOpenWebUIModelSlug) {
-				t.Errorf("error %q does not name %s", err.Error(), KeyOpenWebUIModelSlug)
-			}
-		})
-	}
-}
-
-// TestLoad_OpenWebUIModelSlugCollisionIsCaseInsensitive: "Owner" and
-// "owner" read as the same handle to a person even though the bytes
-// differ, so the owner-username collision check folds case.
-func TestLoad_OpenWebUIModelSlugCollisionIsCaseInsensitive(t *testing.T) {
-	env := mergeMaps(validAuthEnv(), map[string]string{
-		KeyAppEnv:        "development",
-		KeyOwnerUsername: "Nekono",
-	}, validOpenWebUIEnv(), map[string]string{KeyOpenWebUIModelSlug: "nekono"})
-	if _, err := Load(LoadOptions{Getenv: getenvFromMap(env)}); err == nil {
-		t.Fatal("a slug differing from OWNER_USERNAME only by case should be rejected")
-	}
-}
-
 // TestLoad_OpenWebUIRejectsInvalidPresentationHost keeps the presentation
 // host a bare hostname, and distinct from this service's own host: a
 // UserLite with a null host means "local", so a VirtualActor presented on
@@ -1702,19 +1661,6 @@ func TestLoad_OpenWebUIPresentationHostIsNotDerivedFromBaseURL(t *testing.T) {
 	}
 	if same.OpenWebUI.PresentationHost != "openwebui.example.net" {
 		t.Errorf("PresentationHost = %q, want openwebui.example.net", same.OpenWebUI.PresentationHost)
-	}
-}
-
-func TestLoad_OpenWebUIModelDisplayNameFallsBackToModelID(t *testing.T) {
-	cfg, err := loadWithOpenWebUI(t, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.OpenWebUI.ModelDisplayName != "" {
-		t.Errorf("ModelDisplayName = %q, want empty when unset", cfg.OpenWebUI.ModelDisplayName)
-	}
-	if got := cfg.OpenWebUI.ModelDisplayNameOrDefault(); got != "gpt-oss:20b" {
-		t.Errorf("ModelDisplayNameOrDefault() = %q, want the model id", got)
 	}
 }
 

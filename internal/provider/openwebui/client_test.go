@@ -565,6 +565,74 @@ func TestClient_ListAccessibleTools_ReturnsEveryToolID(t *testing.T) {
 	}
 }
 
+// --- Issue #75 PR1: catalog sync ---
+
+// TestClient_ListModels_TranslatesEveryEntry backs Registry.SyncCatalog's
+// one call to the provider: every data[] entry becomes an
+// openwebui.RemoteModel carrying id, name, the arena signal, and the same
+// info.meta.toolIds/defaultFeatureIds GetModelTools reads for a single
+// model — including the built-in arena-model entry, which ListModels
+// does not filter (that is Registry's eligibleRemoteModels' job, not
+// this adapter's).
+func TestClient_ListModels_TranslatesEveryEntry(t *testing.T) {
+	modelsResp := loadFixture(t, "models_response.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/models" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, modelsResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	got, err := client.ListModels(t.Context())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []openwebui.RemoteModel{
+		{ID: "mock-model", Name: "mock-model", ToolIDs: []string{"calculator"}, DefaultFeatureIDs: []string{"web_search"}},
+		{ID: "arena-model", Name: "Arena Model", IsArena: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListModels = %+v, want %+v", got, want)
+	}
+}
+
+// TestClient_ListModels_EmptyDataIsNotAnError backs the "successful empty
+// snapshot" case Registry.SyncCatalog treats as a genuine zero-model
+// response rather than an outage.
+func TestClient_ListModels_EmptyDataIsNotAnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []byte(`{"data":[]}`), http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	got, err := client.ListModels(t.Context())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListModels = %+v, want empty", got)
+	}
+}
+
+// TestClient_ListModels_MalformedBodyIsContractFailed pins the same
+// decode-failure classification GetModelTools uses for this endpoint.
+func TestClient_ListModels_MalformedBodyIsContractFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []byte(`"not an object"`), http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	_, err := client.ListModels(t.Context())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryContractFailed {
+		t.Errorf("Category = %q, want %q", pe.Category, openwebui.CategoryContractFailed)
+	}
+}
+
 // --- error classification ---
 
 func TestClient_StartChat_ChatsNewReturns401_AuthFailed(t *testing.T) {
