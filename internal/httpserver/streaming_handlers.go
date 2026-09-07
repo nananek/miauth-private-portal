@@ -20,14 +20,18 @@ import (
 // Issue #41 adds a minimal GET /streaming WebSocket stub so Aria stops
 // surfacing a connection error every time it opens a timeline tab (Issue
 // #1, tracked as a real-world symptom of the deliberate "Streaming is
-// not an MVP requirement" decision in docs/compat/aria-v1.5.11.md). It
-// intentionally never pushes a real note/notification event — that
-// remains future work — it only makes the handshake succeed and answers
-// the small set of client control messages Aria's pinned misskey_dart
-// commit (docs/compat/aria-v1.5.11.md) actually sends, matching the
+// not an MVP requirement" decision in docs/compat/aria-v1.5.11.md). At
+// the time, it intentionally never pushed a real note/notification
+// event; it only made the handshake succeed and answered the small set
+// of client control messages Aria's pinned misskey_dart commit
+// (docs/compat/aria-v1.5.11.md) actually sends, matching the
 // nananek/sakurasato precedent AGENTS.md names as a behavioral reference
 // for this exact problem (its Issue #170: "Aria UI が『接続中…』で
-// hang しないため").
+// hang しないため"). Since Issue #95 PR2, a homeTimeline-subscribed
+// connection does receive a real "note" create push (see
+// pushHomeTimelineEvents below) — every other event type (reaction,
+// notification, mention, renote, ...) remains permanently unpushed, a
+// deliberate non-goal rather than deferred work.
 //
 // Message shapes below (connect/disconnect/subNote/unsubNote, the
 // "connected" ack) were confirmed against misskey_dart's pinned commit
@@ -158,8 +162,9 @@ type streamEnvelope struct {
 }
 
 // streamConnectBody is "connect"'s body shape: {"channel", "id",
-// "params"}. params is read by nothing here (no real event delivery
-// exists yet to filter by it) but is accepted and ignored rather than
+// "params"}. params is read by nothing here — Issue #95 PR2's push
+// delivery sends every homeTimeline note to every id subscribed to that
+// channel, unfiltered — but is accepted and ignored rather than
 // rejected, matching this endpoint's overall "never fail on a frame
 // shape it wasn't specifically built for" stance.
 type streamConnectBody struct {

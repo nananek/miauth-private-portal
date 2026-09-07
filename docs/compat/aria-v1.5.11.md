@@ -1190,7 +1190,7 @@ Every client-to-server frame uses the envelope `{"type": ..., "body": ...}`.
 
 | `type` | `body` fields observed | Server reply |
 | --- | --- | --- |
-| `connect` | `channel`, `id`, `params` (Aria's home-timeline provider sends these three; `params` carries filters such as `withRenotes`/`withReplies`/`withFiles` that this stub reads nothing from, since no real event delivery exists yet to filter) | `{"type":"connected","body":{"id":...}}` |
+| `connect` | `channel`, `id`, `params` (Aria's home-timeline provider sends these three; `params` carries filters such as `withRenotes`/`withReplies`/`withFiles` that this handler reads nothing from — Issue #95 PR2's push delivery sends every homeTimeline note unfiltered, see "Traced server→client `channel`/`note` push event shape" below) | `{"type":"connected","body":{"id":...}}` |
 | `disconnect` | `id` | none |
 | `subNote` | `id`, `params` | none |
 | `unsubNote` | `id`, `params` | none |

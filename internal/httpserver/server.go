@@ -123,11 +123,16 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
-		// GET /streaming only needs read:account authentication (Issue
-		// #41), not a timeline: it never pushes a real note/notification
-		// event yet, so it belongs in this MiAuthService-only group rather
-		// than mixed into the note-API group below, which exists because
-		// every route there needs both scoped auth and a timeline to read.
+		// GET /streaming's route registration only needs read:account
+		// authentication (Issue #41), not a timeline (opts.TimelineService
+		// may be nil here), so it belongs in this MiAuthService-only group
+		// rather than mixed into the note-API group below, which exists
+		// because every route there needs both scoped auth and a timeline
+		// to read. Since Issue #95 PR2, a connection subscribed to
+		// "homeTimeline" does receive a live note-create push, but only
+		// once opts.TimelineService and opts.StreamHub are also configured
+		// (serveStreamConn's nil checks) — cmd/server/main.go always wires
+		// all three together.
 		s.Handle("GET /streaming", http.HandlerFunc(s.handleStreaming))
 	}
 
