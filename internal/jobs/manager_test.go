@@ -476,3 +476,142 @@ func TestManagerWithNoRegisteredHandlersStartsAndStops(t *testing.T) {
 	cancel, errCh := startManager(t, m)
 	stopManager(t, cancel, errCh)
 }
+
+// TestManager_ReloadConfig_UpdatesConfigAndResetsTicker backs Issue #76
+// PR4b's Tier A reload, mirroring internal/ingest.Scheduler's own
+// reloadInterval coverage.
+func TestManager_ReloadConfig_UpdatesConfigAndResetsTicker(t *testing.T) {
+	db := newJobsTestDB(t)
+	cfg := fastConfig("worker-1")
+	cfg.Reload = func(context.Context) Config {
+		c := fastConfig("worker-1")
+		c.MaxAttempts = 99
+		c.PollInterval = time.Minute
+		return c
+	}
+	m := NewManager(db.Jobs, cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	m.ticker = time.NewTicker(time.Hour)
+	defer m.ticker.Stop()
+
+	m.reloadConfig(t.Context())
+
+	got := m.config()
+	if got.MaxAttempts != 99 {
+		t.Errorf("MaxAttempts after reload = %d, want 99", got.MaxAttempts)
+	}
+	if got.PollInterval != time.Minute {
+		t.Errorf("PollInterval after reload = %v, want 1m", got.PollInterval)
+	}
+}
+
+func TestManager_ReloadConfig_NilReloadIsNoop(t *testing.T) {
+	db := newJobsTestDB(t)
+	m := NewManager(db.Jobs, fastConfig("worker-1"), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	m.ticker = time.NewTicker(time.Hour)
+	defer m.ticker.Stop()
+
+	before := m.config()
+	m.reloadConfig(t.Context())
+	after := m.config()
+	if after.MaxAttempts != before.MaxAttempts || after.PollInterval != before.PollInterval {
+		t.Errorf("config changed despite a nil Reload: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestManager_ReloadConfig_ClampsInvalidCombinationViaWithDefaults backs
+// Config.Reload's own doc comment: an operator changing one Tier A key
+// independently of another through miauthctl config (here,
+// LeaseRenewMargin ending up >= LeaseDuration) must not produce an
+// invalid Manager configuration — reloadConfig runs the result through
+// the same withDefaults clamp NewManager already applies at
+// construction.
+func TestManager_ReloadConfig_ClampsInvalidCombinationViaWithDefaults(t *testing.T) {
+	db := newJobsTestDB(t)
+	cfg := fastConfig("worker-1")
+	cfg.Reload = func(context.Context) Config {
+		c := fastConfig("worker-1")
+		c.LeaseDuration = time.Second
+		c.LeaseRenewMargin = 2 * time.Second // invalid: >= LeaseDuration
+		return c
+	}
+	m := NewManager(db.Jobs, cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	m.ticker = time.NewTicker(time.Hour)
+	defer m.ticker.Stop()
+
+	m.reloadConfig(t.Context())
+
+	got := m.config()
+	if got.LeaseRenewMargin >= got.LeaseDuration {
+		t.Errorf("LeaseRenewMargin (%v) >= LeaseDuration (%v) after reload, want withDefaults to have clamped it", got.LeaseRenewMargin, got.LeaseDuration)
+	}
+}
+
+// TestManager_Run_ReloadRaisesMaxConcurrentJobsWithoutRestart is the
+// end-to-end regression test for Issue #76 PR4b's semaphore-to-atomic-
+// counter change: MaxConcurrentJobs must actually take effect on a live
+// Manager, not just at construction, since a fixed-capacity channel
+// could never have supported this.
+func TestManager_Run_ReloadRaisesMaxConcurrentJobsWithoutRestart(t *testing.T) {
+	db := newJobsTestDB(t)
+	var testJobs []domain.Job
+	for range 6 {
+		testJobs = append(testJobs, enqueueTestJob(t, db, "test", "{}", nil))
+	}
+	var raised atomic.Bool
+	cfg := fastConfig("worker-1")
+	cfg.ClaimBatchSize = 6
+	cfg.MaxConcurrentJobs = 1
+	cfg.Reload = func(context.Context) Config {
+		c := fastConfig("worker-1")
+		c.ClaimBatchSize = 6
+		if raised.Load() {
+			c.MaxConcurrentJobs = 6
+		} else {
+			c.MaxConcurrentJobs = 1
+		}
+		return c
+	}
+
+	var maximum atomic.Int32
+	var current atomic.Int32
+	started := make(chan struct{}, 6)
+	release := make(chan struct{})
+	m := NewManager(db.Jobs, cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	m.Register("test", func(context.Context, domain.Job) error {
+		running := current.Add(1)
+		for {
+			observed := maximum.Load()
+			if running <= observed || maximum.CompareAndSwap(observed, running) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		current.Add(-1)
+		return nil
+	})
+
+	cancel, errCh := startManager(t, m)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first handler did not start under the initial MaxConcurrentJobs=1 cap")
+	}
+
+	raised.Store(true)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reload did not raise MaxConcurrentJobs: no further handler started while the first was still in flight")
+		}
+	}
+	close(release)
+	for _, job := range testJobs {
+		waitForJob(t, db, job.ID, func(j domain.Job) bool { return j.State == domain.JobSucceeded })
+	}
+	stopManager(t, cancel, errCh)
+	if maximum.Load() < 2 {
+		t.Errorf("maximum concurrent handlers = %d, want at least 2 after reload raised MaxConcurrentJobs", maximum.Load())
+	}
+}

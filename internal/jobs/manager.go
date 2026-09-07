@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -34,6 +35,33 @@ type Config struct {
 	BackoffJitter       float64
 	MaxConcurrentJobs   int
 	ShutdownGracePeriod time.Duration
+
+	// Reload, if non-nil, is called at the start of every poll (Issue
+	// #76 PR4b, ADR-0006 Tier A) to get the current effective values for
+	// every field above except WorkerID and BackoffJitter (neither is
+	// db-eligible — see internal/config.IsDBEligibleKey). Its result
+	// replaces Manager's whole Config for every field it reads from
+	// then on, run through withDefaults exactly like a Config built at
+	// construction (so LeaseRenewMargin/BackoffMax's existing
+	// cross-field clamps still apply even when an operator changes one
+	// Tier A key independently of the other through miauthctl config).
+	//
+	// A job's own lease renewal cadence and retry backoff are decided
+	// from whichever Config is current at the moment each decision is
+	// made (confirmLease, finish), not frozen at claim time: a
+	// long-running job's retry, on failure, uses the latest
+	// MaxAttempts/BackoffBase/BackoffMax rather than what was in effect
+	// when it was claimed. This is a deliberate simplification over
+	// snapshotting Config per job — see reloadConfig's own comment for
+	// the one bounded imprecision it accepts (a job's lease-renewal
+	// ticker interval, computed once when it starts, does not itself
+	// speed up or slow down if LeaseDuration/LeaseRenewMargin change
+	// mid-flight, though the lease it renews to always reflects the
+	// live LeaseDuration).
+	//
+	// Nil disables reload entirely: Config's fields never change after
+	// Manager is constructed, exactly this type's pre-#76 behavior.
+	Reload func(ctx context.Context) Config
 }
 
 // Manager polls a durable repository and dispatches claimed jobs to registered
@@ -41,9 +69,26 @@ type Config struct {
 type Manager struct {
 	repo     domain.JobRepository
 	handlers map[string]Handler
-	cfg      Config
-	logger   *slog.Logger
-	now      func() time.Time
+	// cfg is an atomic.Pointer, not a plain Config, because Run's own
+	// goroutine can replace it wholesale on every poll (reloadConfig)
+	// while job goroutines spawned by earlier polls concurrently read
+	// it (confirmLease, finish, ...); config() is the only accessor,
+	// returning a consistent snapshot for a caller to read multiple
+	// fields from without tearing.
+	cfg    atomic.Pointer[Config]
+	logger *slog.Logger
+	now    func() time.Time
+	// running counts in-flight handler goroutines. It replaces what
+	// used to be a fixed-capacity semaphore channel (Issue #76 PR4b):
+	// a channel's capacity cannot change after creation, which would
+	// make MaxConcurrentJobs unreloadable, so poll instead compares
+	// this counter against the current Config's MaxConcurrentJobs on
+	// every call.
+	running atomic.Int64
+	// ticker is Run's own ticker, stored here (rather than kept as a
+	// local variable in Run) purely so reloadConfig can Reset it; it is
+	// nil until Run starts.
+	ticker *time.Ticker
 }
 
 // NewManager constructs a Manager. Zero values receive conservative defaults
@@ -54,13 +99,23 @@ func NewManager(repo domain.JobRepository, cfg Config, logger *slog.Logger) *Man
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Manager{
+	m := &Manager{
 		repo:     repo,
 		handlers: make(map[string]Handler),
-		cfg:      cfg,
 		logger:   logger,
 		now:      time.Now,
 	}
+	m.cfg.Store(&cfg)
+	return m
+}
+
+// config returns a consistent snapshot of Manager's current
+// configuration. Callers needing more than one field from it in a single
+// logical operation should call this once and read the local copy,
+// rather than calling it repeatedly, so a concurrent reloadConfig cannot
+// be observed partway through.
+func (m *Manager) config() Config {
+	return *m.cfg.Load()
 }
 
 // Register associates jobType with h. Registration is a startup operation and
@@ -82,25 +137,25 @@ func (m *Manager) Run(ctx context.Context) error {
 	workerCtx, cancelWorkers := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWorkers()
 
-	sem := make(chan struct{}, m.cfg.MaxConcurrentJobs)
 	var wg sync.WaitGroup
 	pollCount := 0
 
 	if ctx.Err() == nil {
-		m.poll(ctx, workerCtx, sem, &wg)
+		m.poll(ctx, workerCtx, &wg)
 		pollCount++
 	}
 
-	ticker := time.NewTicker(m.cfg.PollInterval)
-	defer ticker.Stop()
+	m.ticker = time.NewTicker(m.config().PollInterval)
+	defer m.ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			m.logger.Info("job worker stopping", "worker_id", m.cfg.WorkerID)
+			m.logger.Info("job worker stopping", "worker_id", m.config().WorkerID)
 			m.drain(&wg, cancelWorkers)
 			return nil
-		case <-ticker.C:
-			m.poll(ctx, workerCtx, sem, &wg)
+		case <-m.ticker.C:
+			m.reloadConfig(ctx)
+			m.poll(ctx, workerCtx, &wg)
 			pollCount++
 			if pollCount%queueDepthLogEvery == 0 {
 				m.logQueueDepth(ctx)
@@ -109,12 +164,31 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, wg *sync.WaitGroup) {
-	available := cap(sem) - len(sem)
+// reloadConfig applies cfg.Reload, if set, resetting m.ticker when
+// PollInterval actually changed. Split out from Run so the reload
+// decision is testable without waiting on a real ticker (mirrors
+// internal/ingest.Scheduler.reloadInterval /
+// internal/openwebui.CatalogScheduler.reloadInterval).
+func (m *Manager) reloadConfig(ctx context.Context) {
+	prev := m.config()
+	if prev.Reload == nil {
+		return
+	}
+	next := withDefaults(prev.Reload(ctx))
+	next.Reload = prev.Reload
+	m.cfg.Store(&next)
+	if next.PollInterval != prev.PollInterval {
+		m.ticker.Reset(next.PollInterval)
+	}
+}
+
+func (m *Manager) poll(claimCtx, workerCtx context.Context, wg *sync.WaitGroup) {
+	cfg := m.config()
+	available := cfg.MaxConcurrentJobs - int(m.running.Load())
 	if available <= 0 {
 		return
 	}
-	limit := min(available, m.cfg.ClaimBatchSize)
+	limit := min(available, cfg.ClaimBatchSize)
 	now := m.now().UTC()
 	// WorkerID alone is not a sufficient fencing value: this same process can
 	// reclaim one of its expired leases while the old handler is still winding
@@ -122,17 +196,17 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 	// every claim operation a new generation so stale transitions cannot match
 	// a later lease, even when the human-readable worker identity is unchanged.
 	leaseOwner := m.newLeaseOwner()
-	claimed, err := m.repo.Claim(claimCtx, leaseOwner, limit, now, now.Add(m.cfg.LeaseDuration))
+	claimed, err := m.repo.Claim(claimCtx, leaseOwner, limit, now, now.Add(cfg.LeaseDuration))
 	if err != nil {
 		if claimCtx.Err() == nil {
-			m.logger.Warn("job claim failed", "worker_id", m.cfg.WorkerID, "error_category", errorCategory(err))
+			m.logger.Warn("job claim failed", "worker_id", cfg.WorkerID, "error_category", errorCategory(err))
 		}
 		return
 	}
 	claimedAt := m.now().UTC()
 
 	for _, job := range claimed {
-		sem <- struct{}{}
+		m.running.Add(1)
 		wg.Add(1)
 		queueLatency := claimedAt.Sub(job.NextRunAt)
 		if queueLatency < 0 {
@@ -141,14 +215,14 @@ func (m *Manager) poll(claimCtx, workerCtx context.Context, sem chan struct{}, w
 		m.logger.Info("job claimed", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt, "queue_latency_ms", queueLatency.Milliseconds())
 		go func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer m.running.Add(-1)
 			m.runOne(workerCtx, job)
 		}()
 	}
 }
 
 func (m *Manager) newLeaseOwner() string {
-	return m.cfg.WorkerID + ":" + domain.NewID()
+	return m.config().WorkerID + ":" + domain.NewID()
 }
 
 func (m *Manager) runOne(parent context.Context, job domain.Job) {
@@ -171,7 +245,8 @@ func (m *Manager) runOne(parent context.Context, job domain.Job) {
 		result <- h(jobCtx, job)
 	}()
 
-	renewEvery := m.cfg.LeaseDuration - m.cfg.LeaseRenewMargin
+	cfg := m.config()
+	renewEvery := cfg.LeaseDuration - cfg.LeaseRenewMargin
 	renewTicker := time.NewTicker(renewEvery)
 	defer renewTicker.Stop()
 
@@ -202,7 +277,7 @@ func (m *Manager) runOne(parent context.Context, job domain.Job) {
 
 func (m *Manager) confirmLease(ctx context.Context, job domain.Job, periodic bool) bool {
 	now := m.now().UTC()
-	err := m.repo.Renew(ctx, job.ID, claimedLeaseOwner(job), now.Add(m.cfg.LeaseDuration), now)
+	err := m.repo.Renew(ctx, job.ID, claimedLeaseOwner(job), now.Add(m.config().LeaseDuration), now)
 	if err == nil {
 		if periodic {
 			m.logger.Debug("job lease renewed", "job_id", job.ID, "job_type", job.JobType, "attempt", job.Attempt)
@@ -244,7 +319,8 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 		return
 	}
 
-	if job.Attempt+1 >= m.cfg.MaxAttempts {
+	cfg := m.config()
+	if job.Attempt+1 >= cfg.MaxAttempts {
 		if err := m.repo.Kill(ctx, job.ID, claimedLeaseOwner(job), lastError, now); err != nil {
 			m.logTransitionFailure(job, "kill", err)
 			return
@@ -253,7 +329,7 @@ func (m *Manager) finish(ctx context.Context, job domain.Job, handlerErr error) 
 		return
 	}
 
-	m.retry(ctx, job, now.Add(backoff(m.cfg, job.Attempt)), lastError, errorCategory(handlerErr))
+	m.retry(ctx, job, now.Add(backoff(cfg, job.Attempt)), lastError, errorCategory(handlerErr))
 }
 
 func (m *Manager) retry(ctx context.Context, job domain.Job, nextRunAt time.Time, lastError, category string) {
@@ -285,13 +361,13 @@ func (m *Manager) drain(wg *sync.WaitGroup, cancelWorkers context.CancelFunc) {
 		close(done)
 	}()
 
-	timer := time.NewTimer(m.cfg.ShutdownGracePeriod)
+	timer := time.NewTimer(m.config().ShutdownGracePeriod)
 	defer timer.Stop()
 	select {
 	case <-done:
 		return
 	case <-timer.C:
-		m.logger.Warn("job worker grace period exceeded; cancelling in-flight jobs", "worker_id", m.cfg.WorkerID)
+		m.logger.Warn("job worker grace period exceeded; cancelling in-flight jobs", "worker_id", m.config().WorkerID)
 		cancelWorkers()
 		// runOne performs a bounded, detached Retry before it exits. Waiting
 		// here prevents cmd/server from closing the shared DB underneath that
@@ -304,7 +380,7 @@ func (m *Manager) logQueueDepth(ctx context.Context) {
 	counts, err := m.repo.CountByState(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			m.logger.Warn("job queue depth query failed", "worker_id", m.cfg.WorkerID, "error_category", errorCategory(err))
+			m.logger.Warn("job queue depth query failed", "worker_id", m.config().WorkerID, "error_category", errorCategory(err))
 		}
 		return
 	}
