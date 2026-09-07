@@ -294,17 +294,69 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 		{
 			name: "username and host",
 			body: "Hey @luna@ai.tail2c8c7.ts.net, what do you think?",
-			want: "Hey luna, what do you think?",
+			want: "Hey [mention removed], what do you think?",
 		},
 		{
 			name: "bare username without host",
 			body: "cc @owner please review",
-			want: "cc owner please review",
+			want: "cc [mention removed] please review",
 		},
 		{
-			name: "multiple mentions at start and end",
+			name: "multiple mentions separated by whitespace",
 			body: "@luna@ai.tail2c8c7.ts.net and @owner both @luna@ai.tail2c8c7.ts.net",
-			want: "luna and owner both luna",
+			want: "[mention removed] and [mention removed] both [mention removed]",
+		},
+		{
+			// The boundary bug this test guards against: a single
+			// non-overlapping regexp.ReplaceAllString pass's own
+			// "boundary" group consumed the byte that would have let a
+			// second mention starting right where the first one's host
+			// ended qualify as a boundary, so it fell through completely
+			// unstripped (both "@" and host leaking to the provider).
+			name: "back-to-back mentions with no separator",
+			body: "cc @owner@host@luna@ai.tail2c8c7.ts.net done",
+			want: "cc [mention removed][mention removed] done",
+		},
+		{
+			// A third mention chained on with no separator still ends up
+			// fully masked, even though the middle match's own optional
+			// host group ends up absorbing the third mention's leading
+			// "@luna2" as if it were the second mention's host — no raw
+			// "@"/username/host token survives into the provider-facing
+			// text either way, which is the property that actually
+			// matters here.
+			name: "three back-to-back mentions with no separator",
+			body: "@luna@host@owner@luna2@host2 chain",
+			want: "[mention removed][mention removed][mention removed] chain",
+		},
+		{
+			name: "mention immediately followed by closing punctuation",
+			body: "reply(@luna@host) ok",
+			want: "reply([mention removed]) ok",
+		},
+		{
+			// The host label grammar (labels of letters/digits/hyphens
+			// joined by ".") never lets a sentence-ending period after the
+			// host be swallowed into the match, since it is not followed
+			// by another label.
+			name: "sentence-ending period right after the host is preserved",
+			body: "Talk to @luna@host.example.com. Thanks",
+			want: "Talk to [mention removed]. Thanks",
+		},
+		{
+			name: "host with an explicit port is fully stripped",
+			body: "@luna@host.example.com:8080 with port",
+			want: "[mention removed] with port",
+		},
+		{
+			name: "bracketed IPv6 literal host is fully stripped",
+			body: "@luna@[::1] ipv6-ish",
+			want: "[mention removed] ipv6-ish",
+		},
+		{
+			name: "bracketed IPv6 literal host with a port is fully stripped",
+			body: "@luna@[::1]:8080 ipv6 with port",
+			want: "[mention removed] ipv6 with port",
 		},
 		{
 			name: "no mention is unchanged",
@@ -339,8 +391,8 @@ func TestProviderMessages_StripsMentionTagsButLeavesEntryBodyUntouched(t *testin
 	}
 
 	messages := ProviderMessages(path)
-	if len(messages) != 2 || messages[0].Content != "hey luna look at this" {
-		t.Errorf("ProviderMessages = %+v, want stripped mention in messages[0]", messages)
+	if len(messages) != 2 || messages[0].Content != "hey [mention removed] look at this" {
+		t.Errorf("ProviderMessages = %+v, want mention masked in messages[0]", messages)
 	}
 
 	stored, err := env.db.Entries.Get(t.Context(), m0.ID)

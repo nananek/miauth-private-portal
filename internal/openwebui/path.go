@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -157,28 +158,76 @@ func pathNodeRole(ctx context.Context, repos domain.Repos, node domain.Entry) (s
 	}
 }
 
-// mentionStripPattern matches a Misskey-style @mention token — a
-// leading "@", a username of letters/digits/underscores, and an
-// optional "@host" suffix — the same shape Aria/Misskey wire mentions
-// take (internal/timeline.Service's own self-mention detector uses the
-// same "(^|[^A-Za-z0-9_])@..." boundary convention, but pinned to one
-// known username; this pattern is deliberately generic since any
-// actor's mention — the owner, or an Open WebUI VirtualActor's
-// arbitrary slug@host — must be caught here). Requiring a non-word
-// character (or start of string) immediately before the leading "@"
-// means a plain email address's "@" — never itself preceded by another
-// "@" — is never matched.
-var mentionStripPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([A-Za-z0-9_]+)(@[A-Za-z0-9.\-]+)?`)
+// mentionReplacement is what stripMentionTagsForProvider substitutes
+// for an entire matched @mention, username included: an external LLM
+// provider gets no more reason to address, or reason to believe it
+// knows, a specific local username than it would any other redacted
+// detail.
+const mentionReplacement = "[mention removed]"
 
-// stripMentionTagsForProvider rewrites body's Misskey-style @mentions
-// (e.g. "@luna@ai.tail2c8c7.ts.net" or a bare "@owner") down to their
-// plain username before the text is sent to an external LLM provider:
-// the "@" and any "@host" suffix are Aria/Misskey wire syntax, never
-// something the model should see or need to address. This never
-// touches domain.Entry.Body itself — only the copy of the text placed
-// in a Provider-facing Message (Issue #70).
+// mentionPattern matches one Misskey-style @mention token anchored at
+// its own start (the "^" matches the start of whatever suffix of body
+// mentionPattern is applied to, i.e. right at a candidate "@" —
+// stripMentionTagsForProvider never calls FindStringIndex anywhere
+// else): a leading "@", a username of letters/digits/underscores, and
+// an optional "@host" suffix taking any of the shapes Aria/Misskey wire
+// mentions actually use — a dotted hostname (each "."-separated label
+// letters/digits/hyphens, so a sentence-ending period immediately after
+// the host is never consumed, since it is never followed by another
+// label), a bracketed IPv6 literal ("@[::1]"), and either an optional
+// trailing ":port". This pattern is deliberately generic (not pinned to
+// one known username, unlike internal/timeline.Service's own
+// self-mention detector) since any actor's mention — the owner, or an
+// Open WebUI VirtualActor's arbitrary slug@host — must be caught here.
+var mentionPattern = regexp.MustCompile(
+	`^@[A-Za-z0-9_]+(?:@(?:\[[0-9A-Za-z:]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)(?::[0-9]+)?)?`,
+)
+
+// isMentionBoundaryByte reports whether b can never itself be part of a
+// username, i.e. b immediately preceding an "@" cannot make that "@"
+// the middle of a longer token (email-local-part@host and the like).
+func isMentionBoundaryByte(b byte) bool {
+	return !(b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z'))
+}
+
+// stripMentionTagsForProvider rewrites every Misskey-style @mention in
+// body (e.g. "@luna@ai.tail2c8c7.ts.net" or a bare "@owner") to
+// mentionReplacement before the text is sent to an external LLM
+// provider: neither the "@"/host wire syntax nor the bare username
+// itself is something the model should see or need to address. This
+// never touches domain.Entry.Body itself — only the copy of the text
+// placed in a Provider-facing Message (Issue #70).
+//
+// This scans byte by byte instead of doing one regexp.ReplaceAllString
+// pass over the whole body, deliberately: a single non-overlapping
+// pass's own "boundary" group (requiring a non-word byte, or start of
+// string, immediately before the "@") consumes that boundary byte as
+// part of its match, so a second mention starting immediately after the
+// first one's host — with no separating space or punctuation between
+// them — finds the one byte that would have qualified it as a boundary
+// already spent by the previous match, and is left completely
+// unstripped. Scanning byte by byte lets a mention that starts exactly
+// where the previous one ended qualify as a boundary on its own
+// (justStrippedMention), independent of what byte used to sit there.
 func stripMentionTagsForProvider(body string) string {
-	return mentionStripPattern.ReplaceAllString(body, "$1$2")
+	var sb strings.Builder
+	sb.Grow(len(body))
+	justStrippedMention := false
+	for i := 0; i < len(body); {
+		c := body[i]
+		if c == '@' && (i == 0 || justStrippedMention || isMentionBoundaryByte(body[i-1])) {
+			if loc := mentionPattern.FindStringIndex(body[i:]); loc != nil {
+				sb.WriteString(mentionReplacement)
+				i += loc[1]
+				justStrippedMention = true
+				continue
+			}
+		}
+		sb.WriteByte(c)
+		i++
+		justStrippedMention = false
+	}
+	return sb.String()
 }
 
 // ProviderMessages converts path's root-to-parent nodes into the
@@ -186,9 +235,9 @@ func stripMentionTagsForProvider(body string) string {
 // body only, never a local entry id, Misskey metadata, credentials, or a
 // system prompt (roadmap: "The sequence carries no local IDs, Misskey
 // metadata, credentials, system prompt"). Body is each entry's own text
-// with any Misskey-style @mention tags stripped down to a plain
-// username (Issue #70) — domain.Entry.Body itself is untouched. The
-// caller appends the new turn's own Message separately
+// with any Misskey-style @mention — username included — masked out
+// (Issue #70) — domain.Entry.Body itself is untouched. The caller
+// appends the new turn's own Message separately
 // (StartChatRequest.NewTurn / ContinueTurnRequest.NewTurn).
 func ProviderMessages(path TurnPath) []Message {
 	messages := make([]Message, len(path.Nodes))
