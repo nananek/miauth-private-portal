@@ -46,6 +46,7 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		"notes/conversation": true, "notes/children": true, "notes/delete": true,
 		"notes/reactions/create": true, "notes/reactions/delete": true, "notes/reactions": true,
 		"notes/mentions": true, "i/notifications": true, "stats": true,
+		"users/search": true, "users/search-by-username-and-host": true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("endpoints = %v, want exactly %v", got, want)
@@ -233,6 +234,8 @@ func TestProtectedEndpoints_WrongScopeIsAuthenticationFailed(t *testing.T) {
 		{"/api/notes/reactions/create", map[string]any{"noteId": "does-not-exist", "reaction": "👍"}}, // needs write:reactions
 		{"/api/notes/reactions/delete", map[string]any{"noteId": "does-not-exist"}},                  // needs write:reactions
 		{"/api/notes/reactions", map[string]any{"noteId": "does-not-exist"}},                         // needs read:reactions
+		{"/api/users/search", map[string]any{"query": "assistant"}},                                  // needs read:account
+		{"/api/users/search-by-username-and-host", map[string]any{"username": "assistant"}},          // needs read:account
 	}
 	for _, c := range cases {
 		t.Run(c.path, func(t *testing.T) {
