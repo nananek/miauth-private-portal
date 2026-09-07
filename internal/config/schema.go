@@ -121,6 +121,24 @@ const (
 	// internal/openwebui.TurnJobConfig.ViewerBaseURL), so leaving it
 	// unset reproduces pre-#84 behavior exactly.
 	KeyOpenWebUIViewerBaseURL = "OPENWEBUI_VIEWER_BASE_URL"
+
+	// The keys below configure Issue #77 PR1's Drive storage foundation
+	// (ADR-0006). Nothing reads files through them yet — no HTTP
+	// endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build
+	// one — but they are parsed and validated from this PR on, the same
+	// "config exists before its first reader" shape
+	// KeyOpenWebUIGenerationEnabled and its siblings used for Issue #53.
+	KeyDriveBackend           = "DRIVE_BACKEND"
+	KeyDriveDataDir           = "DRIVE_DATA_DIR"
+	KeyDriveS3Endpoint        = "DRIVE_S3_ENDPOINT"
+	KeyDriveS3Bucket          = "DRIVE_S3_BUCKET"
+	KeyDriveS3AccessKeyID     = "DRIVE_S3_ACCESS_KEY_ID"
+	KeyDriveS3SecretAccessKey = "DRIVE_S3_SECRET_ACCESS_KEY"
+	KeyDriveS3UseSSL          = "DRIVE_S3_USE_SSL"
+	KeyDriveS3Region          = "DRIVE_S3_REGION"
+	KeyDriveMaxFileBytes      = "DRIVE_MAX_FILE_BYTES"
+	KeyDriveMaxImageWidth     = "DRIVE_MAX_IMAGE_WIDTH"
+	KeyDriveMaxImageHeight    = "DRIVE_MAX_IMAGE_HEIGHT"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -204,6 +222,17 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIMaxContextMessages,
 	KeyOpenWebUIWebSearchEnabled,
 	KeyOpenWebUIViewerBaseURL,
+	KeyDriveBackend,
+	KeyDriveDataDir,
+	KeyDriveS3Endpoint,
+	KeyDriveS3Bucket,
+	KeyDriveS3AccessKeyID,
+	KeyDriveS3SecretAccessKey,
+	KeyDriveS3UseSSL,
+	KeyDriveS3Region,
+	KeyDriveMaxFileBytes,
+	KeyDriveMaxImageWidth,
+	KeyDriveMaxImageHeight,
 }
 
 func isKnownKey(key string) bool {

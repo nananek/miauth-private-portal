@@ -86,6 +86,17 @@ func defaultOpenWebUIConfig() OpenWebUIConfig {
 	}
 }
 
+func defaultDriveConfig() DriveConfig {
+	return DriveConfig{
+		Backend:        "localdisk",
+		DataDir:        "./data/drive",
+		S3UseSSL:       true,
+		MaxFileBytes:   10_485_760,
+		MaxImageWidth:  8000,
+		MaxImageHeight: 8000,
+	}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -170,6 +181,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 		RSS:       defaultRSSConfig(),
 		IMAP:      defaultIMAPConfig(),
 		OpenWebUI: defaultOpenWebUIConfig(),
+		Drive:     defaultDriveConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -502,7 +514,8 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			LocalOrigin:   "https://portal.example",
 			OwnerUsername: "owner",
 		},
-		Jobs: defaultJobsConfig(),
+		Jobs:  defaultJobsConfig(),
+		Drive: defaultDriveConfig(),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -1756,6 +1769,133 @@ func TestConfig_Redacted_NeverExposesOpenWebUIAPIKey(t *testing.T) {
 	}
 	if unset := (Config{}).Redacted(); unset[KeyOpenWebUIAPIKey] != "<unset>" {
 		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyOpenWebUIAPIKey, unset[KeyOpenWebUIAPIKey])
+	}
+}
+
+func loadWithDrive(t *testing.T, overrides map[string]string) (*Config, error) {
+	t.Helper()
+	return Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(
+		validAuthEnv(),
+		map[string]string{KeyAppEnv: "development"},
+		overrides,
+	))})
+}
+
+func TestLoad_DriveDefaultsToLocaldiskWithoutAnyDriveKeySet(t *testing.T) {
+	cfg, err := loadWithDrive(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Drive, defaultDriveConfig()) {
+		t.Errorf("Drive = %+v, want %+v", cfg.Drive, defaultDriveConfig())
+	}
+}
+
+func TestLoad_DriveLocaldiskRejectsEmptyDataDir(t *testing.T) {
+	_, err := loadWithDrive(t, map[string]string{KeyDriveDataDir: ""})
+	// An explicitly empty override is itself rejected by this
+	// document's "empty env override fails closed" rule
+	// (TestLoad_EmptyEnvOverrideFailsClosedInsteadOfSilentlyDiscardingFileValue),
+	// before Drive's own required-field check ever runs — either way,
+	// an empty DRIVE_DATA_DIR must never silently fall through.
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyDriveDataDir) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyDriveDataDir)
+	}
+}
+
+func TestLoad_DriveInvalidBackendRejected(t *testing.T) {
+	_, err := loadWithDrive(t, map[string]string{KeyDriveBackend: "dropbox"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyDriveBackend) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyDriveBackend)
+	}
+}
+
+func TestLoad_DriveS3CompatRequiresAllFields(t *testing.T) {
+	for _, missing := range []string{
+		KeyDriveS3Endpoint, KeyDriveS3Bucket, KeyDriveS3AccessKeyID, KeyDriveS3SecretAccessKey,
+	} {
+		t.Run(missing, func(t *testing.T) {
+			env := map[string]string{
+				KeyDriveBackend:           "s3compat",
+				KeyDriveS3Endpoint:        "minio.internal:9000",
+				KeyDriveS3Bucket:          "portal-drive",
+				KeyDriveS3AccessKeyID:     "access-key",
+				KeyDriveS3SecretAccessKey: "secret-key",
+			}
+			delete(env, missing)
+			_, err := loadWithDrive(t, env)
+			if err == nil {
+				t.Fatalf("expected error when %s is missing, got nil", missing)
+			}
+			if !strings.Contains(err.Error(), missing) {
+				t.Errorf("error %q does not mention missing field %s", err.Error(), missing)
+			}
+		})
+	}
+}
+
+func TestLoad_DriveS3CompatWithRequiredFieldsSucceeds(t *testing.T) {
+	cfg, err := loadWithDrive(t, map[string]string{
+		KeyDriveBackend:           "s3compat",
+		KeyDriveS3Endpoint:        "minio.internal:9000",
+		KeyDriveS3Bucket:          "portal-drive",
+		KeyDriveS3AccessKeyID:     "access-key",
+		KeyDriveS3SecretAccessKey: "secret-key",
+		KeyDriveS3UseSSL:          "false",
+		KeyDriveS3Region:          "us-east-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := DriveConfig{
+		Backend:           "s3compat",
+		DataDir:           "./data/drive",
+		S3Endpoint:        "minio.internal:9000",
+		S3Bucket:          "portal-drive",
+		S3AccessKeyID:     "access-key",
+		S3SecretAccessKey: "secret-key",
+		S3UseSSL:          false,
+		S3Region:          "us-east-1",
+		MaxFileBytes:      10_485_760,
+		MaxImageWidth:     8000,
+		MaxImageHeight:    8000,
+	}
+	if !reflect.DeepEqual(cfg.Drive, want) {
+		t.Errorf("Drive = %+v, want %+v", cfg.Drive, want)
+	}
+}
+
+func TestLoad_DriveMaxImageDimensionsOutOfBoundsRejected(t *testing.T) {
+	_, err := loadWithDrive(t, map[string]string{KeyDriveMaxImageWidth: "0"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), KeyDriveMaxImageWidth) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyDriveMaxImageWidth)
+	}
+}
+
+func TestConfig_RedactedHidesDriveS3Secrets(t *testing.T) {
+	const secretKey = "s3-secret-value"
+	cfg := Config{Drive: DriveConfig{S3AccessKeyID: "access-id", S3SecretAccessKey: secretKey}}
+	redacted := cfg.Redacted()
+	if strings.Contains(redacted[KeyDriveS3AccessKeyID], "access-id") {
+		t.Errorf("Redacted()[%s] leaked the raw value", KeyDriveS3AccessKeyID)
+	}
+	if strings.Contains(redacted[KeyDriveS3SecretAccessKey], secretKey) {
+		t.Errorf("Redacted()[%s] leaked the raw value: %q", KeyDriveS3SecretAccessKey, redacted[KeyDriveS3SecretAccessKey])
+	}
+	if redacted[KeyDriveS3SecretAccessKey] != "<set>" {
+		t.Errorf("Redacted()[%s] = %q, want <set>", KeyDriveS3SecretAccessKey, redacted[KeyDriveS3SecretAccessKey])
+	}
+	if unset := (Config{}).Redacted(); unset[KeyDriveS3SecretAccessKey] != "<unset>" {
+		t.Errorf("Redacted()[%s] = %q, want <unset>", KeyDriveS3SecretAccessKey, unset[KeyDriveS3SecretAccessKey])
 	}
 }
 

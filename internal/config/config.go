@@ -42,6 +42,11 @@ type Config struct {
 	// OpenWebUI configures Issue #52's Open WebUI registry and identity
 	// projection. Like LLM/RSS/IMAP it is off by default.
 	OpenWebUI OpenWebUIConfig
+	// Drive configures Issue #77 PR1's Drive storage foundation. Unlike
+	// LLM/RSS/IMAP/OpenWebUI it has no Enabled flag: Backend's own value
+	// ("localdisk" or "s3compat") is always meaningful, so there is no
+	// third "off" state to represent.
+	Drive DriveConfig
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -375,6 +380,61 @@ type OpenWebUIConfig struct {
 	ViewerBaseURL string
 }
 
+// DriveConfig configures Issue #77 PR1's Drive storage foundation
+// (ADR-0006): a single object-storage backend, selected for this
+// deployment's whole lifetime, and the raster-image validation bounds
+// every upload must satisfy. Nothing reads through it yet — it exists so
+// PR3/PR4/PR5/PR6 have a validated configuration surface to build
+// against, the same "config before its first reader" precedent Issue
+// #53's OpenWebUIConfig fields set.
+type DriveConfig struct {
+	// Backend selects the internal/drive.Storage implementation:
+	// "localdisk" (the default) or "s3compat". A deployment picks
+	// exactly one; there is no per-file or per-request backend switch
+	// and no migration path between them.
+	Backend string
+	// DataDir is the localdisk backend's root directory, defaulting to
+	// "./data/drive" (matching DBConfig.Path's own "./data/..." default).
+	// It must not be empty when Backend is "localdisk"; whether it
+	// exists on disk is internal/drive.Local's concern at first use, not
+	// this package's — the same "config validates shape, the consumer
+	// validates reachability" split DBConfig.Path already has.
+	DataDir string
+	// S3Endpoint, S3Bucket, S3AccessKeyID, and S3SecretAccessKey
+	// configure the s3compat backend (AWS S3 or a self-hosted
+	// S3-compatible store such as MinIO). Required only when Backend is
+	// "s3compat". S3SecretAccessKey is a credential: never logged or
+	// returned to a client, see Redacted.
+	//
+	// These arrive as plain configured values, not a secret_ref
+	// indirection — internal/openwebui/registry.go's secret_ref pattern
+	// (the database stores only a configuration key's *name*) applies to
+	// a value some other row in this database points at; nothing in this
+	// PR persists Drive configuration to a database row for a secret_ref
+	// to name. If a future PR adds a database-stored Drive setting that
+	// needs a credential, it should reuse the same secret_ref
+	// indirection rather than storing S3SecretAccessKey's value again.
+	S3Endpoint        string
+	S3Bucket          string
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	// S3UseSSL selects https (true, the default) or http against
+	// S3Endpoint.
+	S3UseSSL bool
+	// S3Region is passed to the S3 client when non-empty; most
+	// S3-compatible servers (MinIO included) do not require it.
+	S3Region string
+	// MaxFileBytes bounds any single uploaded file, image or not.
+	MaxFileBytes int64
+	// MaxImageWidth and MaxImageHeight bound a raster image's decoded
+	// pixel dimensions (internal/drive.ValidateImage), independent of
+	// MaxFileBytes: a small but pathologically large-dimension image
+	// (a "decompression bomb") is rejected by this check even when it
+	// fits comfortably under the byte-size bound.
+	MaxImageWidth  int
+	MaxImageHeight int
+}
+
 // FieldError names one invalid, missing, or unknown config field. It never
 // carries the offending raw value, so it is always safe to log.
 type FieldError struct {
@@ -539,6 +599,9 @@ const (
 	openWebUIMaxResponseBytesMin                                   = 65_536
 	openWebUIMaxRequestBytesMin                                    = 1
 	openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax = 1, 1000
+
+	driveMaxFileBytesMin                                 = 1
+	driveMaxImageDimensionMin, driveMaxImageDimensionMax = 1, 100_000
 )
 
 // imapAllowedTLSModes is the single source of truth for IMAP_TLS_MODE:
@@ -612,6 +675,18 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.RSS.MaxRedirects = parseOptionalInt(values, KeyRSSMaxRedirects, 3, rssMaxRedirectsMin, rssMaxRedirectsMax, &errs)
 	cfg.RSS.SummaryMaxChars = parseOptionalInt(values, KeyRSSSummaryMaxChars, 4000, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax, &errs)
 	cfg.RSS.AllowInsecureHTTP = parseOptionalBool(values, KeyRSSAllowInsecureHTTP, false, &errs)
+
+	cfg.Drive.Backend = parseOptionalEnum(values, KeyDriveBackend, "localdisk", []string{"localdisk", "s3compat"}, &errs)
+	cfg.Drive.DataDir = parseOptionalString(values, KeyDriveDataDir, "./data/drive")
+	cfg.Drive.S3Endpoint = parseOptionalString(values, KeyDriveS3Endpoint, "")
+	cfg.Drive.S3Bucket = parseOptionalString(values, KeyDriveS3Bucket, "")
+	cfg.Drive.S3AccessKeyID = parseOptionalString(values, KeyDriveS3AccessKeyID, "")
+	cfg.Drive.S3SecretAccessKey = parseOptionalString(values, KeyDriveS3SecretAccessKey, "")
+	cfg.Drive.S3UseSSL = parseOptionalBool(values, KeyDriveS3UseSSL, true, &errs)
+	cfg.Drive.S3Region = parseOptionalString(values, KeyDriveS3Region, "")
+	cfg.Drive.MaxFileBytes = parseOptionalInt64(values, KeyDriveMaxFileBytes, 10_485_760, driveMaxFileBytesMin, &errs)
+	cfg.Drive.MaxImageWidth = parseOptionalInt(values, KeyDriveMaxImageWidth, 8000, driveMaxImageDimensionMin, driveMaxImageDimensionMax, &errs)
+	cfg.Drive.MaxImageHeight = parseOptionalInt(values, KeyDriveMaxImageHeight, 8000, driveMaxImageDimensionMin, driveMaxImageDimensionMax, &errs)
 
 	cfg.IMAP.Enabled = parseOptionalBool(values, KeyIMAPEnabled, false, &errs)
 	cfg.IMAP.Host = parseOptionalString(values, KeyIMAPHost, "")
@@ -749,6 +824,33 @@ func (c Config) Validate() error {
 		validateIntBounds(&errs, KeyRSSSummaryMaxChars, c.RSS.SummaryMaxChars, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax)
 	}
 
+	// Drive has no Enabled flag (DriveConfig's doc comment) — Backend
+	// always selects one of the two branches below, so exactly one of
+	// them is always validated, unlike RSS/IMAP/OpenWebUI's "skip
+	// everything while disabled" shape.
+	switch c.Drive.Backend {
+	case "localdisk":
+		if c.Drive.DataDir == "" {
+			errs = append(errs, FieldError{Key: KeyDriveDataDir, Reason: "required when " + KeyDriveBackend + "=localdisk"})
+		}
+	case "s3compat":
+		if c.Drive.S3Endpoint == "" {
+			errs = append(errs, FieldError{Key: KeyDriveS3Endpoint, Reason: "required when " + KeyDriveBackend + "=s3compat"})
+		}
+		if c.Drive.S3Bucket == "" {
+			errs = append(errs, FieldError{Key: KeyDriveS3Bucket, Reason: "required when " + KeyDriveBackend + "=s3compat"})
+		}
+		if c.Drive.S3AccessKeyID == "" {
+			errs = append(errs, FieldError{Key: KeyDriveS3AccessKeyID, Reason: "required when " + KeyDriveBackend + "=s3compat"})
+		}
+		if c.Drive.S3SecretAccessKey == "" {
+			errs = append(errs, FieldError{Key: KeyDriveS3SecretAccessKey, Reason: "required when " + KeyDriveBackend + "=s3compat"})
+		}
+	}
+	validateInt64Min(&errs, KeyDriveMaxFileBytes, c.Drive.MaxFileBytes, driveMaxFileBytesMin)
+	validateIntBounds(&errs, KeyDriveMaxImageWidth, c.Drive.MaxImageWidth, driveMaxImageDimensionMin, driveMaxImageDimensionMax)
+	validateIntBounds(&errs, KeyDriveMaxImageHeight, c.Drive.MaxImageHeight, driveMaxImageDimensionMin, driveMaxImageDimensionMax)
+
 	// IMAP fields are only required/bound-checked when the feature is
 	// actually enabled: IMAP_ENABLED defaults to false, and a disabled
 	// deployment must not fail startup over an unset IMAP setting it will
@@ -880,10 +982,24 @@ func (c Config) Redacted() map[string]string {
 		KeyRSSMaxRedirects:                           strconv.Itoa(c.RSS.MaxRedirects),
 		KeyRSSSummaryMaxChars:                        strconv.Itoa(c.RSS.SummaryMaxChars),
 		KeyRSSAllowInsecureHTTP:                      strconv.FormatBool(c.RSS.AllowInsecureHTTP),
-		KeyIMAPEnabled:                               strconv.FormatBool(c.IMAP.Enabled),
-		KeyIMAPHost:                                  c.IMAP.Host,
-		KeyIMAPPort:                                  strconv.Itoa(c.IMAP.Port),
-		KeyIMAPTLSMode:                               c.IMAP.TLSMode,
+		KeyDriveBackend:                              c.Drive.Backend,
+		KeyDriveDataDir:                              c.Drive.DataDir,
+		KeyDriveS3Endpoint:                           c.Drive.S3Endpoint,
+		KeyDriveS3Bucket:                             c.Drive.S3Bucket,
+		// DRIVE_S3_ACCESS_KEY_ID/DRIVE_S3_SECRET_ACCESS_KEY are S3
+		// credentials: only whether each is set is shown here, matching
+		// LLM_API_KEY's treatment.
+		KeyDriveS3AccessKeyID:     redactedSetOrUnset(c.Drive.S3AccessKeyID),
+		KeyDriveS3SecretAccessKey: redactedSetOrUnset(c.Drive.S3SecretAccessKey),
+		KeyDriveS3UseSSL:          strconv.FormatBool(c.Drive.S3UseSSL),
+		KeyDriveS3Region:          c.Drive.S3Region,
+		KeyDriveMaxFileBytes:      strconv.FormatInt(c.Drive.MaxFileBytes, 10),
+		KeyDriveMaxImageWidth:     strconv.Itoa(c.Drive.MaxImageWidth),
+		KeyDriveMaxImageHeight:    strconv.Itoa(c.Drive.MaxImageHeight),
+		KeyIMAPEnabled:            strconv.FormatBool(c.IMAP.Enabled),
+		KeyIMAPHost:               c.IMAP.Host,
+		KeyIMAPPort:               strconv.Itoa(c.IMAP.Port),
+		KeyIMAPTLSMode:            c.IMAP.TLSMode,
 		// IMAP_USERNAME can be a personal email address; only whether it
 		// is set is shown here, matching LLM_API_KEY's treatment.
 		KeyIMAPUsername:         redactedSetOrUnset(c.IMAP.Username),

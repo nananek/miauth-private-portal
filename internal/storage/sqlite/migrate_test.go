@@ -15,6 +15,7 @@ var expectedTables = []string{
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
 	"external_sources", "external_items", "reactions", "mentions", "notifications",
 	"openwebui_workspaces", "openwebui_models", "openwebui_conversation_links", "openwebui_turn_links",
+	"files",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {
@@ -1026,6 +1027,60 @@ func TestMigrate_UpgradeAppliesOpenWebUITurnOutcomeColumns(t *testing.T) {
 		`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_openwebui_links_state'`,
 	).Scan(&indexName); err != nil {
 		t.Errorf("idx_openwebui_links_state should exist after upgrade: %v", err)
+	}
+}
+
+// TestMigrate_UpgradeAppliesFilesTable backs migration 0021 (Issue #77
+// PR1). No repository writes through this table yet (PR3/PR4/PR5/PR6
+// are what will), so this only checks the table and its constraints
+// exist and accept a row shaped like ADR-0006 describes, the same
+// "new empty table" upgrade shape as
+// TestMigrate_UpgradeAppliesOpenWebUIRegistryTables.
+func TestMigrate_UpgradeAppliesFilesTable(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 20)
+	ctx := t.Context()
+
+	const ownerID = "pre-existing-owner"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, owner_actor_id, purpose, mime, byte_size, sha256, storage_key, width, height, created_at)
+		 VALUES ('f1', ?, 'avatar', 'image/png', 1024, 'deadbeef', 'avatars/f1.png', 256, 256, '2024-01-01T00:00:00Z')`,
+		ownerID,
+	); err != nil {
+		t.Fatalf("insert file after upgrade: %v", err)
+	}
+
+	// A file with no owning actor (a PR4 source favicon) and no image
+	// dimensions (a non-image attachment) must also be representable.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, owner_actor_id, purpose, mime, byte_size, sha256, storage_key, width, height, created_at)
+		 VALUES ('f2', NULL, 'source_favicon', 'image/x-icon', 512, 'cafebabe', 'favicons/f2.ico', NULL, NULL, '2024-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("insert ownerless file after upgrade: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, purpose, mime, byte_size, sha256, storage_key, created_at)
+		 VALUES ('f3', 'bogus', 'image/png', 1, 'x', 'x', '2024-01-01T00:00:00Z')`,
+	); err == nil {
+		t.Error("expected the purpose CHECK constraint to reject an unknown purpose")
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, purpose, mime, byte_size, sha256, storage_key, created_at)
+		 VALUES ('f4', 'attachment', 'image/png', 1, 'x', 'avatars/f1.png', '2024-01-01T00:00:00Z')`,
+	); err == nil {
+		t.Error("expected the storage_key UNIQUE constraint to reject a duplicate key")
 	}
 }
 
