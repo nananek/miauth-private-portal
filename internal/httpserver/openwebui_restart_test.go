@@ -48,45 +48,31 @@ func (p *restartFakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatI
 }
 
 // runOpenWebUITurnJobFor finds the pending "openwebui_turn" job enqueued
-// for sourceEntryID and hands it to a fresh *openwebui.TurnJob backed by
-// ts's own repos/timeline and provider, mirroring how
+// for sourceEntryID (via findOpenWebUITurnJobFor, openwebui_testhelpers_
+// test.go) and hands it to a fresh *openwebui.TurnJob backed by ts's own
+// repos/timeline and provider, mirroring how
 // TestOpenWebUIEndToEnd_PostToProjectedVirtualActorReply (openwebui_e2e_
-// test.go) carries a job the rest of the way to a projected reply.
+// test.go) carries a job the rest of the way to a projected reply. It
+// expects Handle to succeed outright; a scenario whose turn legitimately
+// ends ambiguous or failed instead uses
+// runOpenWebUITurnJobForIgnoringError.
 func runOpenWebUITurnJobFor(t *testing.T, ts *noteAPITestServer, provider openwebui.Provider, sourceEntryID string) {
 	t.Helper()
-	jobRows, err := ts.db.Jobs.List(t.Context(), domain.JobFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var turnJob domain.Job
-	for _, j := range jobRows {
-		if j.JobType == openwebui.JobType && j.SourceEntryID != nil && *j.SourceEntryID == sourceEntryID {
-			turnJob = j
-		}
-	}
-	if turnJob.ID == "" {
-		t.Fatalf("no %q job for source entry %q among %v", openwebui.JobType, sourceEntryID, jobRows)
-	}
+	turnJob := findOpenWebUITurnJobFor(t, ts, sourceEntryID)
 	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
 	if err := handler.Handle(t.Context(), turnJob); err != nil {
 		t.Fatalf("TurnJob.Handle: %v", err)
 	}
 }
 
-// onlyChildOf posts /api/notes/children for parentID and requires
-// exactly one reply, returning it. Every step in this test's chain is a
-// single reply to the note before it, so "exactly one child" also pins
-// that restart never duplicates a reply onto the same parent.
+// onlyChildOf returns parentID's single reply via notesChildren
+// (openwebui_testhelpers_test.go), failing the test if there is not
+// exactly one. Every step in this test's chain is a single reply to the
+// note before it, so "exactly one child" also pins that restart never
+// duplicates a reply onto the same parent.
 func onlyChildOf(t *testing.T, ts *noteAPITestServer, parentID string) note {
 	t.Helper()
-	rec := ts.post(t, "/api/notes/children", map[string]any{"noteId": parentID})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("notes/children(%s): %d %s", parentID, rec.Code, rec.Body.String())
-	}
-	var children []note
-	if err := json.Unmarshal(rec.Body.Bytes(), &children); err != nil {
-		t.Fatalf("decode children: %v", err)
-	}
+	children := notesChildren(t, ts, parentID)
 	if len(children) != 1 {
 		t.Fatalf("children of %s = %v, want exactly 1", parentID, children)
 	}
