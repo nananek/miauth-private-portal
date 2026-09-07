@@ -373,6 +373,198 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.
 	}
 }
 
+// --- Issue #74: params.function_calling=legacy ---
+
+// TestClient_ContinueTurn_NeitherFeatureNorToolIDs_OmitsParams backs
+// Issue #74's "no behavior change for a plain turn" requirement:
+// without WebSearchEnabled/ToolIDs configured, the completions request
+// carries no "params" key at all — byte-for-byte the same shape as
+// before Issue #74, matching TestClient_..._DefaultOff_OmitsBothKeys's
+// "the key itself is absent, not merely empty" style.
+func TestClient_ContinueTurn_NeitherFeatureNorToolIDs_OmitsParams(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawKeys map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &sawKeys); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if _, ok := sawKeys["params"]; ok {
+		t.Error(`completions request has a "params" key, want it entirely absent when neither WebSearchEnabled nor ToolIDs is set`)
+	}
+}
+
+// TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling
+// and TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling
+// back Issue #74's fix: whenever either opt-in flag is in use, the
+// completions request also carries params.function_calling="legacy" -
+// Open WebUI's non_streaming_chat_response_handler never processes a
+// native tool_calls response (ADR-0005's tool/web-search addendum), so
+// this buffered stream:false adapter would otherwise hang the assistant
+// message at done:false forever whenever the model decided to call a
+// tool (Issue #74's exact report).
+func TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawBody struct {
+		Params *struct {
+			FunctionCalling string `json:"function_calling"`
+		} `json:"params"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &sawBody); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.ToolIDs = []string{"calculator"}
+	})
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if sawBody.Params == nil || sawBody.Params.FunctionCalling != "legacy" {
+		t.Errorf("completions request params = %+v, want {function_calling: legacy}", sawBody.Params)
+	}
+}
+
+func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *testing.T) {
+	const assistantID = "assistant-1"
+	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
+
+	var sawBody struct {
+		Params *struct {
+			FunctionCalling string `json:"function_calling"`
+		} `json:"params"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &sawBody); err != nil {
+				t.Fatalf("decode completions request: %v", err)
+			}
+			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.WebSearchEnabled = true
+	})
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if sawBody.Params == nil || sawBody.Params.FunctionCalling != "legacy" {
+		t.Errorf("completions request params = %+v, want {function_calling: legacy}", sawBody.Params)
+	}
+}
+
+// --- Issue #74: startup-time tool/model resolution ---
+
+// TestClient_GetModelTools_ReturnsToolIDsAndDefaultFeatureIDs backs
+// Phase 1: GetModelTools reads modelID's own info.meta.toolIds/
+// defaultFeatureIds out of GET /api/models's response (fixture recorded
+// against the pinned target — docs/compat/openwebui-0.11.3.md).
+func TestClient_GetModelTools_ReturnsToolIDsAndDefaultFeatureIDs(t *testing.T) {
+	modelsResp := loadFixture(t, "models_response.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/models" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, modelsResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	toolIDs, defaultFeatureIDs, err := client.GetModelTools(t.Context(), "mock-model")
+	if err != nil {
+		t.Fatalf("GetModelTools: %v", err)
+	}
+	if !reflect.DeepEqual(toolIDs, []string{"calculator"}) {
+		t.Errorf("toolIDs = %v, want [calculator]", toolIDs)
+	}
+	if !reflect.DeepEqual(defaultFeatureIDs, []string{"web_search"}) {
+		t.Errorf("defaultFeatureIDs = %v, want [web_search]", defaultFeatureIDs)
+	}
+}
+
+// TestClient_GetModelTools_UnknownModelReturnsNil backs the "not this
+// call's concern" contract: a model id absent from the response (an
+// access-filtered or unknown model) returns nil, nil, nil rather than
+// an error - the resolution caller decides what an unknown model means.
+func TestClient_GetModelTools_UnknownModelReturnsNil(t *testing.T) {
+	modelsResp := loadFixture(t, "models_response.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, modelsResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	toolIDs, defaultFeatureIDs, err := client.GetModelTools(t.Context(), "no-such-model")
+	if err != nil {
+		t.Fatalf("GetModelTools: %v", err)
+	}
+	if toolIDs != nil || defaultFeatureIDs != nil {
+		t.Errorf("toolIDs=%v defaultFeatureIDs=%v, want both nil for an unknown model", toolIDs, defaultFeatureIDs)
+	}
+}
+
+// TestClient_ListAccessibleTools_ReturnsEveryToolID backs Phase 1:
+// ListAccessibleTools reads every tool's id out of GET /api/v1/tools/'s
+// response (fixture recorded against the pinned target).
+func TestClient_ListAccessibleTools_ReturnsEveryToolID(t *testing.T) {
+	toolsResp := loadFixture(t, "tools_response.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/tools/" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, toolsResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	ids, err := client.ListAccessibleTools(t.Context())
+	if err != nil {
+		t.Fatalf("ListAccessibleTools: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"calculator"}) {
+		t.Errorf("ids = %v, want [calculator]", ids)
+	}
+}
+
 // --- error classification ---
 
 func TestClient_StartChat_ChatsNewReturns401_AuthFailed(t *testing.T) {

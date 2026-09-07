@@ -1,0 +1,52 @@
+{
+  "data": [
+    {
+      "id": "mock-model",
+      "object": "model",
+      "owned_by": "openai",
+      "connection_type": "external",
+      "name": "mock-model",
+      "info": {
+        "id": "mock-model",
+        "user_id": "phase0-admin",
+        "base_model_id": null,
+        "name": "mock-model",
+        "meta": {
+          "description": null,
+          "capabilities": null,
+          "knowledge": null,
+          "toolIds": [
+            "calculator"
+          ],
+          "defaultFeatureIds": [
+            "web_search"
+          ]
+        },
+        "access_grants": [],
+        "is_active": true,
+        "updated_at": 1788770728,
+        "created_at": 1788770728
+      },
+      "actions": [],
+      "filters": [],
+      "tags": []
+    },
+    {
+      "id": "arena-model",
+      "name": "Arena Model",
+      "info": {
+        "meta": {
+          "description": "Submit your questions to anonymous AI chatbots and vote on the best response.",
+          "model_ids": null
+        }
+      },
+      "object": "model",
+      "created": 0,
+      "owned_by": "arena",
+      "arena": true,
+      "actions": [],
+      "filters": [],
+      "tags": []
+    }
+  ]
+}

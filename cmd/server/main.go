@@ -135,6 +135,44 @@ func run() error {
 		// rather than dropped — the same unregistered-job-type recovery
 		// path LLM's gate relies on.
 		if cfg.OpenWebUI.GenerationEnabled {
+			// bootstrapClient is used only for the two startup-time,
+			// read-only calls below (Issue #74) — it deliberately
+			// carries the pre-resolution WebSearchEnabled/ToolIDs
+			// (irrelevant to GetModelTools/ListAccessibleTools) rather
+			// than being reused as the turn-serving client, so the
+			// resolved values below are what every actual completions
+			// call ends up carrying, not the raw config.
+			bootstrapClient, err := owuiprovider.NewClient(owuiprovider.Config{
+				BaseURL:          cfg.OpenWebUI.BaseURL,
+				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
+				APIKey:           cfg.OpenWebUI.APIKey,
+				Timeout:          cfg.OpenWebUI.Timeout,
+				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
+				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
+			})
+			if err != nil {
+				return fmt.Errorf("build openwebui bootstrap client: %w", err)
+			}
+
+			var resolvedToolIDs []string
+			var resolvedWebSearch bool
+			resolved, err := openwebui.ResolveEffectiveToolConfig(ctx, bootstrapClient, cfg.OpenWebUI.DefaultModelID,
+				cfg.OpenWebUI.ToolIDs, cfg.OpenWebUI.WebSearchEnabled, logger)
+			if err != nil {
+				// Fail-closed, not fail-stop (Issue #74, owner-approved):
+				// a target that is merely unreachable at boot must not
+				// prevent the rest of the server from starting — the
+				// same "a dead provider never blocks local posting"
+				// principle GenerationEnabled's own gate already
+				// follows — so tool_ids/web_search stay at their zero
+				// values (disabled) for this run rather than being
+				// retried or treated as fatal.
+				logger.Error("openwebui: failed to resolve tool/web-search configuration at startup; disabling both for this run",
+					"error", err)
+			} else {
+				resolvedToolIDs, resolvedWebSearch = resolved.ToolIDs, resolved.WebSearchEnabled
+			}
+
 			owuiProvider, err := owuiprovider.NewClient(owuiprovider.Config{
 				BaseURL:          cfg.OpenWebUI.BaseURL,
 				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
@@ -142,8 +180,8 @@ func run() error {
 				Timeout:          cfg.OpenWebUI.Timeout,
 				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
 				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-				WebSearchEnabled: cfg.OpenWebUI.WebSearchEnabled,
-				ToolIDs:          cfg.OpenWebUI.ToolIDs,
+				WebSearchEnabled: resolvedWebSearch,
+				ToolIDs:          resolvedToolIDs,
 			})
 			if err != nil {
 				return fmt.Errorf("build openwebui provider client: %w", err)

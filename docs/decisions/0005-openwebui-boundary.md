@@ -3,7 +3,8 @@
 - Status: Accepted for Issue #51 (OWUI-C)
 - Date: 2026-09-06
 - Scope: Issues #50–#54 (umbrella #50; OWUI-C #51, OWUI-P #52, OWUI-B #53,
-  OWUI-R #54); amended for Issue #72 (opt-in `features`/`tool_ids`)
+  OWUI-R #54); amended for Issue #72 (opt-in `features`/`tool_ids`) and
+  Issue #74 (native-FC/legacy fix, startup tool/model resolution)
 
 ## Context
 
@@ -353,9 +354,10 @@ completions call. These are opt-in flags this adapter sets on the outbound
 request, nothing more: the tool call itself (a web search, an MCP-backed
 tool, or any other builtin) always runs inside Open WebUI's own request-
 handling loop, within the same single buffered HTTP call D3 already
-describes — this repository implements no MCP protocol, spawns no tool
-process, and never sees an intermediate tool-call step, only the final
-answer.
+describes, **provided the request also sets `params.function_calling:
+"legacy"` (Issue #74 — see D17)**. This repository implements no MCP
+protocol, spawns no tool process, and never sees an intermediate tool-call
+step, only the final answer.
 
 Web search results and other tool output reach the model's final answer
 the same way any other upstream text does, so AGENTS.md's existing rule —
@@ -366,9 +368,89 @@ the rest of a completion's content.
 
 `OPENWEBUI_TOOL_IDS` is sent as opaque strings; this service has no way to
 list or validate a target instance's tool registry, so a typo'd id simply
-never matches anything server-side rather than failing closed here. Which
-tools exist, and what they are allowed to do, remains entirely the Open
-WebUI administrator's responsibility.
+never matches anything server-side rather than failing closed here (D17
+amends this: at startup, resolution filters the configured/model-default
+list against the target's own accessible-tools list, so a stale or
+inaccessible id is dropped and logged rather than sent as-is — the
+completions request itself still cannot validate an id Open WebUI accepts
+and silently no-ops on). Which tools exist, and what they are allowed to
+do, remains entirely the Open WebUI administrator's responsibility.
+
+### D17. `function_calling: "legacy"` is required, and tool_ids resolves against the target's own registry at startup
+
+Issue #74 (real-instance verification, see
+[`docs/compat/openwebui-0.11.3.md`](../compat/openwebui-0.11.3.md)'s Phase 0
+observation record) found that D16's "single buffered call" claim was only
+true under Open WebUI's *legacy* function-calling path. Under the
+*native* path — this adapter's pre-#74 default — Open WebUI puts the
+resolved tool specs directly on the completions request as an OpenAI-style
+`tools` array and lets the model decide whether to call one. A model that
+does call one returns `tool_calls` with an empty `content`; Open WebUI's
+`non_streaming_chat_response_handler` (the handler this adapter's
+`stream:false` calls always hit) reads only `choices[0].message.content` /
+`response_data['output']`, both empty in that case, and returns without
+ever marking the assistant message done — the exact "turn wedged forever
+undone" bug Issue #74 reports. `features.web_search` fares worse under the
+native path via this adapter: Open WebUI skips its own forced web-search
+injection specifically *because* native function calling is available, and
+offers the alternative (a builtin `web_search` tool) only to a request that
+carries `metadata.session_id` — a UI-session concept an API-key bridge
+call never has — so `features.web_search=true` silently does nothing at
+all, neither wedging nor searching.
+
+The fix: whenever this adapter sets `features` or `tool_ids` on a
+completions request, it also sets `"params": {"function_calling":
+"legacy"}`. Under legacy mode, Open WebUI resolves tool calls and web
+search via its own internal pre-completion calls *before* the actual
+generation request this adapter's response depends on, so by the time this
+adapter's `stream:false` call is answered, the model has already produced
+an ordinary content-bearing response — the same shape this adapter always
+expected. `params` is otherwise never sent: a plain turn with neither
+`features` nor `tool_ids` carries no `params` key at all, unchanged from
+before Issue #74. Phase 0 verified all of this against a locally run pinned
+0.11.3 instance (a real Tool registered via the "Tools" admin feature, a
+real self-hosted SearXNG backend) — not source reading alone — including
+that `history.currentId`/`current_message_id` correlation (D2, D6) still
+names this adapter's own client-chosen assistant message id under legacy
+mode, so no change was needed to `LookupTurnOutcome`'s correlation logic.
+
+`OPENWEBUI_TOOL_IDS` additionally gained a startup-time resolution step
+(`internal/openwebui.ResolveEffectiveToolConfig`, called once from
+`cmd/server/main.go` before the turn-serving client is built, never
+per-turn): unset defers to the target model's own configured `toolIds`
+(`GET /api/models`'s `info.meta.toolIds`); a non-empty configured list
+overrides the model's default entirely; the literal single-entry value
+`"none"` explicitly disables tools even when the model has its own
+`toolIds` configured (the only way to force zero tools onto such a
+model). Either way, the resulting candidate list is then filtered to ids
+`GET /api/v1/tools/` actually reports for this adapter's own account —
+fail-closed, never "assume a stale id would still work" — and every
+excluded id is logged individually rather than silently dropped. If
+either read-only resolution call itself fails (the target is unreachable
+at boot, say), the whole server does not fail to start over it: `main.go`
+disables both `tool_ids` and `web_search` for that run and logs the
+failure at error level, the same "a dead provider never blocks the rest
+of the server" principle `OPENWEBUI_GENERATION_ENABLED`'s own gate
+already follows.
+
+`OPENWEBUI_WEB_SEARCH_ENABLED` gained no equivalent model-default
+fallback: it is a plain, always-explicit bool (Issue #72), with no
+"unset" state distinct from `false` to defer to the model's own
+`defaultFeatureIds` from — unlike `OPENWEBUI_TOOL_IDS`, which has a clean
+three-state shape (unset / list / `"none"`) an empty slice already
+represents. Whatever value is configured is sent verbatim; adding a
+model-default fallback for web search would need
+`OPENWEBUI_WEB_SEARCH_ENABLED` to become a tri-state config key first,
+which this issue's scope does not require and which no other
+`OPENWEBUI_*` key in this codebase does today. This is not only a
+config-shape gap: Issue #72 already decided, and this key's own row in
+[`docs/operations/configuration.md`](../operations/configuration.md)
+already states, that `OPENWEBUI_WEB_SEARCH_ENABLED` is "independent of,
+and never inferred from, any per-model web-search setting configured in
+the Open WebUI instance's own admin/web UI". A model-default fallback for
+the "unset" state would relitigate that decision, not merely extend it —
+so even a future tri-state upgrade should not wire `defaultFeatureIds`
+into this key without first revisiting Issue #72's own reasoning.
 
 ## Consequences
 

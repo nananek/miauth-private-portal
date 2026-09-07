@@ -233,6 +233,25 @@ type completionsRequestBody struct {
 	// behavior change until an operator opts in via config.
 	Features *featuresBody `json:"features,omitempty"`
 	ToolIDs  []string      `json:"tool_ids,omitempty"`
+	// Params is Issue #74's fix: set only when this call also carries
+	// Features or ToolIDs (never on a plain turn — no behavior change
+	// for a caller that uses neither). Open WebUI's non_streaming_chat_
+	// response_handler never processes a native tool_calls response (it
+	// only reads choices[0].message.content), so a buffered stream:false
+	// call whose model decides to call a tool natively hangs the
+	// assistant message at done:false forever. function_calling=legacy
+	// routes web search and tool execution through a pre-completion
+	// injection step instead (Open WebUI's own internal task calls),
+	// which the buffered handler processes normally — see ADR-0005's
+	// tool/web-search addendum.
+	Params *paramsBody `json:"params,omitempty"`
+}
+
+// paramsBody is the subset of Open WebUI's per-request `params` object
+// this adapter sets: only FunctionCalling, only the literal "legacy"
+// value, only when Issue #72's opt-in tool/web-search flags are in use.
+type paramsBody struct {
+	FunctionCalling string `json:"function_calling"`
 }
 
 // featuresBody is the subset of Open WebUI's `features` request object
@@ -305,6 +324,9 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 	if len(c.toolIDs) > 0 {
 		reqBody.ToolIDs = c.toolIDs
 	}
+	if reqBody.Features != nil || len(reqBody.ToolIDs) > 0 {
+		reqBody.Params = &paramsBody{FunctionCalling: "legacy"}
+	}
 
 	data, err := c.post(ctx, openwebui.PhaseTurn, "/api/chat/completions", reqBody)
 	if err != nil {
@@ -373,6 +395,86 @@ func (c *Client) StartChat(ctx context.Context, req openwebui.StartChatRequest) 
 // ContinueTurn implements openwebui.Provider.
 func (c *Client) ContinueTurn(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error) {
 	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt)
+}
+
+// --- GET /api/models ---
+
+type modelsResponseBody struct {
+	Data []modelResponseEntry `json:"data"`
+}
+
+type modelResponseEntry struct {
+	ID   string `json:"id"`
+	Info *struct {
+		Meta struct {
+			ToolIDs           []string `json:"toolIds"`
+			DefaultFeatureIDs []string `json:"defaultFeatureIds"`
+		} `json:"meta"`
+	} `json:"info"`
+}
+
+// GetModelTools calls GET /api/models (Issue #74) and returns modelID's
+// own info.meta.toolIds and info.meta.defaultFeatureIds — the same
+// per-model tool/feature defaults the Open WebUI admin panel configures
+// (compat: these are opaque, access-filtered by Open WebUI per the
+// caller's own grant, never validated further by this adapter). Both
+// return nil if the model carries neither, or if modelID does not
+// appear in the response at all (an access-filtered or unknown model
+// name is not this call's concern — the resolution caller decides what
+// that means).
+//
+// This is a startup-time-only call: unlike StartChat/ContinueTurn/
+// LookupTurnOutcome, it is not part of the Provider interface (a
+// per-turn contract) — a deployment resolves its effective tool
+// configuration once at boot, not on every turn.
+func (c *Client) GetModelTools(ctx context.Context, modelID string) (toolIDs []string, defaultFeatureIDs []string, err error) {
+	data, err := c.get(ctx, openwebui.PhaseTurn, "/api/models")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var parsed modelsResponseBody
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
+			fmt.Errorf("decode models response: %w", err))
+	}
+
+	for _, m := range parsed.Data {
+		if m.ID != modelID || m.Info == nil {
+			continue
+		}
+		return m.Info.Meta.ToolIDs, m.Info.Meta.DefaultFeatureIDs, nil
+	}
+	return nil, nil, nil
+}
+
+// --- GET /api/v1/tools/ ---
+
+type toolUserResponseEntry struct {
+	ID string `json:"id"`
+}
+
+// ListAccessibleTools calls GET /api/v1/tools/ (Issue #74) and returns
+// every tool id this adapter's own account may invoke — the same
+// access-filtered list Open WebUI itself resolves tool_ids against.
+// Startup-time-only, like GetModelTools.
+func (c *Client) ListAccessibleTools(ctx context.Context) ([]string, error) {
+	data, err := c.get(ctx, openwebui.PhaseTurn, "/api/v1/tools/")
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed []toolUserResponseEntry
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
+			fmt.Errorf("decode tools response: %w", err))
+	}
+
+	ids := make([]string, 0, len(parsed))
+	for _, t := range parsed {
+		ids = append(ids, t.ID)
+	}
+	return ids, nil
 }
 
 // --- GET /api/v1/chats/{id} ---

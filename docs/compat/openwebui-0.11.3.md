@@ -63,15 +63,69 @@ as contract:
   **要実機確認**);
 - `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` / `API_KEYS_ALLOWED_ENDPOINTS`
   behavior — both settings exist, neither was exercised;
-- tool/function/MCP execution, `/api/chat/completed` outlet semantics beyond
-  "it echoes the posted body", and attachment/file handling.
+- `/api/chat/completed` outlet semantics beyond "it echoes the posted
+  body", and attachment/file handling;
+- a **production** instance's tool/web-search behavior: this document's
+  Issue #74 observation record below used a locally run pinned instance,
+  a real self-hosted SearXNG backend, and one real Python Tool — not the
+  production deployment. A real MCP Tool Server, tool-call error handling
+  against a real (non-mock) model backend, and
+  `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`-bounded loop latency remain
+  **要実機確認**, tracked in Issue #50.
 
-Issue #72 adds `features.web_search`/`tool_ids` as opt-in request fields
-based on the pinned backend's own source (not a live-instance observation);
-the actual behavior of a real search backend, a real MCP Tool Server,
-tool-call error handling, and `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`-
-bounded loop latency against a real target instance remain **要実機確認**,
-tracked in Issue #50.
+### Observation record: Issue #74 Phase 0 (tool/web-search execution)
+
+- Date: 2026-09-07 (Asia/Tokyo)
+- Method: the same pinned image and digest as above, run locally via
+  `docker compose` alongside two more local-only containers: a purpose-
+  built OpenAI-compatible mock backend (extended from the one above to
+  also emulate Open WebUI's internal task calls — the tool-decision call
+  and the search-query-generation call — and native OpenAI-style
+  `tool_calls` responses), and an unmodified `searxng/searxng` instance
+  with its JSON API enabled, configured as Open WebUI's `WEB_SEARCH_ENGINE`.
+  One real Python Tool (a calculator — the exact example Issue #74's own
+  acceptance criteria cite) was registered through the "Tools" admin
+  feature (`POST /api/v1/tools/create`). No production instance, third-
+  party model provider, real credential, or personal data was involved.
+- **Native function calling (this adapter's pre-#74 default) reproduces
+  Issue #74's bug exactly.** A `stream:false` completions request
+  carrying `tool_ids` with no `params.function_calling` puts the tool
+  spec on the request as an OpenAI-style `tools` array in the same call;
+  when the (mocked) model responded the way a real tool-calling model
+  does — `tool_calls` set, `content` empty — `GET /api/v1/chats/{id}`
+  showed the assistant message present but **`done:false` forever**
+  (polled repeatedly with no change). This matches
+  `non_streaming_chat_response_handler` reading only
+  `choices[0].message.content`, confirmed against the pinned backend's
+  own source (revision `0a7c15832fb30b1903753e83f81dc7d27e5b0944`, the
+  same one `Pinned image` above resolves to).
+- **`features.web_search=true` alone (no `tool_ids`, no legacy param) is
+  a silent no-op through this adapter**, not a hang: Open WebUI's own
+  source skips the forced web-search injection specifically because
+  native function calling is available, and the alternative (a builtin
+  `web_search` tool offered to the model) requires `metadata.session_id`
+  — a UI-session concept this adapter's API-key calls never set. No
+  SearXNG request was observed, and the saved assistant message carried
+  no search sources at all, while still completing `done:true`.
+- **`params.function_calling: "legacy"` fixes both.** With `tool_ids` set
+  and legacy mode requested, the real calculator Tool was genuinely
+  invoked server-side — verified two ways: the completions response's
+  `sources` field carried `"The result of 12 * 7 is 84."` (a value only
+  the real Python tool's own `eval()` could have produced, not the mock),
+  and the Tool's own code independently wrote that same expression/result
+  pair to a file inside the container. With `features.web_search=true`
+  and legacy mode requested, real SearXNG queries were observed (engine
+  activity in SearXNG's own logs at matching timestamps) and real scraped
+  page content reached the completions response's `sources` field. Both
+  cases completed `done:true`, and in both cases
+  `history.currentId`/`current_message_id` named this adapter's own
+  client-chosen assistant message id — the same correlation D2/D6 already
+  assume, unaffected by legacy mode.
+- A plain turn using neither `features` nor `tool_ids` carries no
+  `params` key at all, confirmed against
+  `TestClient_StartChat_LinearAgainstFixtures`/
+  `TestClient_ContinueTurn_LinearAgainstFixtures`'s fixture-equality
+  checks, which still pass unmodified.
 
 ## Endpoint classification and allowlist
 
@@ -80,7 +134,8 @@ tracked in Issue #50.
 | `POST /api/v1/chats/new` | **必要** | Creates the persistent chat and fixes its `chat_id` *before* any generation runs | Body is a free-form chat object; the server assigns the id |
 | `POST /api/chat/completions` | **必要** | Executes one turn (`StartChat` and `ContinueTurn` both map here) | The only generating call. Chat management is opted into by sending a `parent_id` key |
 | `GET /api/v1/chats/{id}` | **必要** | Reads back `done`/`error`/`currentId` to classify a turn's outcome | Read of *this* bridge's own chat only; never used to browse or import history |
-| `GET /api/models` | **必要** | Resolves and validates the configured `external_model_id` | Also the health signal for "this credential can see the model" |
+| `GET /api/models` | **必要** | Resolves and validates the configured `external_model_id`; also reads `info.meta.toolIds`/`defaultFeatureIds` at startup to resolve `OPENWEBUI_TOOL_IDS` (Issue #74, `Client.GetModelTools`) | Also the health signal for "this credential can see the model" |
+| `GET /api/v1/tools/` | **必要** | Startup-only: resolves which tool ids this account may actually invoke, to filter `OPENWEBUI_TOOL_IDS`/the model's own `toolIds` fail-closed (Issue #74, `Client.ListAccessibleTools`) | Called once at boot, never per-turn |
 | `GET /api/v1/auths/` | **必要** | Credential liveness / whoami probe | Cheapest call that proves the API key is still valid |
 | `GET /api/version` | **必要** | Records the running version for drift detection against this document | Unauthenticated |
 | `POST /api/v1/auths/signup` | **運用のみ** | Creates the dedicated account (first account becomes `admin`) | One-time provisioning |
@@ -95,9 +150,10 @@ tracked in Issue #50.
 | `GET /api/v1/chats/`, `/all`, `/search`, `POST /api/v1/chats/import` | **不要** | Listing, searching, and importing existing chats | Explicit roadmap non-goals |
 | `POST /api/chat/completed` | **不要** | Outlet hook; observed to echo the posted body | Not needed for a buffered turn |
 
-The credential's minimum runtime endpoint set is therefore the six **必要**
-rows. If `API_KEYS_ALLOWED_ENDPOINTS` is used to restrict the key
-(**要実機確認**), that is the list to allow.
+The credential's minimum runtime endpoint set is therefore the seven
+**必要** rows (Issue #74 adds `GET /api/v1/tools/` to what was six). If
+`API_KEYS_ALLOWED_ENDPOINTS` is used to restrict the key (**要実機確認**),
+that is the list to allow.
 
 ## Shared request, authentication, and error rules
 
@@ -564,6 +620,8 @@ All fixtures live in [`fixtures/openwebui/`](fixtures/openwebui/).
 | `error_401_chat_not_found.json` | observed | Another account's chat is 401, not 404 |
 | `error_400_model_not_found.json` | observed | Unknown/invisible model |
 | `error_422_validation.json` | **synthetic**, from the recorded response shape | Pydantic validation array, shown for a typed body (`POST /api/v1/chats/new` without `chat`) — completions never returns one |
+| `models_response.json` | observed (Issue #74 Phase 0, real pinned instance + a workspace model configured with `toolIds`/`defaultFeatureIds`) | `GET /api/models`'s `data[].info.meta.toolIds`/`defaultFeatureIds` shape `Client.GetModelTools` reads |
+| `tools_response.json` | observed (Issue #74 Phase 0, the real calculator Tool registered through the admin "Tools" feature) | `GET /api/v1/tools/`'s per-tool `id` shape `Client.ListAccessibleTools` reads |
 | `openapi-0.11.3.excerpt.json` | observed, filtered | 13 paths and 21 schemas out of 485/314: the schemas those paths reference, plus the request bodies of the declined and unverified endpoints whose paths were left out (`ForkForm`, `EventForm`, `MessageForm`, `ModelForm`). `info.version` is FastAPI's default `0.1.0`, **not** the Open WebUI version |
 
 ## Non-goals and implementation boundary
