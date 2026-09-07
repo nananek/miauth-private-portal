@@ -142,6 +142,8 @@ func run() error {
 				Timeout:          cfg.OpenWebUI.Timeout,
 				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
 				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
+				WebSearchEnabled: cfg.OpenWebUI.WebSearchEnabled,
+				ToolIDs:          cfg.OpenWebUI.ToolIDs,
 			})
 			if err != nil {
 				return fmt.Errorf("build openwebui provider client: %w", err)

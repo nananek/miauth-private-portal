@@ -95,6 +95,11 @@ const (
 	KeyOpenWebUIMaxResponseBytes   = "OPENWEBUI_MAX_RESPONSE_BYTES"
 	KeyOpenWebUIMaxRequestBytes    = "OPENWEBUI_MAX_REQUEST_BYTES"
 	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
+
+	// The two keys below are Issue #72's opt-in web-search/tool-use
+	// flags for the outbound completions call.
+	KeyOpenWebUIWebSearchEnabled = "OPENWEBUI_WEB_SEARCH_ENABLED"
+	KeyOpenWebUIToolIDs          = "OPENWEBUI_TOOL_IDS"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -177,6 +182,8 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIMaxResponseBytes,
 	KeyOpenWebUIMaxRequestBytes,
 	KeyOpenWebUIMaxContextMessages,
+	KeyOpenWebUIWebSearchEnabled,
+	KeyOpenWebUIToolIDs,
 }
 
 func isKnownKey(key string) bool {

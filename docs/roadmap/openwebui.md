@@ -719,8 +719,11 @@ Default permissions:
   #1/#5/#7 owner policy;
 - VirtualActor cannot log in, use MiAuth, own credentials, or perform remote
   actions;
-- arbitrary workspace/model/remote-chat switching and tool/function/MCP
-  execution are outside MVP;
+- arbitrary workspace/model/remote-chat switching is outside MVP, as is
+  this service itself executing a tool, running an MCP server, or
+  interpreting a tool call — only requesting Open WebUI's own configured
+  tools/web search via request-level `features`/`tool_ids` flags is in
+  scope (Issue #72);
 - user-supplied base URL, host, redirect, and callback are never used as-is;
   adapter validation enforces HTTPS, fixed origin allowlist, redirect-hop
   revalidation (or redirects disabled), timeout, response-size limits, and
@@ -889,7 +892,10 @@ reclaimable; releasing a live lease could issue a duplicate remote turn.
 - automatic discovery or management of all Open WebUI workspaces/models;
 - Misskey/ActivityPub federation, remote discovery, signatures,
   inbox/outbox, or remote callbacks;
-- tool/function/MCP execution or autonomous agent loops;
+- this service itself executing a tool, running an MCP server, or
+  interpreting a tool call — only asking Open WebUI's own configured
+  tools/web search via request-level flags is in scope (Issue #72);
+  autonomous agent loops remain out of scope;
 - arbitrary Open WebUI URLs or unrestricted tenant switching;
 - complete bidirectional local/remote edit/delete synchronization;
 - same-remote-chat full branch management, remote branch replay, and
@@ -900,11 +906,14 @@ reclaimable; releasing a live lease could issue a duplicate remote turn.
   publication;
 - multi-user/role model, PostgreSQL, and custom UI.
 
-The feature must preserve #1's single-owner, non-federation, and
-non-tool-execution boundaries. Shared provider code with #9 may be reused,
-but outbound chat creation/continuation and VirtualActor remain behind a
-separate feature flag and release gate. Existing Open WebUI chat import and
-pull-sync code is deliberately not a deferred TODO; it is outside this track.
+The feature must preserve #1's single-owner and non-federation boundaries,
+and this service's own non-tool-execution boundary (tool execution,
+including any MCP-backed tool, always happens inside the Open WebUI instance
+itself, never in this codebase — Issue #72). Shared provider code with #9
+may be reused, but outbound chat creation/continuation and VirtualActor
+remain behind a separate feature flag and release gate. Existing Open WebUI
+chat import and pull-sync code is deliberately not a deferred TODO; it is
+outside this track.
 
 ## Issue #1/#2 traceability
 
@@ -980,7 +989,9 @@ MVP goal.
   payload, key/session/cookie/prompt/body leakage in logs/traces/fixtures or
   error responses, unauthorized backup access to local bodies/remote IDs,
   owner-only permission, arbitrary remote identifiers, and no tool/function/
-  MCP execution.
+  MCP execution **by this service itself** (Issue #72: requesting Open
+  WebUI's own tool/web-search execution via `features`/`tool_ids` is in
+  scope; this service running a tool or MCP server is not).
 - **Notification:** local post success independent of provider result, no
   implicit mention/unread or VirtualActor fan-out, and owner-only
   auth/ambiguous/contract status metadata.

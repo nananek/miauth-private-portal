@@ -3,7 +3,7 @@
 - Status: Accepted for Issue #51 (OWUI-C)
 - Date: 2026-09-06
 - Scope: Issues #50–#54 (umbrella #50; OWUI-C #51, OWUI-P #52, OWUI-B #53,
-  OWUI-R #54)
+  OWUI-R #54); amended for Issue #72 (opt-in `features`/`tool_ids`)
 
 ## Context
 
@@ -13,7 +13,12 @@ persistent Open WebUI chat, and the model's answer comes back as a child in the
 same Aria thread. The Aria `reply_to_id` tree stays the conversation's source
 of truth; Open WebUI identifiers are correlation metadata. Reading, listing,
 importing, or reconciling existing Open WebUI chats is out of scope, as is
-federation, tool execution, and any custom UI.
+federation and any custom UI. This service never executes a tool, runs an
+MCP server, or interprets a tool call itself (Issue #72); it may only ask
+the target Open WebUI instance — a separately administered service the
+owner already trusts — to use its own configured tools via request-level
+`features`/`tool_ids` flags, the same way it already asks for a persistent
+chat or a continuation.
 
 The roadmap deliberately refused to assume the target's API shape. Its
 "Implementation start conditions" require the version, the persistent-chat
@@ -339,6 +344,31 @@ host; sizes/timeouts/rate limits; the production version; the model-access
 grant procedure for a non-admin account; socket.io streaming). Each is
 written as `TBD (see #50)` or `要実機確認` at the point where it matters, with
 no placeholder value that could be mistaken for a decision.
+
+### D16. Tool/web-search execution is Open WebUI's own, never this service's
+
+Issue #72 adds `OPENWEBUI_WEB_SEARCH_ENABLED` and `OPENWEBUI_TOOL_IDS`,
+surfaced as request-level `features.web_search`/`tool_ids` fields on every
+completions call. These are opt-in flags this adapter sets on the outbound
+request, nothing more: the tool call itself (a web search, an MCP-backed
+tool, or any other builtin) always runs inside Open WebUI's own request-
+handling loop, within the same single buffered HTTP call D3 already
+describes — this repository implements no MCP protocol, spawns no tool
+process, and never sees an intermediate tool-call step, only the final
+answer.
+
+Web search results and other tool output reach the model's final answer
+the same way any other upstream text does, so AGENTS.md's existing rule —
+treat posts, feeds, mail, remote API responses, and LLM output as
+untrusted data — applies to them without any new mechanism: nothing here
+parses, executes, or otherwise trusts a tool's output differently from
+the rest of a completion's content.
+
+`OPENWEBUI_TOOL_IDS` is sent as opaque strings; this service has no way to
+list or validate a target instance's tool registry, so a typo'd id simply
+never matches anything server-side rather than failing closed here. Which
+tools exist, and what they are allowed to do, remains entirely the Open
+WebUI administrator's responsibility.
 
 ## Consequences
 
