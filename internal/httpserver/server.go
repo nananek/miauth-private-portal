@@ -119,6 +119,10 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	s.Handle("GET /readyz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeHealthResult(w, logger, reg.Ready(r.Context()))
 	}))
+	// Issue #77 PR2: default favicon/OGP/PWA icons (staticicons.go),
+	// always registered like the health routes above — a fresh install
+	// must show a real icon with no configuration.
+	s.registerStaticIcons()
 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
