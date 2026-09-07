@@ -97,6 +97,23 @@ redacted.
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
 | `POST /api/users/search` | **必要** for Issue #65 (implemented) | User-selection dialog and mention/search autocomplete's query-based lookup | `i` token; `read:account` (already granted — no new scope) |
 | `POST /api/users/search-by-username-and-host` | **必要** for Issue #65 (implemented) | Same call sites' exact username(+host) lookup | `i` token; `read:account` (already granted — no new scope) |
+| `POST /api/drive` | **必要** for Issue #77 (not yet implemented — PR3) | Drive capacity/usage display (drive screen header, account settings) | `i` token; new `read:drive` scope |
+| `POST /api/drive/files` | **必要** for Issue #77 (PR3) | Drive screen's per-folder file listing, paginated with `untilId`/`limit` | `i` token; `read:drive` |
+| `POST /api/drive/files/create` | **必要** for Issue #77 (PR3) | Upload from local file (post composer, profile avatar picker, drive screen); both the multipart-file and raw-binary request forms are used | `i` token; new `write:drive` scope |
+| `POST /api/drive/files/show` | **必要** for Issue #77 (PR3) | Opening one drive file's detail page | `i` token; `read:drive` |
+| `POST /api/drive/files/update` | **必要** for Issue #77 (PR3) | Rename, toggle sensitive, edit comment, and move-to-folder — all four via the same endpoint as a partial-field POST | `i` token; `write:drive` |
+| `POST /api/drive/files/delete` | **必要** for Issue #77 (PR3) | Drive file delete action | `i` token; `write:drive` |
+| `POST /api/drive/files/upload-from-url` | **必要** for Issue #77 (PR3) | Drive screen's "upload from URL" action | `i` token; `write:drive` |
+| `POST /api/drive/files/attached-notes` | **必要** for Issue #77 (PR3/PR6) | Drive file detail page's "notes this file is attached to" list | `i` token; `read:drive` + `read:notes` |
+| `POST /api/drive/files/move-bulk` | **要実機確認**; optional | Drive multi-select bulk-move action — Aria probes `POST /api/endpoints` first and transparently falls back to per-file `drive/files/update` moves when the name is absent | Omitting this name from this service's `/api/endpoints` response is sufficient to make Aria always use the per-file fallback instead of implementing this endpoint |
+| `POST /api/drive/folders`, `/create`, `/delete`, `/update`, `/show` | **必要** for Issue #77 (PR3) | Drive screen's folder browsing, creation, rename, and move UI — used extensively, not an edge feature | `i` token; `read:drive`/`write:drive` |
+| `POST /api/drive/stream` | **不要** | No traced Aria source ever calls this (`MisskeyDrive.stream` has no Aria call site) | N/A — never implement without a new observed source |
+| `POST /api/drive/files/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
+| `POST /api/drive/files/check-existence` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
+| `POST /api/drive/files/find-by-hash` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
+| `POST /api/drive/folders/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
+| `POST /api/notes/create` (`fileIds` field) | **必要** for Issue #77 (PR6, not yet implemented) | Post composer's attachment picker (new local upload or existing drive file) | Already-granted `write:notes` — no new scope |
+| `POST /api/i/update` (`avatarId` field) | **必要** for Issue #77 (PR5, not yet implemented) | Profile avatar upload/removal flow | `write:account` (already granted). **Currently rejected as `UNSUPPORTED_FEATURE`** along with every other non-`name` `IUpdateRequest` field per the Issue #23 scope decision above; PR5 must add this one field explicitly rather than opening up the rest |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -106,8 +123,15 @@ must not claim edit support until the later endpoint decision is made.
 For this contract, the exact effective local API scope set is
 `read:account`, `read:notes`, `write:notes`, (since Issue #23 PR1)
 `write:account`, (since Issue #23 PR4) `read:reactions`/
-`write:reactions`, and (since Issue #23 PR6) `read:notifications`. The
-broad `permission` query from Aria is recorded for
+`write:reactions`, (since Issue #23 PR6) `read:notifications`, and
+(planned, Issue #77 PR3) `read:drive`/`write:drive`. Aria's MiAuth
+`permission` query already includes `read:drive,write:drive` today (it
+requests the union of every feature it supports, independent of what any
+given instance implements), so once PR3 adds these two names to
+`grantableScopes` an **existing** local API token issued before that
+change will not carry them — the same re-authorization-required situation
+this document already records for `read:notifications`/PR6 and for
+plan-issue-23's other newly-granted scopes. The broad `permission` query from Aria is recorded for
 compatibility but does not grant any additional scope. `meta`, `endpoints`,
 the MiAuth page, and the MiAuth check use their documented browser or
 anonymous/session capability and do not consume a local API token. `/api/i`,
@@ -358,7 +382,10 @@ the only field this issue's PR1 scope implements
 (`docs/decisions`/Issue #23 Non-goals: avatar, description, and the rest of
 `IUpdateRequest`'s 40+ fields are out of scope and must be rejected the same
 way `/api/notes/create` rejects unsupported fields — `UNSUPPORTED_FEATURE`, not
-silently ignored).
+silently ignored). **Issue #77 PR5 narrows this**: `avatarId` moves from
+rejected to implemented (see this document's "Drive API and note
+attachments" section below for the traced `files/create` → `i/update
+{avatarId: ...}` sequence); every other non-`name` field stays rejected.
 
 **`username` is not part of this contract.** The pinned `IUpdateRequest` model
 has no `username` field at all — Misskey's real `/api/i/update` does not
@@ -551,7 +578,7 @@ The pinned `StatsResponse` parser treats every field as optional:
 | `originalUsersCount` | int | Always `1`, for the same reason |
 | `reactionsCount` | int | Total reactions ever stored, across every entry (`ReactionRepository.CountAll`, added by Issue #23 PR4; a fixed `0` before that PR) |
 | `instances` | int | Always `0` — no federation |
-| `driveUsageLocal` / `driveUsageRemote` | int | Always `0` — no drive |
+| `driveUsageLocal` / `driveUsageRemote` | int | Always `0` today — no drive. Once Issue #77 PR3 adds `files`, whether to sum `files.byte_size` here (and whether "remote" ever applies without federation) is that PR's decision, not this document's; this row is stale in intent but not in current behavior until PR3 ships |
 
 ### `POST /api/notes/delete` (Issue #23 PR3, implemented)
 
@@ -1006,6 +1033,145 @@ on every projection built through this struct, including `/api/i` and the
 MiAuth check response, which were already unaffected since Aria decodes
 their `user` field directly as `UserDetailedNotMe`, never through the
 polymorphic `User`/`UserDetailed` discriminator).
+
+### Drive API and note attachments (Issue #77 investigation — PR0)
+
+**This section documents a contract for functionality this service does not
+implement yet.** Issue #77 (PR3/PR5/PR6) will implement Drive, profile
+avatars, and post attachments; this PR0 records what the pinned Aria
+snapshot and its pinned `misskey_dart` dependency actually do, so those
+later PRs implement an observed protocol rather than a remembered one
+(AGENTS.md: "Do not silently invent a protocol"), matching the method
+Issue #72 used for Open WebUI tool-call feasibility. Traced from the
+pinned Aria commit
+[`a66c9303`](https://github.com/poppingmoon/aria/tree/a66c9303995e7c964765cf382de6a9b0e3f4a3b6)'s
+`lib/provider/api/drive_files_notifier_provider.dart`,
+`drive_file_notifier_provider.dart`, `drive_folders_notifier_provider.dart`,
+`drive_folder_provider.dart`, `drive_stats_provider.dart`,
+`attached_notes_notifier_provider.dart`, `attaches_notifier_provider.dart`,
+`endpoints_notifier_provider.dart`, `post_notifier_provider.dart`,
+`lib/extension/notes_create_request_extension.dart` and
+`note_draft_extension.dart`, `lib/model/post_file.dart`, and
+`lib/view/page/settings/profile_page.dart`/`i_notifier_provider.dart`, plus
+the pinned `misskey_dart` commit
+[`14176c515`](https://github.com/poppingmoon/misskey_dart/tree/14176c515a005a9fb01d3e6365a49b5a5d387a92)'s
+`lib/src/misskey_drive.dart` (the full Drive API surface the client
+exposes) and `lib/src/data/base/drive_file.dart`/`note.dart`.
+
+**Every Drive/folder endpoint the allowlist table above marks 必要 is
+genuinely called by Aria's drive screen** (`drive_page.dart`,
+`drive_file_page.dart`, and the widgets under `lib/view/widget/drive_*.dart`
+and `file_picker_sheet.dart`); this is not a generic client capability Aria
+merely links in. In particular, **the folder API is not a corner case**:
+`DriveFoldersNotifier`/`driveFolderProvider` implement full folder listing,
+creation, deletion, rename, and move, and the drive screen surfaces all of
+them. A Drive implementation that hard-codes every file to a single root
+folder (`folderId: null`) and treats `drive/folders/*` as unsupported will
+make those UI actions fail outright rather than degrade gracefully —
+narrower than plan-issue-77 v2 §2.1's "minimal or unsupported" framing for
+folders assumed before this trace.
+
+**`DriveFile`'s required fields** (`misskey_dart`'s
+`lib/src/data/base/drive_file.dart`): `id`, `createdAt`, `name`, `type`
+(MIME string), `md5`, `size` (bytes), `isSensitive`, `properties`, `url`.
+Nullable: `blurhash`, `thumbnailUrl`, `comment`, `folderId`, `folder`,
+`userId`, `user`. Nested `properties` (`DriveFileProperties`) is itself
+required but every one of its own fields — `width`, `height`,
+`orientation`, `avgColor` — is nullable, so a non-image attachment can
+project `properties: {}`. **There is no discriminator key on `DriveFile`**
+(unlike `User`/`UserDetailed`'s `"url"`/`"avatarId"` keys traced above) —
+every field decodes structurally, so there is no equivalent trap to guard
+against here. `url` (the full-resolution asset) is required; `thumbnailUrl`
+is optional, so a backend that does not generate thumbnails may omit it
+(Aria's `media_card.dart`/`post_file_thumbnail.dart` fall back to `url`
+when `thumbnailUrl` is null).
+
+**`url`/`thumbnailUrl` are consumed as plain HTTP(S) URLs through Aria's
+image cache manager** (`cacheManagerProvider.getSingleFile(file.url)` in
+`profile_page.dart`, and equivalently in the media widgets) — an ordinary
+GET with no special headers traced. This is consistent with either serving
+the byte stream directly or issuing a redirect to it, but redirect-based
+serving specifically (a `localdisk`/`s3compat` backend issuing a 302 to a
+presigned URL) has not been traced against a real client HTTP stack and is
+**要実機確認** per this document's existing convention, not a blocker to
+implementing it.
+
+**Endpoints traced as genuinely unused by Aria** (**不要**, also listed in
+the allowlist table above): `drive/stream`, `drive/files/find`,
+`drive/files/check-existence`, `drive/files/find-by-hash`,
+`drive/folders/find`. None has any Aria call site; `misskey_dart` defines
+wrapper methods for all of them regardless (the client library's surface is
+broader than what Aria itself uses, same pattern already noted for
+`notifications/mark-all-as-read`).
+
+**`drive/files/move-bulk` degrades gracefully when absent.**
+`DriveFilesNotifier.moveBulkFrom` first calls this service's already-traced
+`POST /api/endpoints` (see this document's dedicated section above) and
+checks whether `"drive/files/move-bulk"` is in the returned list; only if
+so does it call the bulk endpoint, otherwise it issues one
+`drive/files/update` (`folderId` change) per file instead. **This service
+can skip implementing `drive/files/move-bulk` entirely by simply never
+including that name in its `/api/endpoints` response** — Aria's fallback
+path is exercised automatically, not an error state.
+
+**`notes/create`'s `fileIds`**: `NoteDraft.setFiles` sets `fileIds: null`
+(and `files: null`) when the attachment list is empty, and
+`toNotesCreateRequest()` passes `fileIds` straight through — so an
+attachment-less post omits the `fileIds` key entirely (same
+null-omission convention as every other optional field this document
+records), never an explicit `fileIds: []`. When files are attached, the
+array is the drive-file IDs in the composer's own (user-reorderable via
+`AttachesNotifier.reorder`) display order — this service must preserve
+that order as the attachment order, which is exactly plan-issue-77 v2
+§2.3's `entry_files.position` design.
+
+**A single drive file can be attached to more than one note — this
+corrects plan-issue-77 v2 §2.3's tentative "1:1 might be enough"
+framing.** `PostFile` (`lib/model/post_file.dart`) has two variants:
+`LocalPostFile` (a not-yet-uploaded local file) and `DrivePostFile` (an
+existing `DriveFile` selected from the drive, not freshly uploaded).
+`AttachesNotifier.add`/`addAll` de-duplicate a `DrivePostFile` only within
+the *same* compose session by drive-file ID; nothing stops the same
+already-uploaded file from being selected into a second, independent post
+later. This is corroborated by `drive/files/attached-notes`
+(`AttachedNotesNotifier`, traced above) existing specifically to answer
+"which notes is this drive file attached to" as a one-to-many query, and by
+`profile_page.dart`'s `_getFile` reusing a `DrivePostFile.file` directly
+(no re-upload) when the user picks an existing drive file without
+cropping. **`entry_files` must therefore support one `files` row
+referenced by many `entries` rows** (a genuine many-to-many join table,
+not a 1:1 pointer plan-issue-77 v2 tentatively allowed) — deleting one
+`files` row while `entry_files` rows still reference it, or vice versa, is
+the ownership/GC edge case PR6/PR7 must define, not something PR0 resolves.
+
+**Avatar upload sequence confirms plan-issue-77 v2 §2.5's hypothesis.**
+`profile_page.dart`'s `_getFile` calls
+`drive.files.create`/`createAsBinary` (optionally after a client-side
+crop, which re-uploads the cropped bytes as a *new* drive file rather than
+mutating the original), then the caller passes the resulting `DriveFile.id`
+to `INotifier.setAvatarId`, which does
+`apiService.post('i/update', {'avatarId': avatarId}, excludeRemoveNullPredicate: (_, _) => true)`
+— i.e. `POST /api/drive/files/create` (or `createAsBinary`) followed by
+`POST /api/i/update {"avatarId": "<fileId>"}`, and `avatarId: null` is sent
+explicitly (not omitted) to clear the avatar, which is why the call site
+opts out of this document's usual null-field-omission rule for this one
+field. PR5 must accept an explicit-null `avatarId` as "remove avatar," not
+reject it as a validation error.
+
+**`POST /api/notes/timeline`'s `withFiles` flag is currently accepted and
+ignored** (`internal/httpserver/noteapi_handlers.go`'s `WithFiles *bool`
+field, per its own comment). Aria sends it as a user-configurable
+"only show notes with attachments" timeline filter reflecting an Aria
+setting, not a fixed value; whether to start honoring it is a PR6/PR7
+implementation decision, not a PR0 finding, since it has no effect while
+every note's `files`/`fileIds` are empty regardless of the flag.
+
+**`Note.files`/`Note.fileIds` default to `[]` when absent** (already noted
+in this document's "Minimum Note contract" section below via
+`misskey_dart`'s `@Default([])`), so returning an explicit empty array
+(this service's current behavior, `internal/httpserver/noteapi_wire.go`)
+is safe and remains the correct behavior for every note with no
+attachments after PR6 ships.
 
 ## Minimum Note contract
 
