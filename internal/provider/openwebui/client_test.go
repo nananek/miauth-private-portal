@@ -290,10 +290,10 @@ func TestClient_ContinueTurn_LinearAgainstFixtures(t *testing.T) {
 
 // TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys backs
 // plan §7's "existing fixture-matching tests keep passing" requirement:
-// with Config.WebSearchEnabled/ToolIDs left at their zero values, the
-// completions request body must carry neither a "features" nor a
-// "tool_ids" key at all, not merely false/empty values — the exact
-// request shape this client sent before Issue #72.
+// with Config.WebSearchEnabled and the request's ToolIDs left at their
+// zero values, the completions request body must carry neither a
+// "features" nor a "tool_ids" key at all, not merely false/empty values
+// — the exact request shape this client sent before Issue #72.
 func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *testing.T) {
 	const assistantID = "assistant-1"
 	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
@@ -328,9 +328,10 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *test
 }
 
 // TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth backs
-// plan §1.3: an operator who sets WebSearchEnabled/ToolIDs gets
-// features.web_search=true and tool_ids sent verbatim on every
-// completions call.
+// plan §1.3, generalized by Issue #75 PR5: an operator with
+// WebSearchEnabled set gets features.web_search=true on every call, and
+// whatever ToolIDs a caller resolved for this turn's model is sent
+// verbatim as tool_ids.
 func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.T) {
 	const assistantID = "assistant-1"
 	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
@@ -356,11 +357,11 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.
 	defer server.Close()
 	client := newTestClient(t, server, func(cfg *Config) {
 		cfg.WebSearchEnabled = true
-		cfg.ToolIDs = []string{"web_search", "server:mcp:example"}
 	})
 
 	req := minimalContinueTurnReq("chat-1")
 	req.IDs.AssistantMessageID = assistantID
+	req.ToolIDs = []string{"web_search", "server:mcp:example"}
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
@@ -442,12 +443,11 @@ func TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling(t *tes
 		}
 	}))
 	defer server.Close()
-	client := newTestClient(t, server, func(cfg *Config) {
-		cfg.ToolIDs = []string{"calculator"}
-	})
+	client := newTestClient(t, server, nil)
 
 	req := minimalContinueTurnReq("chat-1")
 	req.IDs.AssistantMessageID = assistantID
+	req.ToolIDs = []string{"calculator"}
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
@@ -492,55 +492,7 @@ func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *t
 	}
 }
 
-// --- Issue #74: startup-time tool/model resolution ---
-
-// TestClient_GetModelTools_ReturnsToolIDsAndDefaultFeatureIDs backs
-// Phase 1: GetModelTools reads modelID's own info.meta.toolIds/
-// defaultFeatureIds out of GET /api/models's response (fixture recorded
-// against the pinned target — docs/compat/openwebui-0.11.3.md).
-func TestClient_GetModelTools_ReturnsToolIDsAndDefaultFeatureIDs(t *testing.T) {
-	modelsResp := loadFixture(t, "models_response.json")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/models" {
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-		writeJSON(t, w, modelsResp, http.StatusOK)
-	}))
-	defer server.Close()
-	client := newTestClient(t, server, nil)
-
-	toolIDs, defaultFeatureIDs, err := client.GetModelTools(t.Context(), "mock-model")
-	if err != nil {
-		t.Fatalf("GetModelTools: %v", err)
-	}
-	if !reflect.DeepEqual(toolIDs, []string{"calculator"}) {
-		t.Errorf("toolIDs = %v, want [calculator]", toolIDs)
-	}
-	if !reflect.DeepEqual(defaultFeatureIDs, []string{"web_search"}) {
-		t.Errorf("defaultFeatureIDs = %v, want [web_search]", defaultFeatureIDs)
-	}
-}
-
-// TestClient_GetModelTools_UnknownModelReturnsNil backs the "not this
-// call's concern" contract: a model id absent from the response (an
-// access-filtered or unknown model) returns nil, nil, nil rather than
-// an error - the resolution caller decides what an unknown model means.
-func TestClient_GetModelTools_UnknownModelReturnsNil(t *testing.T) {
-	modelsResp := loadFixture(t, "models_response.json")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, modelsResp, http.StatusOK)
-	}))
-	defer server.Close()
-	client := newTestClient(t, server, nil)
-
-	toolIDs, defaultFeatureIDs, err := client.GetModelTools(t.Context(), "no-such-model")
-	if err != nil {
-		t.Fatalf("GetModelTools: %v", err)
-	}
-	if toolIDs != nil || defaultFeatureIDs != nil {
-		t.Errorf("toolIDs=%v defaultFeatureIDs=%v, want both nil for an unknown model", toolIDs, defaultFeatureIDs)
-	}
-}
+// --- Issue #74/#75: tool/model resolution ---
 
 // TestClient_ListAccessibleTools_ReturnsEveryToolID backs Phase 1:
 // ListAccessibleTools reads every tool's id out of GET /api/v1/tools/'s
@@ -569,11 +521,10 @@ func TestClient_ListAccessibleTools_ReturnsEveryToolID(t *testing.T) {
 
 // TestClient_ListModels_TranslatesEveryEntry backs Registry.SyncCatalog's
 // one call to the provider: every data[] entry becomes an
-// openwebui.RemoteModel carrying id, name, the arena signal, and the same
-// info.meta.toolIds/defaultFeatureIds GetModelTools reads for a single
-// model — including the built-in arena-model entry, which ListModels
-// does not filter (that is Registry's eligibleRemoteModels' job, not
-// this adapter's).
+// openwebui.RemoteModel carrying id, name, the arena signal, and its own
+// info.meta.toolIds/defaultFeatureIds — including the built-in
+// arena-model entry, which ListModels does not filter (that is
+// Registry's eligibleRemoteModels' job, not this adapter's).
 func TestClient_ListModels_TranslatesEveryEntry(t *testing.T) {
 	modelsResp := loadFixture(t, "models_response.json")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +569,8 @@ func TestClient_ListModels_EmptyDataIsNotAnError(t *testing.T) {
 }
 
 // TestClient_ListModels_MalformedBodyIsContractFailed pins the same
-// decode-failure classification GetModelTools uses for this endpoint.
+// decode-failure classification every other call against this endpoint
+// uses.
 func TestClient_ListModels_MalformedBodyIsContractFailed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, []byte(`"not an object"`), http.StatusOK)

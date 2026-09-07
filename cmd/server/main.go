@@ -143,20 +143,27 @@ func run() error {
 			return fmt.Errorf("build openwebui catalog client: %w", err)
 		}
 
+		// toolCache holds every active model's resolved tool_ids (Issue
+		// #75 PR5): Registry.SyncCatalog (below, and every later job/
+		// startup round) is its only writer, and TurnJob its reader, once
+		// generation is on. It replaces Issue #74's single deployment-wide
+		// OPENWEBUI_TOOL_IDS override, per owner decision — every model's
+		// tool_ids now come from its own info.meta.toolIds alone.
+		toolCache := openwebui.NewToolConfigCache()
+
 		// A bounded, best-effort attempt at boot: a target that is merely
 		// unreachable at startup must not prevent the rest of the server
-		// from starting (the same "a dead provider never blocks local
-		// posting" principle Issue #74's tool-config resolution below
-		// already follows). Registry.Seed's own fallback model is what
-		// this deployment keeps using until the periodic scheduler's next
-		// successful round.
+		// from starting. Registry.Seed's own fallback model (and an empty
+		// toolCache, resolving to no tool_ids) is what this deployment
+		// keeps using until the periodic scheduler's next successful
+		// round.
 		startupSyncCtx, cancelStartupSync := context.WithTimeout(ctx, cfg.OpenWebUI.Timeout)
-		if _, err := registry.SyncCatalog(startupSyncCtx, catalogClient, logger); err != nil {
+		if _, err := registry.SyncCatalog(startupSyncCtx, catalogClient, toolCache, logger); err != nil {
 			logger.Error("openwebui: startup catalog sync failed; continuing with the last known registry", "error", err)
 		}
 		cancelStartupSync()
 
-		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, logger).Handle)
+		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, toolCache, logger).Handle)
 		openWebUICatalogScheduler = openwebui.NewCatalogScheduler(db.Jobs, openwebui.CatalogSchedulerConfig{
 			Interval: cfg.OpenWebUI.CatalogSyncInterval,
 		}, logger)
@@ -170,44 +177,6 @@ func run() error {
 		// rather than dropped — the same unregistered-job-type recovery
 		// path LLM's gate relies on.
 		if cfg.OpenWebUI.GenerationEnabled {
-			// bootstrapClient is used only for the two startup-time,
-			// read-only calls below (Issue #74) — it deliberately
-			// carries the pre-resolution WebSearchEnabled/ToolIDs
-			// (irrelevant to GetModelTools/ListAccessibleTools) rather
-			// than being reused as the turn-serving client, so the
-			// resolved values below are what every actual completions
-			// call ends up carrying, not the raw config.
-			bootstrapClient, err := owuiprovider.NewClient(owuiprovider.Config{
-				BaseURL:          cfg.OpenWebUI.BaseURL,
-				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
-				APIKey:           cfg.OpenWebUI.APIKey,
-				Timeout:          cfg.OpenWebUI.Timeout,
-				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
-				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-			})
-			if err != nil {
-				return fmt.Errorf("build openwebui bootstrap client: %w", err)
-			}
-
-			var resolvedToolIDs []string
-			var resolvedWebSearch bool
-			resolved, err := openwebui.ResolveEffectiveToolConfig(ctx, bootstrapClient, cfg.OpenWebUI.DefaultModelID,
-				cfg.OpenWebUI.ToolIDs, cfg.OpenWebUI.WebSearchEnabled, logger)
-			if err != nil {
-				// Fail-closed, not fail-stop (Issue #74, owner-approved):
-				// a target that is merely unreachable at boot must not
-				// prevent the rest of the server from starting — the
-				// same "a dead provider never blocks local posting"
-				// principle GenerationEnabled's own gate already
-				// follows — so tool_ids/web_search stay at their zero
-				// values (disabled) for this run rather than being
-				// retried or treated as fatal.
-				logger.Error("openwebui: failed to resolve tool/web-search configuration at startup; disabling both for this run",
-					"error", err)
-			} else {
-				resolvedToolIDs, resolvedWebSearch = resolved.ToolIDs, resolved.WebSearchEnabled
-			}
-
 			owuiProvider, err := owuiprovider.NewClient(owuiprovider.Config{
 				BaseURL:          cfg.OpenWebUI.BaseURL,
 				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
@@ -215,8 +184,7 @@ func run() error {
 				Timeout:          cfg.OpenWebUI.Timeout,
 				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
 				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-				WebSearchEnabled: resolvedWebSearch,
-				ToolIDs:          resolvedToolIDs,
+				WebSearchEnabled: cfg.OpenWebUI.WebSearchEnabled,
 			})
 			if err != nil {
 				return fmt.Errorf("build openwebui provider client: %w", err)
@@ -224,7 +192,7 @@ func run() error {
 			bridge := openwebui.NewBridge(openwebui.BridgeConfig{
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
 			}, nil, logger)
-			turnJob := openwebui.NewTurnJob(db.Repos, timelineSvc, owuiProvider, openwebui.TurnJobConfig{
+			turnJob := openwebui.NewTurnJob(db.Repos, timelineSvc, owuiProvider, toolCache, openwebui.TurnJobConfig{
 				MaxAttempts:        cfg.Jobs.MaxAttempts,
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
 			}, nil, logger)

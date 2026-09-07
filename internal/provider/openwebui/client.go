@@ -72,13 +72,12 @@ type Config struct {
 	// WebSearchEnabled sets features.web_search on every completions
 	// call this Client makes (Issue #72). false (the default) sends no
 	// "features" key at all, identical to this client's pre-#72 shape.
+	// Unlike ToolIDs (below Issue #75 moved it to a per-call
+	// openwebui.StartChatRequest/ContinueTurnRequest field, resolved per
+	// model), this stays a construction-time, deployment-wide setting —
+	// OPENWEBUI_WEB_SEARCH_ENABLED is one flag for the whole deployment,
+	// an explicit owner decision Issue #75 kept unchanged.
 	WebSearchEnabled bool
-	// ToolIDs is sent verbatim as tool_ids on every completions call
-	// this Client makes (Issue #72) — Open WebUI tool ids this
-	// deployment's dedicated adapter account is allowed to invoke (a
-	// builtin like "web_search", or an MCP Tool Server's own
-	// "server:mcp:<id>"). Nil/empty sends no "tool_ids" key at all.
-	ToolIDs []string
 }
 
 // Client calls the three endpoints docs/compat/openwebui-0.11.3.md
@@ -92,7 +91,6 @@ type Client struct {
 	maxRequestBytes  int64
 	httpClient       *safehttp.Client
 	webSearchEnabled bool
-	toolIDs          []string
 }
 
 // NewClient builds a Client against cfg. It errors if BaseURL is not a
@@ -126,7 +124,6 @@ func NewClient(cfg Config) (*Client, error) {
 			AllowIPForTesting: cfg.AllowIPForTesting,
 		}),
 		webSearchEnabled: cfg.WebSearchEnabled,
-		toolIDs:          cfg.ToolIDs,
 	}, nil
 }
 
@@ -294,7 +291,7 @@ type completionsResponseBody struct {
 // both funnel through this: the only difference between them is
 // parentID (nil for the former, the previous assistant message id for
 // the latter).
-func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time) (openwebui.TurnResult, error) {
+func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string) (openwebui.TurnResult, error) {
 	wireMessages := make([]wireMessage, 0, len(messages)+1)
 	for _, m := range messages {
 		wireMessages = append(wireMessages, wireMessage{Role: m.Role, Content: m.Content})
@@ -321,8 +318,8 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 	if c.webSearchEnabled {
 		reqBody.Features = &featuresBody{WebSearch: true}
 	}
-	if len(c.toolIDs) > 0 {
-		reqBody.ToolIDs = c.toolIDs
+	if len(toolIDs) > 0 {
+		reqBody.ToolIDs = toolIDs
 	}
 	if reqBody.Features != nil || len(reqBody.ToolIDs) > 0 {
 		reqBody.Params = &paramsBody{FunctionCalling: "legacy"}
@@ -389,12 +386,12 @@ func (c *Client) StartChat(ctx context.Context, req openwebui.StartChatRequest) 
 			return openwebui.TurnResult{}, err
 		}
 	}
-	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt)
+	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs)
 }
 
 // ContinueTurn implements openwebui.Provider.
 func (c *Client) ContinueTurn(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error) {
-	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt)
+	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs)
 }
 
 // --- GET /api/models ---
@@ -421,47 +418,14 @@ type modelResponseEntry struct {
 	} `json:"info"`
 }
 
-// GetModelTools calls GET /api/models (Issue #74) and returns modelID's
-// own info.meta.toolIds and info.meta.defaultFeatureIds — the same
-// per-model tool/feature defaults the Open WebUI admin panel configures
-// (compat: these are opaque, access-filtered by Open WebUI per the
-// caller's own grant, never validated further by this adapter). Both
-// return nil if the model carries neither, or if modelID does not
-// appear in the response at all (an access-filtered or unknown model
-// name is not this call's concern — the resolution caller decides what
-// that means).
-//
-// This is a startup-time-only call: unlike StartChat/ContinueTurn/
-// LookupTurnOutcome, it is not part of the Provider interface (a
-// per-turn contract) — a deployment resolves its effective tool
-// configuration once at boot, not on every turn.
-func (c *Client) GetModelTools(ctx context.Context, modelID string) (toolIDs []string, defaultFeatureIDs []string, err error) {
-	data, err := c.get(ctx, openwebui.PhaseTurn, "/api/models")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var parsed modelsResponseBody
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil, nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
-			fmt.Errorf("decode models response: %w", err))
-	}
-
-	for _, m := range parsed.Data {
-		if m.ID != modelID || m.Info == nil {
-			continue
-		}
-		return m.Info.Meta.ToolIDs, m.Info.Meta.DefaultFeatureIDs, nil
-	}
-	return nil, nil, nil
-}
-
 // ListModels implements openwebui.CatalogProvider (Issue #75 PR1) by
 // calling GET /api/models and translating every entry the configured
-// account can see — everything GetModelTools already reads a single
-// model's info.meta out of, but for the whole catalog at once, which is
-// what Registry.SyncCatalog needs to reconcile every model in one round
-// rather than one per-model call apiece.
+// account can see, including each one's own info.meta.toolIds/
+// defaultFeatureIds (Issue #74's original per-model tool defaults,
+// generalized by Issue #75 PR5 to every model rather than one resolved
+// at boot) — everything Registry.SyncCatalog needs to reconcile the
+// registry and resolve per-model tool_ids in the same GET /api/models
+// round, rather than a second call per model.
 //
 // It applies no eligibility filtering of its own (blank/duplicate ids,
 // the built-in arena-model entry): that is Registry.SyncCatalog's
@@ -497,10 +461,13 @@ type toolUserResponseEntry struct {
 	ID string `json:"id"`
 }
 
-// ListAccessibleTools calls GET /api/v1/tools/ (Issue #74) and returns
-// every tool id this adapter's own account may invoke — the same
-// access-filtered list Open WebUI itself resolves tool_ids against.
-// Startup-time-only, like GetModelTools.
+// ListAccessibleTools implements openwebui.CatalogProvider by calling
+// GET /api/v1/tools/ (Issue #74) and returning every tool id this
+// adapter's own account may invoke — the same access-filtered list Open
+// WebUI itself resolves tool_ids against. Registry.SyncCatalog calls it
+// once per sync round (Issue #75 PR5) to filter every model's own
+// toolIds fail-closed, the same rule Issue #74 established for a single
+// resolved-at-boot model.
 func (c *Client) ListAccessibleTools(ctx context.Context) ([]string, error) {
 	data, err := c.get(ctx, openwebui.PhaseTurn, "/api/v1/tools/")
 	if err != nil {

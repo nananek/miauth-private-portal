@@ -357,12 +357,6 @@ type OpenWebUIConfig struct {
 	// (never read) while GenerationEnabled is false, the same relationship
 	// Enabled/GenerationEnabled already have.
 	WebSearchEnabled bool
-	// ToolIDs mirrors OPENWEBUI_TOOL_IDS (Issue #72): opaque Open WebUI
-	// tool ids sent verbatim on every completions call. Never validated
-	// against Open WebUI's own tool registry — this service has no way to
-	// list it — so a typo'd id simply never matches anything server-side
-	// rather than failing closed here.
-	ToolIDs []string
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -639,7 +633,6 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.OpenWebUI.MaxRequestBytes = parseOptionalInt64(values, KeyOpenWebUIMaxRequestBytes, 1_048_576, openWebUIMaxRequestBytesMin, &errs)
 	cfg.OpenWebUI.MaxContextMessages = parseOptionalInt(values, KeyOpenWebUIMaxContextMessages, 100, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax, &errs)
 	cfg.OpenWebUI.WebSearchEnabled = parseOptionalBool(values, KeyOpenWebUIWebSearchEnabled, false, &errs)
-	cfg.OpenWebUI.ToolIDs = splitOptionalTrimmedList(values, KeyOpenWebUIToolIDs)
 
 	return cfg, errs
 }
@@ -906,7 +899,6 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIMaxRequestBytes:    strconv.FormatInt(c.OpenWebUI.MaxRequestBytes, 10),
 		KeyOpenWebUIMaxContextMessages: strconv.Itoa(c.OpenWebUI.MaxContextMessages),
 		KeyOpenWebUIWebSearchEnabled:   strconv.FormatBool(c.OpenWebUI.WebSearchEnabled),
-		KeyOpenWebUIToolIDs:            strings.Join(c.OpenWebUI.ToolIDs, ","),
 	}
 }
 
@@ -1164,26 +1156,6 @@ func splitOptionalURLList(values map[string]string, key string) []string {
 	list := make([]string, len(parts))
 	for i, p := range parts {
 		list[i] = strings.TrimSpace(p)
-	}
-	return list
-}
-
-// splitOptionalTrimmedList splits OPENWEBUI_TOOL_IDS on plain commas,
-// trimming whitespace and dropping empty entries. Unlike
-// splitOptionalURLList/splitCallbackList, a tool id is a simple opaque
-// token (never a URL), so there is no comma-inside-a-value case to
-// protect against. An unset or empty value yields nil: no "tool_ids"
-// key is sent.
-func splitOptionalTrimmedList(values map[string]string, key string) []string {
-	v, ok := values[key]
-	if !ok || v == "" {
-		return nil
-	}
-	var list []string
-	for _, p := range strings.Split(v, ",") {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			list = append(list, trimmed)
-		}
 	}
 	return list
 }

@@ -43,13 +43,14 @@ type TurnJobConfig struct {
 // does (plan §1): both are use-case packages this one composes, not
 // storage or transport.
 type TurnJob struct {
-	repos    domain.Repos
-	timeline *timeline.Service
-	provider Provider
-	cfg      TurnJobConfig
-	locks    *threadLocks
-	clock    Clock
-	logger   *slog.Logger
+	repos     domain.Repos
+	timeline  *timeline.Service
+	provider  Provider
+	toolCache *ToolConfigCache
+	cfg       TurnJobConfig
+	locks     *threadLocks
+	clock     Clock
+	logger    *slog.Logger
 }
 
 // NewTurnJob builds a TurnJob. repos is the standalone (non-
@@ -58,14 +59,30 @@ type TurnJob struct {
 // complete hook needs for a successful turn comes from
 // timeline.Service.CreateGeneratedReplyBy itself, not from a UnitOfWork
 // held here.
-func NewTurnJob(repos domain.Repos, timelineSvc *timeline.Service, provider Provider, cfg TurnJobConfig, clock Clock, logger *slog.Logger) *TurnJob {
+//
+// toolCache is Issue #75 PR5's per-model tool_ids (Registry.SyncCatalog
+// is its only writer; cmd/server shares one instance between it and this
+// TurnJob). A nil toolCache — or a cache miss for this turn's model, an
+// unsynced or newly discovered one — resolves to no tool_ids at all on
+// every request this job sends, the same safe default an inaccessible
+// or unconfigured id already falls back to.
+func NewTurnJob(repos domain.Repos, timelineSvc *timeline.Service, provider Provider, toolCache *ToolConfigCache, cfg TurnJobConfig, clock Clock, logger *slog.Logger) *TurnJob {
 	if clock == nil {
 		clock = realClock{}
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TurnJob{repos: repos, timeline: timelineSvc, provider: provider, cfg: cfg, locks: newThreadLocks(), clock: clock, logger: logger}
+	return &TurnJob{repos: repos, timeline: timelineSvc, provider: provider, toolCache: toolCache, cfg: cfg, locks: newThreadLocks(), clock: clock, logger: logger}
+}
+
+// resolveToolIDs looks up externalModelID's cached tool_ids, or nil if
+// there is no cache at all or no entry for this model yet.
+func (j *TurnJob) resolveToolIDs(externalModelID string) []string {
+	if j.toolCache == nil {
+		return nil
+	}
+	return j.toolCache.Get(externalModelID)
 }
 
 // Handle implements internal/jobs.Handler for JobType. See the package
@@ -225,6 +242,7 @@ func (j *TurnJob) handleCreationPending(
 		IDs:           TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID},
 		CorrelationID: turn.RequestID,
 		SentAt:        now,
+		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
 		OnChatCreated: func(hookCtx context.Context, remoteChatID string) error {
 			confirmedAt := j.clock.Now().UTC()
 			if err := j.repos.OpenWebUILinks.MarkReady(hookCtx, link.ID, remoteChatID, nil, confirmedAt); err != nil {
@@ -346,6 +364,7 @@ func (j *TurnJob) handleReady(
 		IDs:           TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID, ParentAssistantID: link.RemoteCurrentID},
 		CorrelationID: turn.RequestID,
 		SentAt:        now,
+		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
@@ -444,6 +463,7 @@ func (j *TurnJob) resendContinue(
 		IDs:           TurnIDs{UserMessageID: *turn.RemoteMessageID, AssistantMessageID: *turn.RemoteAssistantMessageID, ParentAssistantID: turn.RemoteParentID},
 		CorrelationID: turn.RequestID,
 		SentAt:        now,
+		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
