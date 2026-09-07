@@ -24,7 +24,7 @@ import (
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -33,7 +33,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return usageError()
 	}
 	switch args[0] {
-	case "list", "approve", "reject", "tokens", "revoke":
+	case "list", "approve", "reject", "tokens", "revoke", "config":
 	default:
 		return usageError()
 	}
@@ -95,13 +95,15 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 		fmt.Fprintln(stdout, "Revoked API token.")
 		return nil
+	case "config":
+		return runConfig(ctx, db, cfg, args[1:], stdout, time.Now().UTC())
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: miauthctl <list|approve|reject|tokens|revoke> [arguments]")
+	return errors.New("usage: miauthctl <list|approve|reject|tokens|revoke|config> [arguments]")
 }
 
 func listSessions(ctx context.Context, svc *miauth.Service, out io.Writer, now time.Time) error {
