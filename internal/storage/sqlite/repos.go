@@ -39,5 +39,8 @@ func newRepos(q querier) domain.Repos {
 		OpenWebUIModels:     &openWebUIModelRepository{q: q},
 		OpenWebUILinks:      &openWebUIConversationLinkRepository{q: q},
 		OpenWebUITurnLinks:  &openWebUITurnLinkRepository{q: q},
+
+		Config:      &configRepository{q: q},
+		ConfigAudit: &configAuditRepository{q: q},
 	}
 }

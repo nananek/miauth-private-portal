@@ -31,6 +31,13 @@ type Repos struct {
 	OpenWebUIModels     OpenWebUIModelRepository
 	OpenWebUILinks      OpenWebUIConversationLinkRepository
 	OpenWebUITurnLinks  OpenWebUITurnLinkRepository
+
+	// Config and ConfigAudit back Issue #76's DB configuration overlay
+	// (ADR-0006). Always present, like the Open WebUI repositories
+	// above; nothing writes through them until miauthctl config or the
+	// startup auto-seed path does.
+	Config      ConfigRepository
+	ConfigAudit ConfigAuditRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made
