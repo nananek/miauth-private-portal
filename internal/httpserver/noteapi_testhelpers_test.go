@@ -75,9 +75,14 @@ func newNoteAPITestServerLLMClassificationEnabled(t *testing.T) *noteAPITestServ
 	return newNoteAPITestServerWithOptions(t, false, true)
 }
 
-func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassificationEnabled bool) *noteAPITestServer {
+// openNoteAPITestDBAt opens (creating and migrating if necessary) a
+// contract-test SQLite database at path, with Issue #52's reserved
+// actors already seeded. It is split out from the *noteAPITestServer
+// builders below so a restart-style test can point two independent
+// harness instances at the same on-disk file path — see
+// openwebui_restart_test.go.
+func openNoteAPITestDBAt(t *testing.T, path string) *sqlite.DB {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: path, BusyTimeout: 5 * time.Second, MaxOpenConns: 4})
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
@@ -89,6 +94,12 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 	if err := db.Actors.EnsureReservedActors(t.Context()); err != nil {
 		t.Fatalf("ensure reserved actors: %v", err)
 	}
+	return db
+}
+
+func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassificationEnabled bool) *noteAPITestServer {
+	t.Helper()
+	db := openNoteAPITestDBAt(t, filepath.Join(t.TempDir(), "test.db"))
 
 	miauthCfg := defaultMiAuthTestConfig()
 	clock := &fakeTimelineClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
@@ -124,18 +135,20 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 // package's own tests).
 func newNoteAPITestServerOpenWebUIEnabled(t *testing.T) *noteAPITestServer {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: path, BusyTimeout: 5 * time.Second, MaxOpenConns: 4})
-	if err != nil {
-		t.Fatalf("open test database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(t.Context()); err != nil {
-		t.Fatalf("migrate test database: %v", err)
-	}
-	if err := db.Actors.EnsureReservedActors(t.Context()); err != nil {
-		t.Fatalf("ensure reserved actors: %v", err)
-	}
+	return newNoteAPITestServerOpenWebUIEnabledAt(t, filepath.Join(t.TempDir(), "test.db"), "note-api-setup-openwebui")
+}
+
+// newNoteAPITestServerOpenWebUIEnabledAt is
+// newNoteAPITestServerOpenWebUIEnabled with the database path and the
+// one-time-use MiAuth route session ID pulled out as parameters, so a
+// restart-style test can build two independent harness instances (two
+// separate *Server, *openwebui.Registry, and *openwebui.Bridge values)
+// against the very same on-disk database file — the same shape an actual
+// process restart takes — without their token-issuing MiAuth flows
+// colliding on session ID. See openwebui_restart_test.go.
+func newNoteAPITestServerOpenWebUIEnabledAt(t *testing.T, path, tokenSessionID string) *noteAPITestServer {
+	t.Helper()
+	db := openNoteAPITestDBAt(t, path)
 
 	miauthCfg := defaultMiAuthTestConfig()
 	clock := &fakeTimelineClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
@@ -169,7 +182,7 @@ func newNoteAPITestServerOpenWebUIEnabled(t *testing.T) *noteAPITestServer {
 	})
 
 	ts := &noteAPITestServer{Server: srv, db: db, timeline: timelineSvc, clock: clock}
-	ts.token, ts.ownerID = mustIssueToken(t, ts.Server, "note-api-setup-openwebui", "read:account,write:notes")
+	ts.token, ts.ownerID = mustIssueToken(t, ts.Server, tokenSessionID, "read:account,write:notes")
 	return ts
 }
 
