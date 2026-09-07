@@ -131,6 +131,104 @@ that something else broke.
   database itself is damaged, stop the server and restore from the most
   recent verified backup.
 
+## Open WebUI outbound bridge: enabling and disabling
+
+Issue #53's outbound turn bridge — the part of the Open WebUI integration
+that sends an owner post to the configured model and turns its reply into
+a local entry — is gated by two flags: `OPENWEBUI_ENABLED` (Issue #52's
+registry and identity projection) and `OPENWEBUI_GENERATION_ENABLED` (the
+bridge itself, a sub-flag only meaningful while the former is `true`). See
+[configuration.md](configuration.md#outbound-turn-bridge-issue-53) for the
+full mechanism this summarizes into operator steps.
+
+### Enabling
+
+Required config (`Config.Validate` fails startup closed if any of these is
+missing or malformed — see
+[configuration.md](configuration.md#known-configuration-keys) for the full
+key table):
+
+- `OPENWEBUI_ENABLED=true`
+- `OPENWEBUI_BASE_URL` — the instance's `https` origin (scheme+host only)
+- `OPENWEBUI_ALLOWED_ORIGINS` — comma-separated allowlist that must include
+  `OPENWEBUI_BASE_URL` verbatim (ADR-0005 D11)
+- `OPENWEBUI_API_KEY` — the dedicated adapter account's key (see "Secret
+  rotation" below for how this is held and rotated)
+- `OPENWEBUI_DEFAULT_MODEL_ID` — the provider's own model id
+- `OPENWEBUI_PRESENTATION_HOST` — a bare hostname distinct from
+  `LOCAL_ORIGIN`'s host
+
+`OPENWEBUI_WORKSPACE_NAME`/`OPENWEBUI_MODEL_DISPLAY_NAME` are cosmetic
+(both have defaults); `OPENWEBUI_MODEL_SLUG` defaults to `model` and, either
+way, must not collide (case-insensitively) with `OWNER_USERNAME` or the
+reserved `assistant`/`system` names.
+
+Steps:
+
+1. Set the keys above in the config source (`.env` on a bare host; the
+   container's environment-variable source otherwise) and restart (see
+   "Starting and stopping" above). This alone only turns on identity
+   projection — the model becomes visible as a VirtualActor — it does not
+   make it reply yet.
+2. To turn on replies, additionally set `OPENWEBUI_GENERATION_ENABLED=true`
+   and restart again. Review `OPENWEBUI_TIMEOUT`/`OPENWEBUI_MAX_RESPONSE_BYTES`/
+   `OPENWEBUI_MAX_REQUEST_BYTES`/`OPENWEBUI_MAX_CONTEXT_MESSAGES` first if
+   the defaults look wrong for your instance — Issue #50's target-instance
+   testing has not yet produced better values than these conservative
+   defaults.
+3. A restart that does not come back up almost always means one of the
+   keys above is invalid, not that something else broke (see "Starting and
+   stopping" above) — check the startup log for the failing `OPENWEBUI_*`
+   key before assuming otherwise.
+
+Verification:
+
+1. `/readyz` returns `200` — confirms `Registry.Seed` completed without
+   error (a `Seed` failure prevents the process from starting at all).
+2. `POST /api/users/search` (as the owner) with a query matching
+   `OPENWEBUI_MODEL_SLUG` returns the model as a user whose `host` is
+   `OPENWEBUI_PRESENTATION_HOST` — confirms the VirtualActor projects.
+3. With generation also enabled: post a note as the owner and confirm a
+   reply from that VirtualActor appears within `OPENWEBUI_TIMEOUT`. If it
+   doesn't, `go run ./cmd/jobsctl list --type=openwebui_turn` and
+   `go run ./cmd/openwebuictl links` (see "Incident response" above) show
+   whether the turn is still pending, failed, or landed `ambiguous`.
+
+### Disabling
+
+- **Stop new replies only** (keep the VirtualActor and its history
+  visible): set `OPENWEBUI_GENERATION_ENABLED=false` and restart. This
+  deregisters the `"openwebui_turn"` job handler. A turn's job already
+  claimed and running when the restart begins finishes first — the server
+  drains in-flight durable-job handlers before exiting, the same graceful
+  stop described in "Starting and stopping" above — but a turn's job still
+  `pending` (not yet claimed) at restart keeps being claimed and retried
+  afterward anyway: an unregistered job type is treated as an ordinary
+  retryable failure, not a permanent one
+  ([configuration.md](configuration.md#durable-jobs)), so it burns through
+  `JOBS_MAX_ATTEMPTS` at exponential backoff — well under the default
+  10-minute `JOBS_BACKOFF_MAX` ceiling, so typically minutes, not hours —
+  and lands `dead` if generation stays off longer than that. Either way no
+  turn silently disappears: `go run ./cmd/jobsctl list --type=openwebui_turn`
+  shows its current state, and once generation is back on, a `dead` job
+  needs a manual `go run ./cmd/jobsctl retry <job-id>` — it does not resume
+  on its own the way a `pending` job that has not yet exhausted its
+  attempts does.
+- **Disable the feature entirely** (also stop identity projection):
+  additionally set `OPENWEBUI_ENABLED=false` and restart. `Registry.Seed`
+  only runs while this flag is `true`, so the seeded workspace/model rows
+  are left exactly as they are — nothing is deleted or explicitly
+  deactivated — and re-enabling later reconciles onto that same identity
+  rather than minting a new one. Entries the VirtualActor already authored
+  are unaffected; anywhere its author would otherwise be resolved instead
+  falls back to the ordinary actor-ID projection used for any other
+  unresolvable author — the same fallback already used when a model is
+  deactivated or its workspace disabled directly.
+
+The owner's own posts are never affected by either step —
+`POST /api/notes/create` never depends on the bridge succeeding, enabled or
+not.
+
 ## Secret rotation
 
 None of this service's secrets are readable back once set —
