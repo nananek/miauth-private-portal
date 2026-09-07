@@ -1,7 +1,10 @@
 // Command openwebuictl provides host-local owner recovery for Issue
 // #53's Open WebUI outbound turn bridge (plan §5.5): listing and
 // inspecting conversation links, and resolving an ambiguous or stuck one
-// by confirming, abandoning, or freezing it. It deliberately exposes no
+// by confirming, abandoning, or freezing it. It also provides Issue
+// #77 PR7's VirtualActor avatar management (avatar-set/avatar-clear,
+// plan-77 v2 §2.5) — a model is never a Drive API caller, so it has no
+// other write path to its own avatar_file_id. It deliberately exposes no
 // HTTP surface — the roadmap's "Manual resolution ... is an explicit
 // owner/operator action" — matching jobsctl's and miauthctl's own
 // operator boundary: permission to run this binary against this
@@ -15,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -22,6 +26,8 @@ import (
 
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/drive"
+	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
 	owuiprovider "github.com/nananek/miauth-private-portal/internal/provider/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
@@ -42,13 +48,13 @@ func main() {
 
 func run(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: openwebuictl <links|show|confirm|abandon|freeze> [arguments]")
+		return errors.New("usage: openwebuictl <links|show|confirm|abandon|freeze|avatar-set|avatar-clear> [arguments]")
 	}
 	sub := args[0]
 	switch sub {
-	case "links", "show", "confirm", "abandon", "freeze":
+	case "links", "show", "confirm", "abandon", "freeze", "avatar-set", "avatar-clear":
 	default:
-		return fmt.Errorf("unknown subcommand %q; want links, show, confirm, abandon, or freeze", sub)
+		return fmt.Errorf("unknown subcommand %q; want links, show, confirm, abandon, freeze, avatar-set, or avatar-clear", sub)
 	}
 
 	cfg, err := config.Load(config.LoadOptions{ConfigFilePath: configFilePath()})
@@ -71,6 +77,17 @@ func run(args []string, stdout io.Writer) error {
 	defer db.Close()
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
+	}
+
+	// avatar-set/avatar-clear (Issue #77 PR7, plan-77 v2 §2.5: "モデル
+	// ごとに専用の管理コマンドをopenwebuictlに追加する") operate on a
+	// model actor directly and need none of the conversation-link
+	// recovery machinery (Registry/provider/timelineSvc) below.
+	switch sub {
+	case "avatar-set":
+		return runAvatarSet(ctx, db, cfg, args[1:], stdout)
+	case "avatar-clear":
+		return runAvatarClear(ctx, db, cfg, args[1:], stdout)
 	}
 
 	owner, err := db.Actors.GetByType(ctx, domain.ActorOwner)
@@ -252,6 +269,126 @@ func runFreeze(ctx context.Context, reg *openwebui.Registry, ownerID string, arg
 		return fmt.Errorf("freeze link %s: %w", args[0], err)
 	}
 	fmt.Fprintf(stdout, "froze %s\n", safeCell(args[0]))
+	return nil
+}
+
+// resolveModelBySlug finds the model actor behind slug in this
+// deployment's single enabled Open WebUI workspace (there is at most
+// one, per Registry.Seed's own enabled-workspace invariant) — the same
+// handle Aria's own @mention UI already shows the owner for this model,
+// so it is the natural argument for an operator to type rather than the
+// model's opaque local ID (which no existing openwebuictl subcommand
+// even lists).
+func resolveModelBySlug(ctx context.Context, db *sqlite.DB, slug string) (domain.OpenWebUIModel, error) {
+	workspace, err := db.OpenWebUIWorkspaces.GetEnabled(ctx)
+	if err != nil {
+		return domain.OpenWebUIModel{}, fmt.Errorf("resolve enabled workspace: %w", err)
+	}
+	model, err := db.OpenWebUIModels.GetByActorSlug(ctx, workspace.ID, slug)
+	if err != nil {
+		return domain.OpenWebUIModel{}, fmt.Errorf("resolve model %q: %w", slug, err)
+	}
+	return model, nil
+}
+
+// buildDriveService wires the same internal/drive.Service shape
+// cmd/server builds, selected by DRIVE_BACKEND. avatar-set is the only
+// caller; its httpClient is required by NewService's signature but never
+// exercised (CreateSystemFile never fetches a URL), so it is built with
+// the same fixed, conservative policy cmd/server's own upload-from-url
+// client uses rather than a caller-configurable one.
+func buildDriveService(cfg *config.Config, db *sqlite.DB) (*drive.Service, error) {
+	var storage drive.Storage
+	switch cfg.Drive.Backend {
+	case "s3compat":
+		s3, err := drive.NewS3(drive.S3Config{
+			Endpoint:        cfg.Drive.S3Endpoint,
+			Bucket:          cfg.Drive.S3Bucket,
+			AccessKeyID:     cfg.Drive.S3AccessKeyID,
+			SecretAccessKey: cfg.Drive.S3SecretAccessKey,
+			UseSSL:          cfg.Drive.S3UseSSL,
+			Region:          cfg.Drive.S3Region,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build drive S3 client: %w", err)
+		}
+		storage = s3
+	default:
+		storage = drive.NewLocal(cfg.Drive.DataDir)
+	}
+	return drive.NewService(
+		storage,
+		safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: false}),
+		db.Repos,
+		drive.Config{
+			MaxFileBytes:   cfg.Drive.MaxFileBytes,
+			MaxImageWidth:  cfg.Drive.MaxImageWidth,
+			MaxImageHeight: cfg.Drive.MaxImageHeight,
+		},
+	), nil
+}
+
+// runAvatarSet reads a local raster image file, validates and stores it
+// through internal/drive.Service exactly like any other Drive upload
+// (Issue #77 v2's raster-only scope decision applies here too — an SVG
+// or oversized image is rejected the same way), and points slug's model
+// actor at it — Issue #77 AC "ユーザーとVirtualActorがプロフィール画像を
+// 設定・変更・削除できる"'s VirtualActor half, which PR5 deliberately left
+// unimplemented (a model is never a Drive API caller, so it needed its
+// own write path rather than reusing POST /api/i/update).
+func runAvatarSet(ctx context.Context, db *sqlite.DB, cfg *config.Config, args []string, stdout io.Writer) error {
+	if len(args) != 2 || args[0] == "" || args[1] == "" {
+		return errors.New("usage: openwebuictl avatar-set <model-slug> <image-path>")
+	}
+	slug, imagePath := args[0], args[1]
+
+	model, err := resolveModelBySlug(ctx, db, slug)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return fmt.Errorf("read image file %s: %w", imagePath, err)
+	}
+	driveSvc, err := buildDriveService(cfg, db)
+	if err != nil {
+		return err
+	}
+	// FilePurposeAvatar (domain.FilePurpose's own closed enum) is used
+	// here for the first time in this codebase: the owner's own avatar
+	// (POST /api/i/update) points at an ordinary FilePurposeAttachment
+	// file already uploaded through the Drive API (matching Aria's real
+	// upload-then-set-avatarId sequence, PR0's trace), but a model has no
+	// Drive of its own to upload into — FilePurposeAvatar is the purpose
+	// this exact case exists for.
+	file, err := driveSvc.CreateSystemFile(ctx, domain.FilePurposeAvatar, filepath.Base(imagePath), data)
+	if err != nil {
+		return fmt.Errorf("store avatar image: %w", err)
+	}
+	if err := db.Actors.SetAvatarFileID(ctx, model.ActorID, &file.ID); err != nil {
+		return fmt.Errorf("set model avatar: %w", err)
+	}
+	fmt.Fprintf(stdout, "set avatar for model %s (actor %s): file %s\n", safeCell(slug), safeCell(model.ActorID), safeCell(file.ID))
+	return nil
+}
+
+// runAvatarClear clears slug's model actor's avatar — the explicit-null
+// counterpart to avatar-set, matching POST /api/i/update's own
+// avatarId: null "remove avatar" convention (PR0's trace).
+func runAvatarClear(ctx context.Context, db *sqlite.DB, _ *config.Config, args []string, stdout io.Writer) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("usage: openwebuictl avatar-clear <model-slug>")
+	}
+	slug := args[0]
+
+	model, err := resolveModelBySlug(ctx, db, slug)
+	if err != nil {
+		return err
+	}
+	if err := db.Actors.SetAvatarFileID(ctx, model.ActorID, nil); err != nil {
+		return fmt.Errorf("clear model avatar: %w", err)
+	}
+	fmt.Fprintf(stdout, "cleared avatar for model %s (actor %s)\n", safeCell(slug), safeCell(model.ActorID))
 	return nil
 }
 

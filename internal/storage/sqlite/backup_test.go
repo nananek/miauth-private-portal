@@ -243,6 +243,7 @@ func TestTableCounts_ReflectsSeededRows(t *testing.T) {
 	mustCreateThreadAndRoot(t, db, actorID, time.Now())
 	mustEnqueueJob(t, db, nil, time.Now())
 	mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+	mustCreateAttachmentFile(t, db, actorID)
 
 	counts, err := db.TableCounts(t.Context())
 	if err != nil {
@@ -259,6 +260,11 @@ func TestTableCounts_ReflectsSeededRows(t *testing.T) {
 	}
 	if counts["actors"] < 1 {
 		t.Errorf("actors count = %d, want at least 1", counts["actors"])
+	}
+	// Issue #77 PR7: files joined backupTables so a Drive-using
+	// deployment's backup verification reports Drive metadata too.
+	if counts["files"] != 1 {
+		t.Errorf("files count = %d, want 1", counts["files"])
 	}
 }
 

@@ -88,12 +88,13 @@ func defaultOpenWebUIConfig() OpenWebUIConfig {
 
 func defaultDriveConfig() DriveConfig {
 	return DriveConfig{
-		Backend:        "localdisk",
-		DataDir:        "./data/drive",
-		S3UseSSL:       true,
-		MaxFileBytes:   10_485_760,
-		MaxImageWidth:  8000,
-		MaxImageHeight: 8000,
+		Backend:          "localdisk",
+		DataDir:          "./data/drive",
+		S3UseSSL:         true,
+		MaxFileBytes:     10_485_760,
+		MaxImageWidth:    8000,
+		MaxImageHeight:   8000,
+		OrphanGCInterval: 24 * time.Hour,
 	}
 }
 
@@ -1900,6 +1901,7 @@ func TestLoad_DriveS3CompatWithRequiredFieldsSucceeds(t *testing.T) {
 		MaxFileBytes:      10_485_760,
 		MaxImageWidth:     8000,
 		MaxImageHeight:    8000,
+		OrphanGCInterval:  24 * time.Hour,
 	}
 	if !reflect.DeepEqual(cfg.Drive, want) {
 		t.Errorf("Drive = %+v, want %+v", cfg.Drive, want)

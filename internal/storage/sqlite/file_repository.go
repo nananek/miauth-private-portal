@@ -105,6 +105,24 @@ func (r *fileRepository) CountByFolder(ctx context.Context, folderID string) (in
 	return n, nil
 }
 
+func (r *fileRepository) ListStorageKeys(ctx context.Context) (map[string]bool, error) {
+	rows, err := r.q.QueryContext(ctx, `SELECT storage_key FROM files`)
+	if err != nil {
+		return nil, fmt.Errorf("list file storage keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan file storage key: %w", err)
+		}
+		keys[key] = true
+	}
+	return keys, rows.Err()
+}
+
 func scanFile(row rowScanner) (domain.File, error) {
 	var f domain.File
 	var ownerActorID, comment, folderID sql.NullString

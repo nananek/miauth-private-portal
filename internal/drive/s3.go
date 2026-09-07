@@ -124,6 +124,21 @@ func (s *S3) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return obj, nil
 }
 
+// List returns every key currently in the bucket, paging through
+// minio-go's ListObjects internally (Recursive: true — this backend
+// never treats "/" as a folder delimiter the way Local's directory tree
+// naturally does).
+func (s *S3) List(ctx context.Context) ([]string, error) {
+	var keys []string
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("drive: list bucket %q: %w", s.bucket, obj.Err)
+		}
+		keys = append(keys, obj.Key)
+	}
+	return keys, nil
+}
+
 func (s *S3) Delete(ctx context.Context, key string) error {
 	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		if isS3NotFound(err) {

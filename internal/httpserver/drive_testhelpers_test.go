@@ -78,6 +78,14 @@ func (f *driveFakeStorage) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (f *driveFakeStorage) List(_ context.Context) ([]string, error) {
+	keys := make([]string, 0, len(f.objects))
+	for k := range f.objects {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
 func newDriveTestServer(t *testing.T) *driveTestServer {
 	t.Helper()
 	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second, MaxOpenConns: 4})

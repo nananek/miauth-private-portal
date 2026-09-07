@@ -60,11 +60,27 @@ func (f *fakeStorage) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (f *fakeStorage) List(_ context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	keys := make([]string, 0, len(f.objects))
+	for k := range f.objects {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
 func (f *fakeStorage) has(key string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, ok := f.objects[key]
 	return ok
+}
+
+func (f *fakeStorage) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.objects)
 }
 
 type testDriveService struct {
@@ -294,6 +310,33 @@ func TestService_UploadFromURL_RejectsNonOKStatus(t *testing.T) {
 	}
 }
 
+// TestService_UploadFromURL_PreservesPolicyViolationInErrorChain is
+// Issue #77 PR7's SSRF regression test: ErrUploadFromURLFailed's own doc
+// comment promises callers can distinguish an SSRF policy rejection with
+// errors.Is(err, safehttp.ErrPolicyViolation) — a single fmt.Errorf
+// "%w: %v" (as opposed to "%w: %w") would silently drop the original
+// safehttp.ErrPolicyViolation from the returned error's chain, breaking
+// that promise without failing any other existing assertion (the wire
+// layer maps ErrUploadFromURLFailed to a generic client error either
+// way, so only an errors.Is check like this one catches a regression
+// here — this test previously caught exactly that bug, now fixed).
+func TestService_UploadFromURL_PreservesPolicyViolationInErrorChain(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	// Swap in a strict, production-shaped safehttp.Client for this one
+	// call: newTestDriveService's own client always sets
+	// AllowIPForTesting to bypass the very policy this test exercises.
+	ts.Service.httpClient = safehttp.NewClient(safehttp.Config{MaxRedirects: 3})
+
+	_, err := ts.UploadFromURL(t.Context(), UploadFromURLInput{OwnerActorID: owner, URL: "http://127.0.0.1:1/x"})
+	if !errors.Is(err, ErrUploadFromURLFailed) {
+		t.Errorf("err = %v, want it to satisfy errors.Is(err, ErrUploadFromURLFailed)", err)
+	}
+	if !errors.Is(err, safehttp.ErrPolicyViolation) {
+		t.Errorf("err = %v, want it to also satisfy errors.Is(err, safehttp.ErrPolicyViolation) per ErrUploadFromURLFailed's own doc comment", err)
+	}
+}
+
 func TestService_ListFiles_StaleUntilFileIDIsAnEmptyPage(t *testing.T) {
 	ts := newTestDriveService(t, Config{})
 	owner := mustCreateTestActor(t, ts.db)
@@ -501,6 +544,109 @@ func TestService_OpenFile_NotFound(t *testing.T) {
 	}
 }
 
+// failingStorage wraps a working Storage, forcing whichever of its
+// operations has a non-nil injected error to fail instead of delegating
+// — Issue #77 PR7's storage-failure-path tests: a working files row
+// whose backing object briefly or permanently errors out on the storage
+// backend (a disk I/O error, an S3 outage) is a distinct failure mode
+// from the row itself not existing (domain.ErrNotFound), and must not
+// be confused with it by any caller.
+type failingStorage struct {
+	Storage
+	failGet    error
+	failPut    error
+	failDelete error
+}
+
+func (f *failingStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if f.failGet != nil {
+		return nil, f.failGet
+	}
+	return f.Storage.Get(ctx, key)
+}
+
+func (f *failingStorage) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if f.failPut != nil {
+		return f.failPut
+	}
+	return f.Storage.Put(ctx, key, r, size)
+}
+
+func (f *failingStorage) Delete(ctx context.Context, key string) error {
+	if f.failDelete != nil {
+		return f.failDelete
+	}
+	return f.Storage.Delete(ctx, key)
+}
+
+// TestService_OpenFile_StorageBackendFailureIsNotConfusedWithNotFound
+// covers a files row that exists and is owned correctly, but whose
+// backing storage object briefly errors out (e.g. a disk I/O error or an
+// S3 outage) — OpenFile must surface that as a plain error, never as
+// domain.ErrNotFound, since internal/httpserver's handleFilesShow maps
+// ErrNotFound specifically to 404 and everything else to 500: confusing
+// the two would make a transient storage outage look like the file was
+// deleted.
+func TestService_OpenFile_StorageBackendFailureIsNotConfusedWithNotFound(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	f, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	ts.Service.storage = &failingStorage{Storage: ts.storage, failGet: errors.New("simulated storage backend outage")}
+
+	_, _, err = ts.OpenFile(t.Context(), f.ID)
+	if err == nil {
+		t.Fatal("expected an error when the storage backend fails")
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("err = %v, must not satisfy errors.Is(err, domain.ErrNotFound) — the row exists, only the backend failed", err)
+	}
+}
+
+// TestService_CreateFile_CleansUpStorageObjectWhenRowInsertFails covers
+// storeValidatedImage's own best-effort cleanup comment: if the object
+// is stored but the files row then fails to insert (here, forced via an
+// owner_actor_id that names no actor row, a foreign-key violation), the
+// just-stored object must not survive as a permanently unreferenced
+// orphan.
+func TestService_CreateFile_CleansUpStorageObjectWhenRowInsertFails(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	unknownOwner := domain.NewID()
+	_, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: unknownOwner, Data: encodePNG(t, 4, 4)})
+	if err == nil {
+		t.Fatal("expected an error for a foreign-key-violating owner_actor_id")
+	}
+	if n := ts.storage.count(); n != 0 {
+		t.Errorf("storage has %d object(s) after a failed row insert, want 0 (cleanup should have deleted it)", n)
+	}
+}
+
+// TestService_DeleteFile_SucceedsEvenWhenStorageDeleteFails covers
+// DeleteFile's own best-effort object-delete comment: the files row is
+// this service's source of truth for "does this file exist", so a
+// failing storage-side delete (a backend outage at the worst possible
+// moment) must not prevent the row itself from being removed — PR7's
+// orphan GC (RunOrphanGC) is the safety net for whatever object this
+// then leaves behind.
+func TestService_DeleteFile_SucceedsEvenWhenStorageDeleteFails(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	f, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	ts.Service.storage = &failingStorage{Storage: ts.storage, failDelete: errors.New("simulated storage backend outage")}
+
+	if err := ts.DeleteFile(t.Context(), owner, f.ID); err != nil {
+		t.Fatalf("DeleteFile: %v, want nil (row deletion must succeed despite the storage-side failure)", err)
+	}
+	if _, err := ts.db.Files.Get(t.Context(), f.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("Files.Get after DeleteFile: err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestService_Stats(t *testing.T) {
 	ts := newTestDriveService(t, Config{CapacityBytes: 12345})
 	owner := mustCreateTestActor(t, ts.db)
@@ -643,4 +789,104 @@ func TestService_DeleteFolder_EmptySucceeds(t *testing.T) {
 	if _, err := ts.db.Folders.Get(t.Context(), folder.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("Folders.Get after delete: err = %v, want ErrNotFound", err)
 	}
+}
+
+// TestService_RunOrphanGC_DeletesUnreferencedObjectOnly is Issue #77
+// PR7's core orphan-GC contract test: a Storage object no files row
+// references (simulating storeValidatedImage's own documented failure
+// path — the row insert failing after the object was already stored,
+// with its own best-effort cleanup itself failing) must be deleted,
+// while a genuinely referenced file's object must survive untouched.
+func TestService_RunOrphanGC_DeletesUnreferencedObjectOnly(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	kept, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	// An object with no files row at all — as storeValidatedImage's own
+	// cleanup-failure comment describes, not producible through any
+	// public Service method, so this test writes it to Storage directly.
+	if err := ts.storage.Put(t.Context(), "drive/orphan", bytes.NewReader([]byte("x")), 1); err != nil {
+		t.Fatalf("Put orphan: %v", err)
+	}
+
+	deleted, err := ts.RunOrphanGC(t.Context())
+	if err != nil {
+		t.Fatalf("RunOrphanGC: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1", deleted)
+	}
+	if ts.storage.has("drive/orphan") {
+		t.Error("orphaned object survived RunOrphanGC")
+	}
+	if !ts.storage.has(kept.StorageKey) {
+		t.Error("RunOrphanGC deleted a referenced file's object")
+	}
+}
+
+func TestService_RunOrphanGC_NoOrphansIsANoOp(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	if _, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)}); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+
+	deleted, err := ts.RunOrphanGC(t.Context())
+	if err != nil {
+		t.Fatalf("RunOrphanGC: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0", deleted)
+	}
+	if ts.storage.count() != 1 {
+		t.Errorf("storage has %d object(s) after a no-op sweep, want 1", ts.storage.count())
+	}
+}
+
+// TestService_RunOrphanGC_OneFailedDeleteDoesNotStopTheSweep covers
+// RunOrphanGC's own errors.Join comment: a storage backend failing to
+// delete one orphan must not prevent every other orphan from still
+// being reclaimed in the same sweep.
+func TestService_RunOrphanGC_OneFailedDeleteDoesNotStopTheSweep(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	if err := ts.storage.Put(t.Context(), "drive/orphan-a", bytes.NewReader([]byte("x")), 1); err != nil {
+		t.Fatalf("Put orphan-a: %v", err)
+	}
+	if err := ts.storage.Put(t.Context(), "drive/orphan-b", bytes.NewReader([]byte("x")), 1); err != nil {
+		t.Fatalf("Put orphan-b: %v", err)
+	}
+	failing := &failingDeleteKeyStorage{Storage: ts.storage, failKey: "drive/orphan-a"}
+	ts.Service.storage = failing
+
+	deleted, err := ts.RunOrphanGC(t.Context())
+	if err == nil {
+		t.Error("expected a non-nil error reporting the one failed delete")
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1 (only the non-failing orphan)", deleted)
+	}
+	if !ts.storage.has("drive/orphan-a") {
+		t.Error("the object whose delete failed must still be present")
+	}
+	if ts.storage.has("drive/orphan-b") {
+		t.Error("drive/orphan-b should have been deleted")
+	}
+}
+
+// failingDeleteKeyStorage fails Delete for exactly one key, letting
+// every other Storage operation (including every other Delete call)
+// pass through — narrower than failingStorage, which fails every call
+// to a given method regardless of key.
+type failingDeleteKeyStorage struct {
+	Storage
+	failKey string
+}
+
+func (f *failingDeleteKeyStorage) Delete(ctx context.Context, key string) error {
+	if key == f.failKey {
+		return errors.New("simulated storage backend outage")
+	}
+	return f.Storage.Delete(ctx, key)
 }

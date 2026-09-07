@@ -116,7 +116,7 @@ func runVerify(args []string, stdout io.Writer) error {
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "TABLE\tROWS")
-	for _, table := range []string{"actors", "entries", "jobs", "external_sources"} {
+	for _, table := range []string{"actors", "entries", "jobs", "external_sources", "files"} {
 		fmt.Fprintf(tw, "%s\t%d\n", table, counts[table])
 	}
 	return tw.Flush()

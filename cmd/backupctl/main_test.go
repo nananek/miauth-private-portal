@@ -81,6 +81,9 @@ func TestRunBackupAndVerify_RoundTrip(t *testing.T) {
 	if !wantTableRow(got, "external_sources", 1) {
 		t.Errorf("verify output = %q, want external_sources row count of 1", got)
 	}
+	if !wantTableRow(got, "files", 1) {
+		t.Errorf("verify output = %q, want files row count of 1", got)
+	}
 }
 
 func TestRunVerify_DeepFlagRunsIntegrityCheck(t *testing.T) {
@@ -307,6 +310,16 @@ func seedDB(t *testing.T, dbPath string) {
 
 	if err := db.ExternalSources.Create(t.Context(), domain.ExternalSource{
 		ID: domain.NewID(), Kind: "rss", URI: "https://example.com/feed.xml", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Issue #77 PR7: files joined backupTables, so backupctl verify's
+	// row-count summary now reports Drive metadata too.
+	if err := db.Files.Create(t.Context(), domain.File{
+		ID: domain.NewID(), OwnerActorID: &owner.ID, Purpose: domain.FilePurposeAttachment,
+		MIME: "image/png", ByteSize: 1, SHA256: domain.NewID(), MD5: domain.NewID(),
+		StorageKey: domain.NewID(), Name: "seed.png", CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}

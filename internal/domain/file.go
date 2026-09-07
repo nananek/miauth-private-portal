@@ -104,6 +104,13 @@ type FileRepository interface {
 	// folderID (not recursively) — backs DriveFolder.filesCount and
 	// folders/delete's "folder must be empty" check.
 	CountByFolder(ctx context.Context, folderID string) (int, error)
+	// ListStorageKeys returns every storage_key currently recorded
+	// across every files row, regardless of owner/purpose/folder — Issue
+	// #77 PR7's orphan GC (internal/drive.Service.RunOrphanGC) is its
+	// only caller, cross-referencing this set against
+	// internal/drive.Storage.List's own enumeration of the configured
+	// backend to find an object no row references.
+	ListStorageKeys(ctx context.Context) (map[string]bool, error)
 }
 
 // Folder is one row of the folders table (migration 0023, Issue #77

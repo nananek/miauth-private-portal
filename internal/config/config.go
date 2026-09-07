@@ -444,6 +444,9 @@ type DriveConfig struct {
 	// fits comfortably under the byte-size bound.
 	MaxImageWidth  int
 	MaxImageHeight int
+	// OrphanGCInterval is how often internal/drive.GCScheduler enqueues
+	// an orphan-file GC sweep (Issue #77 PR7).
+	OrphanGCInterval time.Duration
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -698,6 +701,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Drive.MaxFileBytes = parseOptionalInt64(values, KeyDriveMaxFileBytes, 10_485_760, driveMaxFileBytesMin, &errs)
 	cfg.Drive.MaxImageWidth = parseOptionalInt(values, KeyDriveMaxImageWidth, 8000, driveMaxImageDimensionMin, driveMaxImageDimensionMax, &errs)
 	cfg.Drive.MaxImageHeight = parseOptionalInt(values, KeyDriveMaxImageHeight, 8000, driveMaxImageDimensionMin, driveMaxImageDimensionMax, &errs)
+	cfg.Drive.OrphanGCInterval = parseOptionalDuration(values, KeyDriveOrphanGCInterval, 24*time.Hour, &errs)
 
 	cfg.IMAP.Enabled = parseOptionalBool(values, KeyIMAPEnabled, false, &errs)
 	cfg.IMAP.Host = parseOptionalString(values, KeyIMAPHost, "")
@@ -862,6 +866,7 @@ func (c Config) Validate() error {
 	validateInt64Min(&errs, KeyDriveMaxFileBytes, c.Drive.MaxFileBytes, driveMaxFileBytesMin)
 	validateIntBounds(&errs, KeyDriveMaxImageWidth, c.Drive.MaxImageWidth, driveMaxImageDimensionMin, driveMaxImageDimensionMax)
 	validateIntBounds(&errs, KeyDriveMaxImageHeight, c.Drive.MaxImageHeight, driveMaxImageDimensionMin, driveMaxImageDimensionMax)
+	validatePositiveDuration(&errs, KeyDriveOrphanGCInterval, c.Drive.OrphanGCInterval)
 
 	// IMAP fields are only required/bound-checked when the feature is
 	// actually enabled: IMAP_ENABLED defaults to false, and a disabled
@@ -1008,6 +1013,7 @@ func (c Config) Redacted() map[string]string {
 		KeyDriveMaxFileBytes:      strconv.FormatInt(c.Drive.MaxFileBytes, 10),
 		KeyDriveMaxImageWidth:     strconv.Itoa(c.Drive.MaxImageWidth),
 		KeyDriveMaxImageHeight:    strconv.Itoa(c.Drive.MaxImageHeight),
+		KeyDriveOrphanGCInterval:  c.Drive.OrphanGCInterval.String(),
 		KeyIMAPEnabled:            strconv.FormatBool(c.IMAP.Enabled),
 		KeyIMAPHost:               c.IMAP.Host,
 		KeyIMAPPort:               strconv.Itoa(c.IMAP.Port),

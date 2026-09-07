@@ -46,6 +46,13 @@ type Storage interface {
 	// error: callers (orphan GC, a failed upload's cleanup) must be able
 	// to delete idempotently without first checking existence.
 	Delete(ctx context.Context, key string) error
+	// List returns every key this backend currently holds, in no
+	// particular order. Issue #77 PR7's orphan GC (Service.RunOrphanGC)
+	// is its only caller: it cross-references this against every
+	// files.storage_key in the database to find an object no row
+	// references — the storeValidatedImage/DeleteFile failure paths
+	// documented in their own comments are what can leave one behind.
+	List(ctx context.Context) ([]string, error)
 }
 
 // ErrKeyExists reports that Put was called with a key that already has

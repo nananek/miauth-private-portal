@@ -100,6 +100,27 @@ func TestValidateImage_RejectsOversizedDimensions(t *testing.T) {
 	}
 }
 
+// TestValidateImage_DimensionLimitIsInclusive pins the exact boundary
+// comparison (cfg.Width > maxWidth, not >=): an image exactly at the
+// configured limit must be accepted, and one pixel past it must not.
+func TestValidateImage_DimensionLimitIsInclusive(t *testing.T) {
+	atLimit := encodePNG(t, 100, 100)
+	if _, err := ValidateImage(atLimit, 100, 100); err != nil {
+		t.Errorf("ValidateImage at exactly the limit: %v, want accepted", err)
+	}
+	oneOver := encodePNG(t, 101, 100)
+	if _, err := ValidateImage(oneOver, 100, 100); !errors.Is(err, ErrInvalidImage) {
+		t.Errorf("ValidateImage one pixel over the width limit: err = %v, want ErrInvalidImage", err)
+	}
+}
+
+func TestValidateImage_RejectsEmptyData(t *testing.T) {
+	_, err := ValidateImage(nil, 1000, 1000)
+	if !errors.Is(err, ErrInvalidImage) {
+		t.Errorf("err = %v, want empty data rejected via errors.Is(err, ErrInvalidImage)", err)
+	}
+}
+
 func TestAllowedImageFormats_IncludesWebP(t *testing.T) {
 	// A full lossless/lossy WebP bitstream is impractical to construct
 	// by hand in a unit test and this repository has no third-party WebP

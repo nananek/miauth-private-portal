@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,39 @@ func (l *Local) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("drive: open key %q: %w", key, err)
 	}
 	return f, nil
+}
+
+// List walks Dir recursively, returning every regular file's path
+// relative to Dir (using "/" separators regardless of host OS) as a key
+// — the inverse of resolvePath. A root directory that does not exist yet
+// (an otherwise-unused localdisk backend GC runs against before any file
+// was ever stored) is treated as empty, not an error.
+func (l *Local) List(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var keys []string
+	err := filepath.WalkDir(l.Dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(l.Dir, path)
+		if err != nil {
+			return fmt.Errorf("drive: relativize path %q under %q: %w", path, l.Dir, err)
+		}
+		keys = append(keys, filepath.ToSlash(rel))
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("drive: list storage root %q: %w", l.Dir, err)
+	}
+	return keys, nil
 }
 
 func (l *Local) Delete(ctx context.Context, key string) error {
