@@ -49,6 +49,13 @@ type Server struct {
 	// OPENWEBUI_ENABLED off) leaves resolveUserLite's existing fallback
 	// projection untouched for every actor.
 	virtualActors VirtualActorResolver
+	// externalSources resolves an ActorExternalSource actor to its owning
+	// domain.ExternalSource (Issue #77 PR4/ADR-0007). A nil value leaves
+	// resolveUserLite's existing fallback projection untouched — never
+	// expected in production (cmd/server always passes db.Repos.
+	// ExternalSources), but every httpserver test predating PR4 still
+	// builds a Server without it.
+	externalSources ExternalSourceResolver
 	// openWebUIBridge is Issue #53's notes/create enqueue hook; see
 	// Options.OpenWebUIBridge. A nil value leaves handleNotesCreate on
 	// its plain Create{Root,Reply} path.
@@ -118,6 +125,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
 		virtualActors:            opts.VirtualActors,
+		externalSources:          opts.ExternalSources,
 		openWebUIBridge:          opts.OpenWebUIBridge,
 		openWebUITurnLinks:       opts.OpenWebUITurnLinks,
 		openWebUIViewerBaseURL:   opts.OpenWebUIViewerBaseURL,

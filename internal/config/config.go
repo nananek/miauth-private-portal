@@ -196,6 +196,17 @@ type RSSConfig struct {
 	// FeedURLs are the configured RSS/Atom feed URLs, seeded as
 	// domain.ExternalSource rows (kind "rss") at startup.
 	FeedURLs []string
+	// FeedUsernames[i] is FeedURLs[i]'s optional per-feed username
+	// (Issue #77 PR4/ADR-0007's design-A host display: the feed's own
+	// ActorExternalSource username, settable via a "|username" suffix on
+	// the corresponding RSS_FEED_URLS entry), or nil if that entry set
+	// none — cmd/server then derives a default from the feed's host
+	// (internal/ingest/rss.DefaultUsername) at first registration.
+	// Same length as FeedURLs; meaningless once a source already exists
+	// (an already-registered source's username is never recomputed from
+	// a later config change — re-registering under a new URL is a new
+	// source, not an edit to this one).
+	FeedUsernames []*string
 	// PollInterval is how often each configured feed is re-fetched.
 	PollInterval time.Duration
 	// FetchTimeout bounds a single feed fetch's HTTP round trip; must be
@@ -668,7 +679,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.LLM.ClassificationThreadContextMaxChars = parseOptionalInt(values, KeyLLMClassificationThreadContextMaxChars, 8000, llmThreadContextMaxCharsMin, llmThreadContextMaxCharsMax, &errs)
 
 	cfg.RSS.Enabled = parseOptionalBool(values, KeyRSSEnabled, false, &errs)
-	cfg.RSS.FeedURLs = splitOptionalURLList(values, KeyRSSFeedURLs)
+	cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames = splitRSSFeedURLs(values, KeyRSSFeedURLs)
 	cfg.RSS.PollInterval = parseOptionalDuration(values, KeyRSSPollInterval, 15*time.Minute, &errs)
 	cfg.RSS.FetchTimeout = parseOptionalDuration(values, KeyRSSFetchTimeout, 15*time.Second, &errs)
 	cfg.RSS.MaxResponseBytes = parseOptionalInt64(values, KeyRSSMaxResponseBytes, 2_097_152, rssMaxResponseBytesMin, &errs)
@@ -814,6 +825,7 @@ func (c Config) Validate() error {
 			errs = append(errs, FieldError{Key: KeyRSSFeedURLs, Reason: "required when " + KeyRSSEnabled + "=true"})
 		}
 		validateRSSFeedURLs(&errs, KeyRSSFeedURLs, c.RSS.FeedURLs, c.RSS.AllowInsecureHTTP)
+		validateRSSFeedUsernames(&errs, KeyRSSFeedURLs, c.RSS.FeedUsernames)
 		validatePositiveDuration(&errs, KeyRSSPollInterval, c.RSS.PollInterval)
 		validatePositiveDuration(&errs, KeyRSSFetchTimeout, c.RSS.FetchTimeout)
 		if c.RSS.FetchTimeout > 0 && c.RSS.PollInterval > 0 && c.RSS.FetchTimeout >= c.RSS.PollInterval {
@@ -1310,6 +1322,37 @@ func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool
 // separately from Validate, gated by that flag — the same "parse now,
 // validate only if enabled" split LLM_BASE_URL uses. An unset or empty
 // value yields nil: no feed is polled.
+// splitRSSFeedURLs splits RSS_FEED_URLS the same way splitOptionalURLList
+// splits any other comma list (splitCallbackList's "a separator is a
+// comma followed by the next absolute URL" rule), then extracts each
+// entry's optional "|username" suffix (Issue #77 PR4/ADR-0007's design-A
+// per-feed username) — "|" is never a valid unencoded URI character
+// (RFC 3986), so it unambiguously separates an entry's URL from this
+// suffix without needing a second, position-matched config key. Returns
+// parallel slices of the same length: urls[i]'s optional username is
+// usernames[i] (nil if that entry set none).
+func splitRSSFeedURLs(values map[string]string, key string) (urls []string, usernames []*string) {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return nil, nil
+	}
+	parts := splitCallbackList(v)
+	urls = make([]string, len(parts))
+	usernames = make([]*string, len(parts))
+	for i, p := range parts {
+		entry := strings.TrimSpace(p)
+		if idx := strings.IndexByte(entry, '|'); idx >= 0 {
+			urls[i] = strings.TrimSpace(entry[:idx])
+			if username := strings.TrimSpace(entry[idx+1:]); username != "" {
+				usernames[i] = &username
+			}
+		} else {
+			urls[i] = entry
+		}
+	}
+	return urls, usernames
+}
+
 func splitOptionalURLList(values map[string]string, key string) []string {
 	v, ok := values[key]
 	if !ok || v == "" {
@@ -1352,6 +1395,24 @@ func validateRSSFeedURLs(errs *[]FieldError, key string, list []string, allowIns
 		}
 		if u.Scheme == "http" && !allowInsecureHTTP {
 			*errs = append(*errs, FieldError{Key: key, Reason: "http entries require " + KeyRSSAllowInsecureHTTP + "=true"})
+			ok = false
+		}
+	}
+	return ok
+}
+
+// validateRSSFeedUsernames checks each RSS_FEED_URLS entry's optional
+// "|username" suffix (Issue #77 PR4) against ownerUsernamePattern — the
+// same Misskey username character set the owner's own OWNER_USERNAME
+// must satisfy, since both end up in Aria's UserLite.username.
+func validateRSSFeedUsernames(errs *[]FieldError, key string, usernames []*string) bool {
+	ok := true
+	for _, u := range usernames {
+		if u == nil {
+			continue
+		}
+		if !ownerUsernamePattern.MatchString(*u) {
+			*errs = append(*errs, FieldError{Key: key, Reason: `each entry's optional "|username" suffix must be a non-empty string of ASCII letters, digits, and underscores`})
 			ok = false
 		}
 	}

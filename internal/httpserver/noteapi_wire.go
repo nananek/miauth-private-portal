@@ -38,6 +38,19 @@ type VirtualActorResolver interface {
 	ResolveVirtualActor(ctx context.Context, actorID string) (domain.VirtualActor, error)
 }
 
+// ExternalSourceResolver resolves an ActorExternalSource actor
+// (Issue #77 PR4/ADR-0007's design-A host display) to the
+// domain.ExternalSource that owns it, or reports it as not resolvable —
+// resolveUserLite treats that identically to VirtualActorResolver's own
+// failure case, falling back to the plain projection.
+// domain.ExternalSourceRepository already satisfies this narrow
+// interface structurally (its GetByActorID method), so cmd/server passes
+// db.Repos.ExternalSources directly; this package still never imports a
+// storage driver type.
+type ExternalSourceResolver interface {
+	GetByActorID(ctx context.Context, actorID string) (domain.ExternalSource, error)
+}
+
 // note is the Misskey-compatible projection of one domain.Entry. Fields
 // beyond the pinned parser's required minimum (id, createdAt, user,
 // userId) use the pinned parser's documented defaults (empty maps/lists,
@@ -55,14 +68,20 @@ type VirtualActorResolver interface {
 // internal/timeline (Issue #23 PR4) — see its doc comment for why that
 // population is split out of this pure conversion function.
 type note struct {
-	ID             string            `json:"id"`
-	CreatedAt      string            `json:"createdAt"`
-	Text           *string           `json:"text"`
-	CW             *string           `json:"cw"`
-	User           userLite          `json:"user"`
-	UserID         string            `json:"userId"`
-	ReplyID        *string           `json:"replyId"`
-	RenoteID       *string           `json:"renoteId"`
+	ID        string   `json:"id"`
+	CreatedAt string   `json:"createdAt"`
+	Text      *string  `json:"text"`
+	CW        *string  `json:"cw"`
+	User      userLite `json:"user"`
+	UserID    string   `json:"userId"`
+	ReplyID   *string  `json:"replyId"`
+	RenoteID  *string  `json:"renoteId"`
+	// URL is nil except for a news entry ingested from a source item
+	// that had one (Issue #77 PR4: docs/compat/aria-v1.5.11.md's Minimum
+	// Note contract lists "url" as nullable) — the original article's
+	// URL, straight from e.ProvenanceURL. Never set for user_post/
+	// llm_reply/llm_follow_up/mail (mail has no natural article URL).
+	URL            *string           `json:"url"`
 	Visibility     string            `json:"visibility"`
 	LocalOnly      bool              `json:"localOnly"`
 	RenoteCount    int               `json:"renoteCount"`
@@ -92,6 +111,7 @@ func newNote(e domain.Entry, user userLite) note {
 		UserID:         user.ID,
 		ReplyID:        e.ParentEntryID,
 		RenoteID:       nil,
+		URL:            e.ProvenanceURL,
 		Visibility:     "public",
 		LocalOnly:      false,
 		RenoteCount:    0,
@@ -260,6 +280,13 @@ func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owne
 					if virtual, err := s.virtualActors.ResolveVirtualActor(ctx, authorActorID); err == nil {
 						host := virtual.Host
 						return userLite{ID: authorActorID, Username: virtual.Slug, Host: &host}
+					}
+				}
+			case domain.ActorExternalSource:
+				if s.externalSources != nil {
+					if src, err := s.externalSources.GetByActorID(ctx, authorActorID); err == nil && src.Username != nil && src.Host != nil {
+						host := *src.Host
+						return userLite{ID: authorActorID, Username: *src.Username, Host: &host}
 					}
 				}
 			}

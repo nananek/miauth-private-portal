@@ -761,6 +761,53 @@ func TestCreateExternalEntry_CreatesRootEntryAndPromotesItem(t *testing.T) {
 	}
 }
 
+// TestCreateExternalEntry_UsesSourceActorAndProvenanceURL is Issue #77
+// PR4/ADR-0007's regression test: a source with its own
+// ActorExternalSource (design A's per-feed host display) must author
+// its entries as that actor, not the shared system actor, and the
+// item's ProvenanceURL must be denormalized onto the created Entry.
+func TestCreateExternalEntry_UsesSourceActorAndProvenanceURL(t *testing.T) {
+	ts := newTestService(t)
+	sourceActor := domain.Actor{ID: domain.NewID(), Type: domain.ActorExternalSource, CreatedAt: ts.clock.Now()}
+	if err := ts.db.Actors.Create(t.Context(), sourceActor); err != nil {
+		t.Fatalf("create source actor: %v", err)
+	}
+	host := "example.com"
+	username := "example_com"
+	source := domain.ExternalSource{
+		ID: domain.NewID(), Kind: "rss", URI: "https://example.com/feed.xml",
+		ActorID: &sourceActor.ID, Username: &username, Host: &host, CreatedAt: ts.clock.Now(),
+	}
+	if err := ts.db.ExternalSources.Create(t.Context(), source); err != nil {
+		t.Fatalf("create external source: %v", err)
+	}
+
+	provenanceURL := "https://example.com/articles/1"
+	item := domain.ExternalItem{SourceID: source.ID, ExternalID: "guid-1", ProvenanceURL: &provenanceURL, DedupeKey: "dedupe-1"}
+	entry, _, err := ts.CreateExternalEntry(t.Context(), domain.EntryNews, item, "hello from rss")
+	if err != nil {
+		t.Fatalf("CreateExternalEntry: %v", err)
+	}
+	if entry.AuthorActorID != sourceActor.ID {
+		t.Errorf("AuthorActorID = %q, want the source's own actor %q", entry.AuthorActorID, sourceActor.ID)
+	}
+	if entry.ProvenanceURL == nil || *entry.ProvenanceURL != provenanceURL {
+		t.Errorf("ProvenanceURL = %v, want %q", entry.ProvenanceURL, provenanceURL)
+	}
+
+	// The persisted row must round-trip both fields identically.
+	stored, err := ts.db.Entries.Get(t.Context(), entry.ID)
+	if err != nil {
+		t.Fatalf("Entries.Get: %v", err)
+	}
+	if stored.AuthorActorID != sourceActor.ID {
+		t.Errorf("stored AuthorActorID = %q, want %q", stored.AuthorActorID, sourceActor.ID)
+	}
+	if stored.ProvenanceURL == nil || *stored.ProvenanceURL != provenanceURL {
+		t.Errorf("stored ProvenanceURL = %v, want %q", stored.ProvenanceURL, provenanceURL)
+	}
+}
+
 // TestCreateExternalEntry_UsesPublishedAtAsCreatedAt is Issue #83's core
 // regression test: the home timeline sorts by Entries.CreatedAt, so an
 // ingested item's CreatedAt must reflect when the source published it,

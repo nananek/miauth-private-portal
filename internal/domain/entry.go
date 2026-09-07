@@ -58,8 +58,16 @@ type Entry struct {
 	ProcessingStatus ProcessingStatus
 	ArchivedAt       *time.Time
 	HiddenAt         *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ProvenanceURL is nil except for a news entry ingested from a
+	// source item that had one (Issue #77 PR4): the original article's
+	// URL, denormalized from ExternalItem.ProvenanceURL at creation time
+	// (timeline.Service.CreateExternalEntry) so projecting it onto the
+	// Misskey-compatible Note.url wire field never costs a reverse
+	// external_items lookup per note. Never set or updated after
+	// creation.
+	ProvenanceURL *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // IsRoot reports whether e is its thread's root entry.

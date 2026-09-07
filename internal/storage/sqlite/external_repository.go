@@ -12,7 +12,7 @@ import (
 
 type externalSourceRepository struct{ q querier }
 
-const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, cursor, last_fetched_at, last_error,
+const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, actor_id, username, host, cursor, last_fetched_at, last_error,
 	consecutive_failures, active, created_at FROM external_sources`
 
 // Create relies on the active column's own DEFAULT 1 (migration 0023):
@@ -21,14 +21,25 @@ const externalSourceSelectColumns = `SELECT id, kind, uri, display_name, cursor,
 // pass it explicitly.
 func (r *externalSourceRepository) Create(ctx context.Context, s domain.ExternalSource) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO external_sources (id, kind, uri, display_name, created_at) VALUES (?, ?, ?, ?, ?)`,
-		s.ID, s.Kind, s.URI, nullableString(s.DisplayName), formatTime(s.CreatedAt),
+		`INSERT INTO external_sources (id, kind, uri, display_name, actor_id, username, host, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.Kind, s.URI, nullableString(s.DisplayName), nullableString(s.ActorID), nullableString(s.Username), nullableString(s.Host),
+		formatTime(s.CreatedAt),
 	)
 	return mapWriteError(err)
 }
 
 func (r *externalSourceRepository) Get(ctx context.Context, id string) (domain.ExternalSource, error) {
 	row := r.q.QueryRowContext(ctx, externalSourceSelectColumns+` WHERE id = ?`, id)
+	return scanExternalSource(row)
+}
+
+func (r *externalSourceRepository) GetByURI(ctx context.Context, kind, uri string) (domain.ExternalSource, error) {
+	row := r.q.QueryRowContext(ctx, externalSourceSelectColumns+` WHERE kind = ? AND uri = ?`, kind, uri)
+	return scanExternalSource(row)
+}
+
+func (r *externalSourceRepository) GetByActorID(ctx context.Context, actorID string) (domain.ExternalSource, error) {
+	row := r.q.QueryRowContext(ctx, externalSourceSelectColumns+` WHERE actor_id = ?`, actorID)
 	return scanExternalSource(row)
 }
 
@@ -153,14 +164,17 @@ func (r *externalSourceRepository) setActive(ctx context.Context, id string, act
 
 func scanExternalSource(row rowScanner) (domain.ExternalSource, error) {
 	var s domain.ExternalSource
-	var displayName, cursor, lastFetchedAt, lastError sql.NullString
+	var displayName, actorID, username, host, cursor, lastFetchedAt, lastError sql.NullString
 	var active int
 	var createdAt string
-	if err := row.Scan(&s.ID, &s.Kind, &s.URI, &displayName, &cursor, &lastFetchedAt, &lastError,
+	if err := row.Scan(&s.ID, &s.Kind, &s.URI, &displayName, &actorID, &username, &host, &cursor, &lastFetchedAt, &lastError,
 		&s.ConsecutiveFailures, &active, &createdAt); err != nil {
 		return domain.ExternalSource{}, mapReadError(err)
 	}
 	s.DisplayName = stringPtr(displayName)
+	s.ActorID = stringPtr(actorID)
+	s.Username = stringPtr(username)
+	s.Host = stringPtr(host)
 	s.Cursor = stringPtr(cursor)
 	s.LastError = stringPtr(lastError)
 	s.Active = active != 0

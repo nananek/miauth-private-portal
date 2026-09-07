@@ -1081,6 +1081,41 @@ func TestLoad_RSSFeedURLsRetainsCommasInsideQuery(t *testing.T) {
 	}
 }
 
+func TestLoad_RSSFeedURLsParsesOptionalUsernameSuffix(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "https://note.com/rss|myuser,https://example.org/atom.xml",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantURLs := []string{"https://note.com/rss", "https://example.org/atom.xml"}
+	if !reflect.DeepEqual(cfg.RSS.FeedURLs, wantURLs) {
+		t.Errorf("RSS.FeedURLs = %v, want %v", cfg.RSS.FeedURLs, wantURLs)
+	}
+	if len(cfg.RSS.FeedUsernames) != 2 || cfg.RSS.FeedUsernames[0] == nil || *cfg.RSS.FeedUsernames[0] != "myuser" {
+		t.Errorf("RSS.FeedUsernames[0] = %v, want \"myuser\"", cfg.RSS.FeedUsernames)
+	}
+	if cfg.RSS.FeedUsernames[1] != nil {
+		t.Errorf("RSS.FeedUsernames[1] = %v, want nil (no \"|username\" suffix)", *cfg.RSS.FeedUsernames[1])
+	}
+}
+
+func TestLoad_RSSFeedURLsRejectsInvalidUsernameSuffix(t *testing.T) {
+	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:      "development",
+		KeyRSSEnabled:  "true",
+		KeyRSSFeedURLs: "https://note.com/rss|not a valid username!",
+	}))})
+	if err == nil {
+		t.Fatal("expected an error for an invalid \"|username\" suffix")
+	}
+	if !strings.Contains(err.Error(), KeyRSSFeedURLs) {
+		t.Errorf("error %q does not mention %s", err.Error(), KeyRSSFeedURLs)
+	}
+}
+
 func TestLoad_RSSEnabledRejectsHTTPFeedURLWithoutAllowInsecureHTTP(t *testing.T) {
 	_, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv:      "development",

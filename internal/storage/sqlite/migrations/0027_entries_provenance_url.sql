@@ -1,0 +1,17 @@
+-- Issue #77 PR4: denormalizes an ingested entry's source-item
+-- provenance URL (external_items.provenance_url, which already existed)
+-- onto the entry itself, so projecting it onto the Misskey-compatible
+-- Note.url wire field (docs/compat/aria-v1.5.11.md's Minimum Note
+-- contract: "url" is nullable) never costs a reverse external_items
+-- lookup per note in a timeline/conversation listing — the same
+-- "denormalize onto Entry for read-heavy timeline queries" precedent the
+-- news/mail body-marker convention (internal/ingest's composeExternalBody)
+-- already set.
+--
+-- NULL for every entry kind except news (mail has no natural article
+-- URL; user_post/llm_reply/llm_follow_up/system never had a source item
+-- to begin with). timeline.Service.CreateExternalEntry sets it once, at
+-- creation time, from the same domain.ExternalItem.ProvenanceURL the
+-- external_items row itself stores — this column is never updated after
+-- insert.
+ALTER TABLE entries ADD COLUMN provenance_url TEXT;

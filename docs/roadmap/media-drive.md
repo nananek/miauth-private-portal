@@ -1,8 +1,10 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
 - Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
-  icons), and PR3 (Misskey-compatible Drive API) complete. PR4–PR7 not
-  started.
+  icons), and PR3 (Misskey-compatible Drive API) complete. PR4
+  (RSS/external-source icons and attribution) partially complete — its
+  identity/host mechanism (ADR-0007) is done; favicon fetching/storage
+  is not. PR5–PR7 not started.
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -272,13 +274,60 @@ implementation order but has no dependency on it.
 
 ## PR4: RSS/external-source icons and attribution
 
-**Status: not started.** Depends on PR1. Adds an `external_source` actor
-type (rebuild migration), favicon resolution via `internal/ingest/favicon`
-(new package, SSRF-safe via the existing `internal/ingest/safehttp`
-client), `resolveUserLite` projection, and provenance-URL projection onto
-`note.url`. Also updates `docs/compat/aria-v1.5.11.md`'s existing
-"single local owner/system actor" provenance framing, which this PR makes
-inaccurate for RSS/mail-authored notes.
+**Status: partially complete.** Depended on PR1. The identity/
+attribution half of this PR (plan-77 §2.4, ADR-0007's design-A decision)
+is done; **favicon fetching/storage is not yet implemented** — see
+"Not yet done" below.
+
+Done:
+
+- `domain.ActorExternalSource` (Issue #52's "1 external identity = 1
+  actor row" pattern, applied to RSS-kind `domain.ExternalSource`), a
+  rebuild migration (`0025_actors_external_source_type.sql`, mirroring
+  migration 0016's shape) and two plain-ADD-COLUMN migrations
+  (`0026_external_sources_identity.sql`: `actor_id`/`username`/`host`
+  plus a `UNIQUE(host, username)` partial index;
+  `0027_entries_provenance_url.sql`: denormalizes each ingested entry's
+  source-item URL onto `entries`).
+- `internal/ingest/rss`'s `HostFromFeedURL`/`DefaultUsername` (host
+  parsing plus a Issue-75-`GenerateActorSlug`-shaped, deliberately not
+  shared, normalize/hash-fallback/disambiguate derivation) and
+  `cmd/server`'s `ensureRSSSourcesWithActors`, which replaces
+  `EnsureFromConfig` for RSS specifically: it creates each genuinely new
+  source's actor and source row together, atomically, so neither is ever
+  left orphaned.
+- `RSS_FEED_URLS`' new optional `|<username>` per-entry suffix
+  (`internal/config`), letting the owner set a feed's username at
+  registration; unset falls back to a host-derived default.
+- `resolveUserLite`'s new `ExternalSourceResolver` case
+  (`internal/httpserver/noteapi_wire.go`) and `note.url`'s projection
+  from `domain.Entry.ProvenanceURL` (`timeline.Service.
+  CreateExternalEntry` now denormalizes it from
+  `domain.ExternalItem.ProvenanceURL` at creation time).
+- `docs/compat/aria-v1.5.11.md`'s "Note.text provenance markers" section
+  now documents the real `user.host`/`note.url` signals PR4 adds
+  alongside the pre-existing text markers (which are unchanged).
+- New ADR: [`docs/decisions/0007-external-source-identity.md`](../decisions/0007-external-source-identity.md)
+  — the design-A decision, the considered-and-accepted impersonation-
+  adjacent concerns, why IMAP is deliberately excluded, and the
+  "Revisit if real federation ships" condition plan-77 §2.4.7 required.
+- **Deliberately excluded from this PR (ADR-0007's own scope note):**
+  IMAP-kind sources keep projecting as the shared `system` actor,
+  unchanged.
+
+Not yet done (open follow-up, not covered by this PR's commit):
+
+- **Favicon fetching/storage.** plan-77 §3's one-line PR4 summary lists
+  "favicon解決" (an `internal/ingest/favicon` package, SSRF-safe via
+  `internal/ingest/safehttp`, storing the result through PR1's Drive
+  foundation as a `source_favicon`-purpose `files` row, and projecting
+  it as the source actor's avatar). Plan-77's detailed §2.4 rewrite
+  (workerA, 2026-09-08) focuses entirely on the host/username design
+  question above and does not re-specify favicon mechanics; whether to
+  implement it as a PR4 follow-up commit, fold it into PR5 (which
+  already owns `actors.avatar_file_id`, the column favicon storage would
+  reuse per plan-77 §2.5), or track it as its own PR is an open decision
+  for the tracker, not resolved by this entry.
 
 ## PR5: Profile images
 
@@ -329,9 +378,10 @@ login-capable Aria user).
   while it is still accurate.
 - `docs/compat/aria-v1.5.11.md`: PR0 added the Drive/attachment contract
   section and allowlist rows (done). PR3 promotes them from "planned" to
-  "implemented." PR4 must update the existing provenance-is-a-fixed-actor
-  framing. PR5 must update the `i/update` avatar non-goal note (PR0 already
-  flagged the exact sentence).
+  "implemented" (done). PR4 updated the existing provenance-is-a-fixed-
+  actor framing in "Note.text provenance markers" (done). PR5 must
+  update the `i/update` avatar non-goal note (PR0 already flagged the
+  exact sentence).
 - New `docs/decisions/000X-drive-storage-boundary.md` ADR (PR1).
 - `docs/operations/configuration.md`: new Drive-related configuration keys
   (PR1).

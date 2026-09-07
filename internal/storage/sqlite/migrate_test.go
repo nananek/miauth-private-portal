@@ -1157,6 +1157,113 @@ func TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata(t *testing.T) {
 	}
 }
 
+// TestMigrate_UpgradeAppliesExternalSourceActorType backs migrations
+// 0025 (actors' external_source CHECK entry), 0026 (external_sources'
+// actor_id/username/host columns), and 0027 (entries.provenance_url) —
+// all Issue #77 PR4/ADR-0007. It opens at version 24 (before any of the
+// three) so it can also confirm pre-existing actors/external_sources/
+// entries rows survive migration 0025's table rebuild unchanged.
+func TestMigrate_UpgradeAppliesExternalSourceActorType(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 24)
+	ctx := t.Context()
+
+	const preOwnerID = "pre-existing-owner"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, preOwnerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+	const preSourceID = "pre-existing-source"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO external_sources (id, kind, uri, created_at) VALUES (?, 'imap', 'imap://example.com/inbox', '2024-01-01T00:00:00Z')`, preSourceID,
+	); err != nil {
+		t.Fatalf("seed pre-existing external source: %v", err)
+	}
+	const preEntryID = "pre-existing-entry"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO threads (id, created_at, updated_at) VALUES (?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`, preEntryID,
+	); err != nil {
+		t.Fatalf("seed pre-existing thread: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO entries (id, thread_id, kind, author_actor_id, body, processing_status, created_at, updated_at)
+		 VALUES (?, ?, 'user_post', ?, 'hello', 'none', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')`,
+		preEntryID, preEntryID, preOwnerID,
+	); err != nil {
+		t.Fatalf("seed pre-existing entry: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pre-existing rows survive the actors rebuild and the new nullable
+	// columns default to NULL for rows that predate them.
+	var ownerType string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT actor_type FROM actors WHERE id = ?`, preOwnerID).Scan(&ownerType); err != nil {
+		t.Fatalf("select pre-existing owner after migrate: %v", err)
+	}
+	if ownerType != "owner" {
+		t.Errorf("pre-existing owner actor_type = %q, want owner", ownerType)
+	}
+	var actorID, username, host sql.NullString
+	if err := sqlDB.QueryRowContext(ctx, `SELECT actor_id, username, host FROM external_sources WHERE id = ?`, preSourceID).
+		Scan(&actorID, &username, &host); err != nil {
+		t.Fatalf("select pre-existing external source after migrate: %v", err)
+	}
+	if actorID.Valid || username.Valid || host.Valid {
+		t.Errorf("pre-existing imap source identity columns = %v/%v/%v, want all NULL", actorID, username, host)
+	}
+	var provenanceURL sql.NullString
+	if err := sqlDB.QueryRowContext(ctx, `SELECT provenance_url FROM entries WHERE id = ?`, preEntryID).Scan(&provenanceURL); err != nil {
+		t.Fatalf("select pre-existing entry after migrate: %v", err)
+	}
+	if provenanceURL.Valid {
+		t.Errorf("pre-existing entry provenance_url = %v, want NULL", provenanceURL)
+	}
+
+	// A new external_source actor type, and a full rss-kind source row
+	// with all three identity columns, must now be representable.
+	const newActorID = "new-external-source-actor"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'external_source', '2024-01-02T00:00:00Z')`, newActorID,
+	); err != nil {
+		t.Fatalf("insert external_source actor after migrate: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO external_sources (id, kind, uri, actor_id, username, host, created_at)
+		 VALUES ('new-rss-source', 'rss', 'https://example.com/rss', ?, 'myfeed', 'example.com', '2024-01-02T00:00:00Z')`,
+		newActorID,
+	); err != nil {
+		t.Fatalf("insert rss source with identity columns after migrate: %v", err)
+	}
+
+	// The (host, username) partial unique index rejects a second source
+	// claiming the same @username@host pair.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO external_sources (id, kind, uri, username, host, created_at)
+		 VALUES ('dup-rss-source', 'rss', 'https://other.example/rss', 'myfeed', 'example.com', '2024-01-02T00:00:00Z')`,
+	); err == nil {
+		t.Error("expected the (host, username) unique index to reject a duplicate pair")
+	}
+
+	// The singleton-type partial unique index (owner/assistant/system)
+	// still applies after the rebuild — external_source is not exempt in
+	// the wrong direction (a second one must be allowed; a second owner
+	// must not).
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES ('second-owner', 'owner', '2024-01-02T00:00:00Z')`,
+	); err == nil {
+		t.Error("expected the singleton-type unique index to reject a second owner")
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES ('second-external-source', 'external_source', '2024-01-02T00:00:00Z')`,
+	); err != nil {
+		t.Errorf("a second external_source actor must be allowed (not a singleton type): %v", err)
+	}
+}
+
 func TestMigrate_RejectsEditedAppliedMigration(t *testing.T) {
 	db := newTestDB(t)
 	ctx := t.Context()

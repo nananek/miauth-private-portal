@@ -23,7 +23,7 @@ func (r *mentionRepository) Create(ctx context.Context, m domain.Mention) error 
 // columns. The column order matches entrySelectColumns exactly, so
 // scanEntry/scanEntries (positional Scan, not by name) work unchanged.
 const mentionEntrySelectColumns = `SELECT entries.id, entries.thread_id, entries.parent_entry_id, entries.kind, entries.author_actor_id, entries.body,
-	entries.processing_status, entries.archived_at, entries.hidden_at, entries.created_at, entries.updated_at`
+	entries.processing_status, entries.archived_at, entries.hidden_at, entries.created_at, entries.updated_at, entries.provenance_url`
 
 func (r *mentionRepository) ListEntriesByMentionedActor(ctx context.Context, actorID string, before *domain.Cursor, limit int) ([]domain.Entry, error) {
 	query := mentionEntrySelectColumns + `
