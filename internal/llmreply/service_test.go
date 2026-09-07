@@ -526,3 +526,85 @@ func TestHandle_MissingSourceEntryIDIsPermanent(t *testing.T) {
 		t.Errorf("Handle() error = %v, want *jobs.PermanentError", err)
 	}
 }
+
+// TestHandle_Reload_UsesLiveModelAndTimeoutForRequestAndProvenance backs
+// Issue #76 PR4c: Config.Reload's result — not the bootstrap Config a
+// Service was constructed with — must be what both the outbound
+// CompletionRequest and the recorded domain.LLMGeneration.Model use, so
+// the two can never disagree about which model actually produced a
+// reply. Timeout>0 must also bound the Complete call's own ctx.
+func TestHandle_Reload_UsesLiveModelAndTimeoutForRequestAndProvenance(t *testing.T) {
+	var gotModel string
+	var gotDeadline bool
+	provider := &fakeProvider{fn: func(ctx context.Context, req CompletionRequest) (CompletionResult, error) {
+		gotModel = req.Model
+		_, gotDeadline = ctx.Deadline()
+		return CompletionResult{Content: "reloaded reply"}, nil
+	}}
+	db := newTestDB(t)
+	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{})
+	svc := NewService(db.Repos, timelineSvc, provider, Config{
+		ProviderName:    "openai",
+		Model:           "bootstrap-model",
+		MaxOutputTokens: 256,
+		ThreadContext:   ContextBudget{MaxMessages: 20, MaxChars: 8000},
+		MaxAttempts:     5,
+		Reload: func(context.Context) Config {
+			return Config{
+				ProviderName:    "openai",
+				Model:           "reloaded-model",
+				Timeout:         time.Minute,
+				MaxOutputTokens: 512,
+				ThreadContext:   ContextBudget{MaxMessages: 30, MaxChars: 9000},
+				MaxAttempts:     5,
+			}
+		},
+	}, nil)
+
+	root, err := timelineSvc.CreateRoot(t.Context(), domain.EntryUserPost, "hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := newEnqueuedTestJob(t, db, root.ID, mustPayload(t, domain.GenerationReply), 0)
+
+	if err := svc.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if gotModel != "reloaded-model" {
+		t.Errorf("CompletionRequest.Model = %q, want the reloaded value", gotModel)
+	}
+	if !gotDeadline {
+		t.Error("Complete's ctx has no deadline, want Reload's Timeout to have been applied")
+	}
+
+	gen, err := db.Generations.Get(t.Context(), "llmgen:"+job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen.Model != "reloaded-model" {
+		t.Errorf("recorded generation Model = %q, want the reloaded value (must match what was actually sent)", gen.Model)
+	}
+}
+
+// TestHandle_NilReload_UsesConstructionValue preserves this type's
+// pre-Issue #76 behavior for a caller unaware of the DB overlay.
+func TestHandle_NilReload_UsesConstructionValue(t *testing.T) {
+	var gotModel string
+	provider := &fakeProvider{fn: func(ctx context.Context, req CompletionRequest) (CompletionResult, error) {
+		gotModel = req.Model
+		return CompletionResult{Content: "reply"}, nil
+	}}
+	svc, db, timelineSvc := newTestSetup(t, provider, 5)
+	root, err := timelineSvc.CreateRoot(t.Context(), domain.EntryUserPost, "hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := newEnqueuedTestJob(t, db, root.ID, mustPayload(t, domain.GenerationReply), 0)
+
+	if err := svc.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if gotModel != "test-model" {
+		t.Errorf("CompletionRequest.Model = %q, want the construction-time model", gotModel)
+	}
+}

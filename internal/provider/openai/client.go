@@ -112,7 +112,7 @@ func (c *Client) Complete(ctx context.Context, req llmreply.CompletionRequest) (
 	for i, m := range req.Messages {
 		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
-	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, req.Model, messages, req.MaxOutputTokens)
 	if err != nil {
 		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.Category(cat), err)
 	}
@@ -151,7 +151,7 @@ func (c *Client) CompleteForClassification(ctx context.Context, req llmclassify.
 	for i, m := range req.Messages {
 		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
-	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, req.Model, messages, req.MaxOutputTokens)
 	if err != nil {
 		return llmclassify.CompletionResult{}, llmclassify.NewProviderError(llmclassify.Category(cat), err)
 	}
@@ -163,9 +163,18 @@ func (c *Client) CompleteForClassification(ctx context.Context, req llmclassify.
 // request and parses the response envelope, returning a plain category
 // (empty on success) instead of either use-case package's ProviderError
 // type, which its two callers wrap right at their own boundary.
-func (c *Client) doComplete(ctx context.Context, messages []wireMessage, maxOutputTokens int) (content string, promptTokens, completionTokens *int, cat category, err error) {
+// model, when non-empty, overrides the Client's own construction-time
+// model for this one request (Issue #76 PR4c: the caller — llmreply/
+// llmclassify Service.Handle — resolves LLM_MODEL/LLM_CLASSIFICATION_MODEL
+// live and passes the result through llmreply.CompletionRequest.Model/
+// llmclassify.CompletionRequest.Model, so this Client itself needs no
+// reload logic of its own).
+func (c *Client) doComplete(ctx context.Context, model string, messages []wireMessage, maxOutputTokens int) (content string, promptTokens, completionTokens *int, cat category, err error) {
+	if model == "" {
+		model = c.model
+	}
 	body, err := json.Marshal(completionRequestBody{
-		Model:     c.model,
+		Model:     model,
 		Messages:  messages,
 		MaxTokens: maxOutputTokens,
 	})

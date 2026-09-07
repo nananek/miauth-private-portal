@@ -307,12 +307,26 @@ func run() error {
 		llmReplySvc := llmreply.NewService(db.Repos, timelineSvc, llmProvider, llmreply.Config{
 			ProviderName:    "openai",
 			Model:           cfg.LLM.Model,
+			Timeout:         cfg.LLM.Timeout,
 			MaxOutputTokens: cfg.LLM.MaxOutputTokens,
 			ThreadContext: llmreply.ContextBudget{
 				MaxMessages: cfg.LLM.ThreadContextMaxMessages,
 				MaxChars:    cfg.LLM.ThreadContextMaxChars,
 			},
 			MaxAttempts: cfg.Jobs.MaxAttempts,
+			Reload: func(ctx context.Context) llmreply.Config {
+				return llmreply.Config{
+					ProviderName:    "openai",
+					Model:           configStore.String(ctx, config.KeyLLMModel, cfg.LLM.Model),
+					Timeout:         configStore.Duration(ctx, config.KeyLLMTimeout, cfg.LLM.Timeout),
+					MaxOutputTokens: configStore.Int(ctx, config.KeyLLMMaxOutputTokens, cfg.LLM.MaxOutputTokens),
+					ThreadContext: llmreply.ContextBudget{
+						MaxMessages: configStore.Int(ctx, config.KeyLLMThreadContextMaxMessages, cfg.LLM.ThreadContextMaxMessages),
+						MaxChars:    configStore.Int(ctx, config.KeyLLMThreadContextMaxChars, cfg.LLM.ThreadContextMaxChars),
+					},
+					MaxAttempts: cfg.Jobs.MaxAttempts,
+				}
+			},
 		}, logger)
 		jobsManager.Register(llmreply.JobType, llmReplySvc.Handle)
 	}
@@ -328,12 +342,26 @@ func run() error {
 		llmClassifySvc := llmclassify.NewService(db, db.Repos, classifyProvider, llmclassify.Config{
 			ProviderName:    "openai",
 			Model:           classifyModel,
+			Timeout:         cfg.LLM.Timeout,
 			MaxOutputTokens: cfg.LLM.ClassificationMaxOutputTokens,
 			ThreadContext: llmclassify.ContextBudget{
 				MaxMessages: cfg.LLM.ClassificationThreadContextMaxMessages,
 				MaxChars:    cfg.LLM.ClassificationThreadContextMaxChars,
 			},
 			MaxAttempts: cfg.Jobs.MaxAttempts,
+			Reload: func(ctx context.Context) llmclassify.Config {
+				return llmclassify.Config{
+					ProviderName:    "openai",
+					Model:           configStore.String(ctx, config.KeyLLMClassificationModel, classifyModel),
+					Timeout:         configStore.Duration(ctx, config.KeyLLMTimeout, cfg.LLM.Timeout),
+					MaxOutputTokens: configStore.Int(ctx, config.KeyLLMClassificationMaxOutputTokens, cfg.LLM.ClassificationMaxOutputTokens),
+					ThreadContext: llmclassify.ContextBudget{
+						MaxMessages: configStore.Int(ctx, config.KeyLLMClassificationThreadContextMaxMessages, cfg.LLM.ClassificationThreadContextMaxMessages),
+						MaxChars:    configStore.Int(ctx, config.KeyLLMClassificationThreadContextMaxChars, cfg.LLM.ClassificationThreadContextMaxChars),
+					},
+					MaxAttempts: cfg.Jobs.MaxAttempts,
+				}
+			},
 		}, logger)
 		jobsManager.Register(llmclassify.JobType, llmClassifySvc.Handle)
 	}
@@ -419,6 +447,22 @@ func run() error {
 			SnippetMaxChars:  cfg.IMAP.SnippetMaxChars,
 			StoreFullBody:    cfg.IMAP.StoreFullBody,
 			FullBodyMaxChars: cfg.IMAP.FullBodyMaxChars,
+			Reload: func(ctx context.Context) imap.Config {
+				return imap.Config{
+					Host:             cfg.IMAP.Host,
+					Port:             cfg.IMAP.Port,
+					TLSMode:          cfg.IMAP.TLSMode,
+					Username:         cfg.IMAP.Username,
+					Password:         cfg.IMAP.Password,
+					Mailbox:          cfg.IMAP.Mailbox,
+					SocketPath:       cfg.IMAP.MailfetchSocket,
+					FetchTimeout:     configStore.Duration(ctx, config.KeyIMAPFetchTimeout, cfg.IMAP.FetchTimeout),
+					MaxMessageBytes:  configStore.Int64(ctx, config.KeyIMAPMaxMessageBytes, cfg.IMAP.MaxMessageBytes),
+					SnippetMaxChars:  configStore.Int(ctx, config.KeyIMAPSnippetMaxChars, cfg.IMAP.SnippetMaxChars),
+					StoreFullBody:    configStore.Bool(ctx, config.KeyIMAPStoreFullBody, cfg.IMAP.StoreFullBody),
+					FullBodyMaxChars: configStore.Int(ctx, config.KeyIMAPFullBodyMaxChars, cfg.IMAP.FullBodyMaxChars),
+				}
+			},
 		})
 		ingestSvc.RegisterAdapter(imapAdapter)
 

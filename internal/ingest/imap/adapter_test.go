@@ -73,6 +73,75 @@ func testConfig(socketPath string) Config {
 	}
 }
 
+// TestAdapter_Fetch_ReloadOverridesConstructionValues backs Issue #76
+// PR4c: Reload, when set, wins over the Config an Adapter was
+// constructed with, without needing a new Adapter. Host/Port/TLSMode/
+// Username/Password/Mailbox/SocketPath stay whatever Reload's own
+// closure copies from the bootstrap Config unchanged (ADR-0006:
+// network destinations and credentials are bootstrap-only).
+func TestAdapter_Fetch_ReloadOverridesConstructionValues(t *testing.T) {
+	socketPath, srv := startFakeMailfetch(t, func(req rpc.Request) rpc.Response {
+		return rpc.Response{}
+	})
+
+	cfg := testConfig(socketPath)
+	cfg.Reload = func(context.Context) Config {
+		reloaded := cfg
+		reloaded.Reload = nil
+		reloaded.MaxMessageBytes = 2 << 20
+		reloaded.SnippetMaxChars = 9000
+		reloaded.FullBodyMaxChars = 90000
+		reloaded.StoreFullBody = true
+		reloaded.FetchTimeout = 10 * time.Second
+		return reloaded
+	}
+	adapter := NewAdapter(cfg)
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind}
+
+	if _, err := adapter.Fetch(context.Background(), source, nil); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	got := srv.capturedRequest()
+	if got.MaxMessageBytes != 2<<20 {
+		t.Errorf("MaxMessageBytes = %d, want the reloaded value", got.MaxMessageBytes)
+	}
+	if got.SnippetMaxChars != 9000 {
+		t.Errorf("SnippetMaxChars = %d, want the reloaded value", got.SnippetMaxChars)
+	}
+	if got.FullBodyMaxChars != 90000 {
+		t.Errorf("FullBodyMaxChars = %d, want the reloaded value", got.FullBodyMaxChars)
+	}
+	if !got.StoreFullBody {
+		t.Error("StoreFullBody = false, want true (the reloaded value)")
+	}
+	if got.FetchTimeoutMs != (10 * time.Second).Milliseconds() {
+		t.Errorf("FetchTimeoutMs = %d, want the reloaded value", got.FetchTimeoutMs)
+	}
+	// Bootstrap-only fields must survive unchanged.
+	if got.Host != "imap.example.com" || got.Username != "owner" {
+		t.Errorf("bootstrap-only fields changed: Host=%q Username=%q", got.Host, got.Username)
+	}
+}
+
+// TestAdapter_Fetch_NilReloadUsesConstructionValues preserves this
+// type's pre-Issue #76 behavior for a caller unaware of the DB overlay.
+func TestAdapter_Fetch_NilReloadUsesConstructionValues(t *testing.T) {
+	socketPath, srv := startFakeMailfetch(t, func(req rpc.Request) rpc.Response {
+		return rpc.Response{}
+	})
+
+	adapter := NewAdapter(testConfig(socketPath))
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind}
+
+	if _, err := adapter.Fetch(context.Background(), source, nil); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got := srv.capturedRequest().MaxMessageBytes; got != 1<<20 {
+		t.Errorf("MaxMessageBytes = %d, want the construction-time value", got)
+	}
+}
+
 func TestAdapter_Fetch_ReturnsItemsAndCursor(t *testing.T) {
 	published := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	socketPath, _ := startFakeMailfetch(t, func(req rpc.Request) rpc.Response {

@@ -62,6 +62,50 @@ func TestClient_Complete_Success(t *testing.T) {
 	}
 }
 
+// TestClient_Complete_RequestModelOverridesConstructionValue backs Issue
+// #76 PR4c: llmreply.Service.Handle resolves LLM_MODEL live and passes
+// it through CompletionRequest.Model, which must win over whatever model
+// Client was constructed with — the Client itself holds no reload logic.
+func TestClient_Complete_RequestModelOverridesConstructionValue(t *testing.T) {
+	var gotBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	})
+
+	if _, err := client.Complete(t.Context(), llmreply.CompletionRequest{
+		Messages: []llmreply.Message{{Role: "user", Content: "hi"}},
+		Model:    "reloaded-model",
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotBody["model"] != "reloaded-model" {
+		t.Errorf("request model = %v, want reloaded-model (the per-request override)", gotBody["model"])
+	}
+}
+
+// TestClient_Complete_EmptyRequestModelUsesConstructionValue preserves
+// this type's pre-Issue #76 behavior for a caller that never sets
+// CompletionRequest.Model.
+func TestClient_Complete_EmptyRequestModelUsesConstructionValue(t *testing.T) {
+	var gotBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	})
+
+	if _, err := client.Complete(t.Context(), llmreply.CompletionRequest{
+		Messages: []llmreply.Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotBody["model"] != "test-model" {
+		t.Errorf("request model = %v, want test-model (the construction-time default)", gotBody["model"])
+	}
+}
+
 func TestClient_Complete_OmitsAuthorizationWhenAPIKeyEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
