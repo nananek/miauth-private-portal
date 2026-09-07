@@ -108,10 +108,11 @@ func (r *configAuditRepository) Record(ctx context.Context, entry domain.AppConf
 	return mapWriteError(err)
 }
 
-// ListByKey orders by version alone: it is already a strictly increasing
-// per-key sequence, so it needs no secondary timestamp tie-break.
+// ListByKey orders by (changed_at, id), not version: version can repeat
+// across a delete/recreate cycle (see AppConfigAuditEntry's own doc
+// comment), so it is not a safe ordering column on its own.
 func (r *configAuditRepository) ListByKey(ctx context.Context, key string) ([]domain.AppConfigAuditEntry, error) {
-	rows, err := r.q.QueryContext(ctx, appConfigAuditSelectColumns+` WHERE key = ? ORDER BY version`, key)
+	rows, err := r.q.QueryContext(ctx, appConfigAuditSelectColumns+` WHERE key = ? ORDER BY changed_at, id`, key)
 	if err != nil {
 		return nil, err
 	}

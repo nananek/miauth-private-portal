@@ -42,6 +42,18 @@ CREATE TABLE app_config (
 -- old_value/new_value are both nullable: old_value is NULL for a key's
 -- first-ever row (nothing to have changed from), new_value is NULL for
 -- an Unset (the row is removed, reverting to the bootstrap value).
+--
+-- version is 0 for an Unset event (app_config has no row afterward, so
+-- there is no new row version to record) and otherwise mirrors the
+-- app_config row's own version immediately after this write. It is
+-- deliberately NOT this table's ordering column: a key deleted and
+-- later re-Set restarts app_config's own version at 1, so two audit
+-- rows for the same key can legitimately share a version number across
+-- such a delete/recreate cycle. changed_at is what miauthctl config
+-- rollback/history order by; version is carried only so a specific
+-- historical value can still be named ("rollback --to-version N" finds
+-- the most recent audit row at that version, per ConfigAuditRepository's
+-- own doc comment).
 CREATE TABLE app_config_audit (
     id         TEXT PRIMARY KEY,
     key        TEXT NOT NULL,
@@ -53,7 +65,7 @@ CREATE TABLE app_config_audit (
 );
 
 -- Backs domain.ConfigAuditRepository.ListByKey (miauthctl config
--- history). version is already a strictly increasing per-key sequence,
--- so it alone orders one key's history correctly with no secondary
--- timestamp tie-break needed.
-CREATE INDEX idx_app_config_audit_key ON app_config_audit (key, version);
+-- history), ordered by (changed_at, id) — the same "real time, not a
+-- recyclable sequence number" ordering this service's other list
+-- methods already use (for example openwebui_models' (created_at, id)).
+CREATE INDEX idx_app_config_audit_key ON app_config_audit (key, changed_at);

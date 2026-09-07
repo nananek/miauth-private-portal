@@ -154,7 +154,7 @@ func TestConfigRepository_List_OrderedByKey(t *testing.T) {
 	}
 }
 
-func TestConfigAuditRepository_Record_ListByKeyOrderedByVersion(t *testing.T) {
+func TestConfigAuditRepository_Record_ListByKeyOrderedByChangedAt(t *testing.T) {
 	db := newConfigTestDB(t)
 	now := time.Now()
 	old1 := "5"
@@ -204,6 +204,62 @@ func TestConfigAuditRepository_Record_ListByKeyOrderedByVersion(t *testing.T) {
 	}
 	if history[0].NewValue == nil || *history[0].NewValue != "5" {
 		t.Errorf("history[0].NewValue = %v, want \"5\"", history[0].NewValue)
+	}
+}
+
+// TestConfigAuditRepository_ListByKey_OrdersByChangedAtAcrossVersionReuse
+// is the regression test for the bug ListByKey's ORDER BY version alone
+// would have: app_config.version restarts at 1 after a key is Unset and
+// later Set again, so two audit rows for the same key can legitimately
+// share a Version number across that delete/recreate cycle. Ordering by
+// (changed_at, id) instead must still report every row in true
+// chronological order regardless.
+func TestConfigAuditRepository_ListByKey_OrdersByChangedAtAcrossVersionReuse(t *testing.T) {
+	db := newConfigTestDB(t)
+	now := time.Now()
+	v1 := "5"
+
+	// Epoch 1: created at version 1, then unset (version 0 marks the
+	// deletion event).
+	if err := db.ConfigAudit.Record(t.Context(), domain.AppConfigAuditEntry{
+		ID: domain.NewID(), Key: "JOBS_MAX_ATTEMPTS", OldValue: nil, NewValue: &v1,
+		Version: 1, ChangedAt: now, ChangedBy: "owner-1",
+	}); err != nil {
+		t.Fatalf("Record epoch1 set: %v", err)
+	}
+	if err := db.ConfigAudit.Record(t.Context(), domain.AppConfigAuditEntry{
+		ID: domain.NewID(), Key: "JOBS_MAX_ATTEMPTS", OldValue: &v1, NewValue: nil,
+		Version: 0, ChangedAt: now.Add(time.Minute), ChangedBy: "owner-1",
+	}); err != nil {
+		t.Fatalf("Record epoch1 unset: %v", err)
+	}
+
+	// Epoch 2: Set again, restarting at version 1 — the same version
+	// number epoch 1's first Set already used.
+	v2 := "9"
+	if err := db.ConfigAudit.Record(t.Context(), domain.AppConfigAuditEntry{
+		ID: domain.NewID(), Key: "JOBS_MAX_ATTEMPTS", OldValue: nil, NewValue: &v2,
+		Version: 1, ChangedAt: now.Add(2 * time.Minute), ChangedBy: "owner-2",
+	}); err != nil {
+		t.Fatalf("Record epoch2 set: %v", err)
+	}
+
+	history, err := db.ConfigAudit.ListByKey(t.Context(), "JOBS_MAX_ATTEMPTS")
+	if err != nil {
+		t.Fatalf("ListByKey: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("ListByKey returned %d entries, want 3", len(history))
+	}
+	wantNewValues := []*string{&v1, nil, &v2}
+	for i, want := range wantNewValues {
+		got := history[i].NewValue
+		switch {
+		case want == nil && got != nil:
+			t.Errorf("history[%d].NewValue = %v, want nil", i, *got)
+		case want != nil && (got == nil || *got != *want):
+			t.Errorf("history[%d].NewValue = %v, want %v", i, got, *want)
+		}
 	}
 }
 

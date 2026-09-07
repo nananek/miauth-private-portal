@@ -41,7 +41,17 @@ type AppConfigAuditEntry struct {
 	// NewValue is nil for an Unset: the app_config row is removed and
 	// the key's effective value reverts to config.Load's own file/env/
 	// default resolution.
-	NewValue  *string
+	NewValue *string
+	// Version is 0 for an Unset event (no app_config row exists
+	// afterward to have a version) and otherwise mirrors the
+	// app_config row's own version immediately after this write. It is
+	// not this type's ordering field — a key deleted and later re-Set
+	// restarts app_config's own version numbering at 1, so two audit
+	// entries for the same key can legitimately share a Version across
+	// such a delete/recreate cycle. Use ChangedAt for chronological
+	// order; Version exists so a specific historical value can still be
+	// named (see ConfigAuditRepository.ListByKey and miauthctl config
+	// rollback --to-version).
 	Version   int
 	ChangedAt time.Time
 	ChangedBy string
@@ -87,9 +97,11 @@ type ConfigRepository interface {
 // never disagree (Issue #76 AC4).
 type ConfigAuditRepository interface {
 	Record(ctx context.Context, entry AppConfigAuditEntry) error
-	// ListByKey returns key's full change history, oldest first — the
-	// same ordered-list shape every other List method in this service
-	// uses, here by version alone: it is already a strictly increasing
-	// per-key sequence, so it needs no secondary tie-break column.
+	// ListByKey returns key's full change history, oldest first, ordered
+	// by (ChangedAt, ID) — the same "real time, not a recyclable
+	// sequence number" order every other list method in this service
+	// uses (for example (created_at, id) elsewhere), since Version can
+	// repeat across a delete/recreate cycle (see AppConfigAuditEntry's
+	// own doc comment).
 	ListByKey(ctx context.Context, key string) ([]AppConfigAuditEntry, error)
 }
