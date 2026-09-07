@@ -47,14 +47,42 @@ func NewJobPayload() (string, error) {
 type Config struct {
 	// ProviderName and Model are recorded on every domain.LLMClassification
 	// row (provider/model provenance), independent of PromptVersion.
+	// Model is also what Handle sends as CompletionRequest.Model: the
+	// same resolved value (bootstrap or, with Reload set, the current
+	// live one) backs both the outbound request and the recorded
+	// provenance, so the two can never disagree.
 	ProviderName    string
 	Model           string
 	MaxOutputTokens int
 	ThreadContext   ContextBudget
+	// Timeout bounds one Provider.Complete call, applied by Handle as a
+	// context.WithTimeout wrapping the job's own ctx — internal/provider/
+	// openai.Client has no Config of its own to reload, so this is where
+	// LLM_TIMEOUT's live value actually takes effect (Issue #76 PR4c).
+	// internal/provider/openai.Client deliberately keeps no
+	// construction-time http.Client.Timeout of its own for this reason: a
+	// frozen client-level timeout would silently floor this field's live
+	// increases at whatever LLM_TIMEOUT was at process start (see that
+	// package's NewClient/doComplete comments). Zero (the default for a
+	// hand-built Config that predates this field) leaves ctx's own
+	// deadline, if any, as the only bound.
+	Timeout time.Duration
 	// MaxAttempts must mirror internal/jobs.Config.MaxAttempts (the same
 	// value cmd/server passes to jobs.NewManager), so Handle can tell
-	// whether the attempt it is running is the job's last one.
+	// whether the attempt it is running is the job's last one. Not
+	// db-eligible, so Reload's own closure always copies it from the
+	// bootstrap value unchanged, the same way it does ProviderName.
 	MaxAttempts int
+
+	// Reload, if non-nil, is called once at the start of Handle (Issue
+	// #76 PR4c, ADR-0006 Tier A) to get the current effective Model/
+	// Timeout/MaxOutputTokens/ThreadContext; its result is used for that
+	// job's entire execution instead of the fields above (a config
+	// change mid-job never retroactively changes a request already in
+	// flight). Nil disables reload entirely: Config's fields never
+	// change after Service is constructed, exactly this type's pre-#76
+	// behavior.
+	Reload func(ctx context.Context) Config
 }
 
 // Service implements Issue #10's "llm_classification" job: given a
@@ -97,6 +125,16 @@ func (s *Service) Handle(ctx context.Context, job domain.Job) error {
 	}
 	targetEntryID := *job.SourceEntryID
 
+	// Resolved once for this job's whole execution (Issue #76 PR4c): the
+	// same Model backs both the recorded provenance (ensureClassification)
+	// and the outbound CompletionRequest further down, so a mid-job
+	// config change can never make them disagree — see Config.Reload's
+	// own doc comment.
+	cfg := s.cfg
+	if s.cfg.Reload != nil {
+		cfg = s.cfg.Reload(ctx)
+	}
+
 	target, err := s.repos.Entries.Get(ctx, targetEntryID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
@@ -105,7 +143,7 @@ func (s *Service) Handle(ctx context.Context, job domain.Job) error {
 		return fmt.Errorf("llmclassify: get target entry: %w", err)
 	}
 
-	classificationID, version, created, err := s.ensureClassification(ctx, targetEntryID, job.ID, payload.PromptVersion)
+	classificationID, version, created, err := s.ensureClassification(ctx, targetEntryID, job.ID, payload.PromptVersion, cfg.ProviderName, cfg.Model)
 	if err != nil {
 		return err
 	}
@@ -125,10 +163,16 @@ func (s *Service) Handle(ctx context.Context, job domain.Job) error {
 	if err != nil {
 		return fmt.Errorf("llmclassify: list thread: %w", err)
 	}
-	candidates := BuildCandidates(threadEntries, target.ID, s.cfg.ThreadContext)
+	candidates := BuildCandidates(threadEntries, target.ID, cfg.ThreadContext)
 	messages := BuildMessages(candidates, target)
 
-	result, completeErr := s.provider.Complete(ctx, CompletionRequest{Messages: messages, MaxOutputTokens: s.cfg.MaxOutputTokens})
+	completeCtx := ctx
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		completeCtx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
+	result, completeErr := s.provider.Complete(completeCtx, CompletionRequest{Messages: messages, MaxOutputTokens: cfg.MaxOutputTokens, Model: cfg.Model})
 	if completeErr != nil {
 		return s.handleProviderFailure(ctx, targetEntryID, version, job, completeErr)
 	}
@@ -196,7 +240,7 @@ func (s *Service) Handle(ctx context.Context, job domain.Job) error {
 // the job claimable again once its lease expires). A domain.ErrConflict
 // from Create is still handled, as a narrower safety net for two
 // deliveries racing to compute the same next version concurrently.
-func (s *Service) ensureClassification(ctx context.Context, entryID, jobID, promptVersion string) (id int64, version int, created bool, err error) {
+func (s *Service) ensureClassification(ctx context.Context, entryID, jobID, promptVersion, providerName, model string) (id int64, version int, created bool, err error) {
 	versions, err := s.repos.Classifications.ListVersions(ctx, entryID)
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("llmclassify: list existing versions: %w", err)
@@ -209,7 +253,7 @@ func (s *Service) ensureClassification(ctx context.Context, entryID, jobID, prom
 
 	next := len(versions) + 1
 	newID, createErr := s.repos.Classifications.Create(ctx, domain.LLMClassification{
-		EntryID: entryID, Version: next, Provider: s.cfg.ProviderName, Model: s.cfg.Model,
+		EntryID: entryID, Version: next, Provider: providerName, Model: model,
 		PromptVersion: promptVersion, Status: domain.ClassificationPending, JobID: &jobID,
 		CreatedAt: s.now().UTC(),
 	})

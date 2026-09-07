@@ -31,6 +31,12 @@ type CompletionRequest struct {
 	// MaxOutputTokens bounds the completion length. Zero defers to the
 	// provider's own default.
 	MaxOutputTokens int
+	// Model names the model to request, resolved by Service.Handle from
+	// its (possibly reloaded — Issue #76 PR4c) Config.Model. Empty
+	// leaves the provider's own construction-time default in effect
+	// (internal/provider/openai.Client's own model field), which every
+	// call before this field existed relied on implicitly.
+	Model string
 }
 
 // CompletionResult is a successful generation. PromptTokens and

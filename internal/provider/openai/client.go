@@ -35,23 +35,39 @@ const maxResponseBytes = 4 << 20 // 4 MiB
 
 // Client calls POST {baseURL}/chat/completions.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	model      string
+	baseURL string
+	apiKey  string
+	model   string
+	// timeout is only a fallback bound, applied by doComplete when the
+	// incoming context carries no deadline of its own (see doComplete's
+	// own comment on why this must never be httpClient.Timeout).
+	timeout    time.Duration
 	httpClient *http.Client
 }
 
 // NewClient builds a Client against baseURL (an OpenAI-compatible API
 // base, commonly including a path such as "https://api.openai.com/v1"),
-// bounding every request by timeout. An empty apiKey omits the
-// Authorization header, for self-hosted providers that do not require
-// one.
+// falling back to timeout for a call whose context carries no deadline
+// of its own. An empty apiKey omits the Authorization header, for
+// self-hosted providers that do not require one.
 func NewClient(baseURL, apiKey, model string, timeout time.Duration) *Client {
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		apiKey:     apiKey,
-		model:      model,
-		httpClient: &http.Client{Timeout: timeout},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		model:   model,
+		timeout: timeout,
+		// No http.Client.Timeout here (Issue #76 PR4c): that field would
+		// be a second, construction-time-frozen bound alongside
+		// doComplete's per-call context deadline, and the shorter of the
+		// two always wins. Since llmreply/llmclassify Service.Handle
+		// always derives that per-call deadline from the *current*
+		// (possibly live-reloaded) LLM_TIMEOUT, a frozen httpClient.Timeout
+		// would silently cap out at whatever LLM_TIMEOUT was at process
+		// start — an operator raising it later via "miauthctl config set
+		// LLM_TIMEOUT" would see no effect. doComplete's own
+		// no-deadline-yet fallback covers the one case (a caller passing a
+		// bare context) this field used to handle.
+		httpClient: &http.Client{},
 	}
 }
 
@@ -112,7 +128,7 @@ func (c *Client) Complete(ctx context.Context, req llmreply.CompletionRequest) (
 	for i, m := range req.Messages {
 		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
-	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, req.Model, messages, req.MaxOutputTokens)
 	if err != nil {
 		return llmreply.CompletionResult{}, llmreply.NewProviderError(llmreply.Category(cat), err)
 	}
@@ -151,7 +167,7 @@ func (c *Client) CompleteForClassification(ctx context.Context, req llmclassify.
 	for i, m := range req.Messages {
 		messages[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
-	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, messages, req.MaxOutputTokens)
+	content, promptTokens, completionTokens, cat, err := c.doComplete(ctx, req.Model, messages, req.MaxOutputTokens)
 	if err != nil {
 		return llmclassify.CompletionResult{}, llmclassify.NewProviderError(llmclassify.Category(cat), err)
 	}
@@ -163,9 +179,30 @@ func (c *Client) CompleteForClassification(ctx context.Context, req llmclassify.
 // request and parses the response envelope, returning a plain category
 // (empty on success) instead of either use-case package's ProviderError
 // type, which its two callers wrap right at their own boundary.
-func (c *Client) doComplete(ctx context.Context, messages []wireMessage, maxOutputTokens int) (content string, promptTokens, completionTokens *int, cat category, err error) {
+// model, when non-empty, overrides the Client's own construction-time
+// model for this one request (Issue #76 PR4c: the caller — llmreply/
+// llmclassify Service.Handle — resolves LLM_MODEL/LLM_CLASSIFICATION_MODEL
+// live and passes the result through llmreply.CompletionRequest.Model/
+// llmclassify.CompletionRequest.Model, so this Client itself needs no
+// reload logic of its own).
+//
+// ctx is expected to already carry the caller's own deadline in the
+// normal case (Service.Handle wraps it with the live-reloaded
+// LLM_TIMEOUT before calling Complete). When it does not, c.timeout
+// applies as a fallback bound here — never as a fixed httpClient.Timeout
+// — so a live LLM_TIMEOUT increase is never silently capped by whatever
+// duration Client was constructed with (see NewClient's own comment).
+func (c *Client) doComplete(ctx context.Context, model string, messages []wireMessage, maxOutputTokens int) (content string, promptTokens, completionTokens *int, cat category, err error) {
+	if model == "" {
+		model = c.model
+	}
+	if _, ok := ctx.Deadline(); !ok && c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
 	body, err := json.Marshal(completionRequestBody{
-		Model:     c.model,
+		Model:     model,
 		Messages:  messages,
 		MaxTokens: maxOutputTokens,
 	})

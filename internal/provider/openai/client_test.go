@@ -62,6 +62,50 @@ func TestClient_Complete_Success(t *testing.T) {
 	}
 }
 
+// TestClient_Complete_RequestModelOverridesConstructionValue backs Issue
+// #76 PR4c: llmreply.Service.Handle resolves LLM_MODEL live and passes
+// it through CompletionRequest.Model, which must win over whatever model
+// Client was constructed with — the Client itself holds no reload logic.
+func TestClient_Complete_RequestModelOverridesConstructionValue(t *testing.T) {
+	var gotBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	})
+
+	if _, err := client.Complete(t.Context(), llmreply.CompletionRequest{
+		Messages: []llmreply.Message{{Role: "user", Content: "hi"}},
+		Model:    "reloaded-model",
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotBody["model"] != "reloaded-model" {
+		t.Errorf("request model = %v, want reloaded-model (the per-request override)", gotBody["model"])
+	}
+}
+
+// TestClient_Complete_EmptyRequestModelUsesConstructionValue preserves
+// this type's pre-Issue #76 behavior for a caller that never sets
+// CompletionRequest.Model.
+func TestClient_Complete_EmptyRequestModelUsesConstructionValue(t *testing.T) {
+	var gotBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	})
+
+	if _, err := client.Complete(t.Context(), llmreply.CompletionRequest{
+		Messages: []llmreply.Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotBody["model"] != "test-model" {
+		t.Errorf("request model = %v, want test-model (the construction-time default)", gotBody["model"])
+	}
+}
+
 func TestClient_Complete_OmitsAuthorizationWhenAPIKeyEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
@@ -186,6 +230,32 @@ func TestClient_Complete_ClassifiesErrors(t *testing.T) {
 				t.Errorf("ClassifyProviderError() = %q, want %q", got, tt.wantCategory)
 			}
 		})
+	}
+}
+
+// TestClient_Complete_CallerDeadlineLongerThanConstructionTimeoutIsHonored
+// backs Issue #76 PR4c's live LLM_TIMEOUT increase: Client must never
+// clamp a call to the timeout.Duration it was constructed with when the
+// caller's own context already carries a longer deadline (Service.Handle
+// derives that deadline from the current, possibly live-reloaded,
+// Config.Timeout). A regression here would silently floor every raised
+// LLM_TIMEOUT back down to whatever it was when the process started.
+func TestClient_Complete_CallerDeadlineLongerThanConstructionTimeoutIsHonored(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"still on time"},"finish_reason":"stop"}]}`))
+	})
+	client.timeout = 5 * time.Millisecond // the construction-time fallback, deliberately shorter than the handler's own sleep
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	result, err := client.Complete(ctx, llmreply.CompletionRequest{Messages: []llmreply.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("Complete: %v, want the caller's longer deadline to win over Client's own construction-time timeout", err)
+	}
+	if result.Content != "still on time" {
+		t.Errorf("Content = %q, want %q", result.Content, "still on time")
 	}
 }
 

@@ -44,12 +44,25 @@ type Config struct {
 	Password string
 	Mailbox  string
 	// SocketPath is the Unix domain socket cmd/mailfetch listens on.
-	SocketPath       string
+	SocketPath string
+	// FetchTimeout, MaxMessageBytes, SnippetMaxChars, StoreFullBody, and
+	// FullBodyMaxChars are the fields Fetch reloads on every call via
+	// Reload, if set (Issue #76 PR4c, ADR-0006 Tier A); every other
+	// field above is bootstrap-only (a network destination or
+	// credential) and Reload's own closure always copies it from the
+	// bootstrap value unchanged.
 	FetchTimeout     time.Duration
 	MaxMessageBytes  int64
 	SnippetMaxChars  int
 	StoreFullBody    bool
 	FullBodyMaxChars int
+
+	// Reload, if non-nil, is called at the start of every Fetch to get
+	// the current effective Config; its result is used for that one
+	// fetch instead of the fields above. Nil disables reload entirely:
+	// Config's fields never change after Adapter is constructed,
+	// exactly this type's pre-#76 behavior.
+	Reload func(ctx context.Context) Config
 }
 
 // Adapter implements ingest.Adapter. It holds no IMAP protocol state
@@ -73,22 +86,27 @@ func (a *Adapter) Kind() string { return Kind }
 // are never read (see Config's doc comment); only source.ID is sent, to
 // scope cmd/mailfetch's fallback dedupe key.
 func (a *Adapter) Fetch(ctx context.Context, source domain.ExternalSource, cursor *string) (ingest.FetchResult, error) {
-	fetchCtx, cancel := context.WithTimeout(ctx, a.cfg.FetchTimeout+connectSlack)
+	cfg := a.cfg
+	if a.cfg.Reload != nil {
+		cfg = a.cfg.Reload(ctx)
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, cfg.FetchTimeout+connectSlack)
 	defer cancel()
 
 	req := rpc.Request{
-		Host:             a.cfg.Host,
-		Port:             a.cfg.Port,
-		TLSMode:          a.cfg.TLSMode,
-		Username:         a.cfg.Username,
-		Password:         a.cfg.Password,
-		Mailbox:          a.cfg.Mailbox,
+		Host:             cfg.Host,
+		Port:             cfg.Port,
+		TLSMode:          cfg.TLSMode,
+		Username:         cfg.Username,
+		Password:         cfg.Password,
+		Mailbox:          cfg.Mailbox,
 		SourceID:         source.ID,
-		FetchTimeoutMs:   a.cfg.FetchTimeout.Milliseconds(),
-		MaxMessageBytes:  a.cfg.MaxMessageBytes,
-		SnippetMaxChars:  a.cfg.SnippetMaxChars,
-		StoreFullBody:    a.cfg.StoreFullBody,
-		FullBodyMaxChars: a.cfg.FullBodyMaxChars,
+		FetchTimeoutMs:   cfg.FetchTimeout.Milliseconds(),
+		MaxMessageBytes:  cfg.MaxMessageBytes,
+		SnippetMaxChars:  cfg.SnippetMaxChars,
+		StoreFullBody:    cfg.StoreFullBody,
+		FullBodyMaxChars: cfg.FullBodyMaxChars,
 	}
 	if cursor != nil {
 		req.Cursor = *cursor
