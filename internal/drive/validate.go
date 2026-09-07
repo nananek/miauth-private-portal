@@ -79,3 +79,28 @@ func ValidateImage(data []byte, maxWidth, maxHeight int) (ImageInfo, error) {
 	}
 	return ImageInfo{Format: format, Width: cfg.Width, Height: cfg.Height}, nil
 }
+
+// imageFormatMIME maps an ImageInfo.Format (an image.DecodeConfig format
+// name, always one of AllowedImageFormats after ValidateImage succeeds)
+// to the canonical MIME type Service stores and reports — derived from
+// the decoded format, never from a client's declared Content-Type or
+// filename extension, the same untrusted-input stance ValidateImage
+// itself takes.
+var imageFormatMIME = map[string]string{
+	"png":  "image/png",
+	"jpeg": "image/jpeg",
+	"webp": "image/webp",
+}
+
+// MIMEForFormat returns the canonical MIME type for format (an
+// ImageInfo.Format value). It panics on an unrecognized format: every
+// caller only ever passes a format ValidateImage already confirmed is in
+// AllowedImageFormats, so an unrecognized value here is this package's
+// own bug, not a possible runtime input.
+func MIMEForFormat(format string) string {
+	mime, ok := imageFormatMIME[format]
+	if !ok {
+		panic("drive: MIMEForFormat: unrecognized format " + format)
+	}
+	return mime
+}

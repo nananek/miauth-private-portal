@@ -74,7 +74,7 @@ catch that class of mistake during local development.
 | `HTTP_READ_HEADER_TIMEOUT` | no | `5s` | Same format/rules. |
 | `HTTP_WRITE_TIMEOUT` | no | `15s` | Same format/rules. |
 | `HTTP_IDLE_TIMEOUT` | no | `60s` | Same format/rules. |
-| `HTTP_MAX_BODY_BYTES` | no | `1048576` (1 MiB) | Enforced via `http.MaxBytesReader` on every request. |
+| `HTTP_MAX_BODY_BYTES` | no | `1048576` (1 MiB) | Enforced via `http.MaxBytesReader` on every request. Issue #77 PR3: the effective ceiling `cmd/server` actually wires (`httpserver.Options.MaxRequestBodyBytes`) is `max(HTTP_MAX_BODY_BYTES, DRIVE_MAX_FILE_BYTES + 64 KiB)`, since this one global wrap covers `POST /api/drive/files/create`'s multipart upload too — raising `DRIVE_MAX_FILE_BYTES` past 1 MiB - 64 KiB raises this effective ceiling automatically, without needing `HTTP_MAX_BODY_BYTES` itself changed. |
 | `HTTP_SHUTDOWN_GRACE_PERIOD` | no | `15s` | Bounds how long graceful shutdown waits before forcing connections closed. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, `error`. Must not be `debug` in production. |
 | `LOG_FORMAT` | no | `text` | `json` or `text`. Must be `json` in production. |

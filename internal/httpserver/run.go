@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/drive"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
@@ -121,6 +122,16 @@ type Options struct {
 	// (the default, unset) never appends anything — D23's "leaving it
 	// unset reproduces today's behavior exactly" guarantee.
 	OpenWebUIViewerBaseURL string
+
+	// Drive backs Issue #77 PR3's Misskey-compatible Drive API and the
+	// anonymous GET /files/{id} serving route; see NewServer. A nil
+	// value (the safe default) registers neither.
+	Drive *drive.Service
+	// DriveMaxFileBytes bounds a single drive/files/create upload's file
+	// part; see Server.driveMaxFileBytes's doc comment for why it is
+	// enforced independently of drive.Service's own Config.MaxFileBytes.
+	// Meaningless while Drive is nil.
+	DriveMaxFileBytes int64
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

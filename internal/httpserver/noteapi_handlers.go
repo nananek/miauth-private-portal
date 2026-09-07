@@ -98,6 +98,29 @@ var implementedEndpoints = []string{
 	"stats",
 	"users/search",
 	"users/search-by-username-and-host",
+	// Issue #77 PR3's Drive API. drive/files/move-bulk is deliberately
+	// absent: Aria's DriveFilesNotifier.moveBulkFrom probes this list
+	// first and transparently falls back to one drive/files/update per
+	// file when the name is missing (docs/compat/aria-v1.5.11.md's Drive
+	// API section) — this is that fallback being exercised on purpose,
+	// not an oversight. drive/stream, drive/files/find,
+	// drive/files/check-existence, drive/files/find-by-hash, and
+	// drive/folders/find are absent for the same reason
+	// notifications/mark-all-as-read already is: no traced Aria call
+	// site ever calls them.
+	"drive",
+	"drive/files",
+	"drive/files/create",
+	"drive/files/show",
+	"drive/files/update",
+	"drive/files/delete",
+	"drive/files/upload-from-url",
+	"drive/files/attached-notes",
+	"drive/folders",
+	"drive/folders/create",
+	"drive/folders/show",
+	"drive/folders/update",
+	"drive/folders/delete",
 }
 
 func (s *Server) handleEndpoints(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,8 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
-- Status: PR0 (investigation), PR1 (Drive foundation), and PR2 (static
-  app icons) complete. PR3–PR7 not started.
+- Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
+  icons), and PR3 (Misskey-compatible Drive API) complete. PR4–PR7 not
+  started.
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -41,7 +42,7 @@ Dependency graph:
 
 ```text
 PR0 (Aria/misskey_dart Drive contract investigation, done)
-  -> PR3 (Misskey-compatible Drive API)
+  -> PR3 (Misskey-compatible Drive API, done)
   -> PR6 (post attachments)
 
 PR1 (Drive foundation: Storage abstraction, local disk + S3-compatible,
@@ -208,26 +209,66 @@ implementation order but has no dependency on it.
 
 ## PR3: Misskey-compatible Drive API
 
-**Status: not started.** Depends on PR0 (this document) and PR1.
+**Status: complete.** Depended on PR0 (this document) and PR1.
 
+- `internal/drive.Service` (`internal/drive/service.go`) is the new
+  business-logic layer this PR adds on top of PR1's `Storage`/
+  `ValidateImage`: ownership checks, folder containment, partial-update
+  semantics (an explicit `null` on `comment`/`folderId` clears the
+  field, matching Aria's own convention — see PR0's findings above), and
+  a folder-move cycle check. It depends on two new domain repositories
+  (`domain.FileRepository`, `domain.FolderRepository`,
+  `internal/domain/file.go`) backed by `internal/storage/sqlite`'s new
+  `file_repository.go`/`folder_repository.go`, and on
+  `internal/ingest/safehttp` for `upload-from-url`'s SSRF-protected
+  fetch.
+- Two new migrations: `0023_drive_folders.sql` (the `folders` table —
+  PR0's trace found folder support is not optional to skip) and
+  `0024_drive_files_metadata.sql` (adds `name`/`comment`/`is_sensitive`/
+  `folder_id`/`md5` to the `files` table PR1 deliberately left bare —
+  ADR-0006 D6's "repository ships when a concrete use case exists" now
+  applies to these columns too).
 - `POST /api/drive`, `/files`, `/files/create`, `/files/show`,
   `/files/update`, `/files/delete`, `/files/upload-from-url`,
   `/files/attached-notes`, `/folders`, `/folders/create`,
-  `/folders/delete`, `/folders/update`, `/folders/show` — see PR0's
-  findings above on which endpoints are genuinely required and which
-  (`stream`, `files/find`, `files/check-existence`, `files/find-by-hash`,
-  `folders/find`, `files/move-bulk`) are not.
+  `/folders/delete`, `/folders/update`, `/folders/show` are all
+  implemented (`internal/httpserver/drive_handlers.go`); `stream`,
+  `files/find`, `files/check-existence`, `files/find-by-hash`,
+  `folders/find`, and `files/move-bulk` are deliberately not — see PR0's
+  findings above. `files/create` authenticates itself directly against
+  `s.miauth` rather than going through `RequireScope`, since Aria sends
+  its local API token as a multipart form field for this one endpoint,
+  not the JSON body every other route reads it from.
+- `GET /files/{id}` (unauthenticated, `internal/httpserver/
+  drive_handlers.go`'s `handleFilesShow`) is the new byte-serving route
+  `DriveFile.url` resolves to — the file id's own 128 bits of
+  `crypto/rand` unguessability is the access control, matching how
+  Misskey/Mastodon-shaped services already serve media in production.
 - New `ScopeReadDrive`/`ScopeWriteDrive` added to
   `internal/miauth/scope.go`'s `grantableScopes`. Aria's MiAuth
-  `permission` query already requests `read:drive,write:drive` today, so
-  an API token issued before this PR ships will need re-authorization to
-  gain these scopes (same situation this repository already has for
-  `read:notifications`/Issue #23 PR6).
-- New `DriveFile` wire type (`internal/httpserver/drive_wire.go`),
-  matching PR0's traced required/nullable field split.
-- Formal contract write-up added to `docs/compat/aria-v1.5.11.md` (PR0
-  already added the investigation findings; PR3 promotes the relevant
-  parts to "implemented").
+  `permission` query already requested `read:drive,write:drive` before
+  this PR shipped, so an API token issued before it will need
+  re-authorization through `miauthctl` to gain these scopes (same
+  situation this repository already has for `read:notifications`/
+  Issue #23 PR6).
+- New `driveFile`/`driveFolder`/`driveResponse` wire types
+  (`internal/httpserver/drive_wire.go`), matching PR0's traced required/
+  nullable field split; `internal/httpserver/drive_handlers.go`'s Drive
+  error ids/codes (`NO_SUCH_FILE`, `FOLDER_NOT_EMPTY`, ...) follow this
+  service's own established kebab-case-id/SCREAMING_SNAKE-code
+  convention, not real Misskey's error UUIDs.
+- Formal contract write-up added to `docs/compat/aria-v1.5.11.md`'s
+  "Drive API and note attachments" section (PR0's investigation findings
+  promoted from "planned" to "implemented," plus a new "PR3
+  implementation notes" subsection recording decisions PR0 did not
+  already settle: raster-only for every upload, `force` accepted and
+  ignored, `md5` as a real digest, synchronous `upload-from-url`,
+  `attached-notes` always empty until PR6, and `POST /api/drive`'s
+  `capacity` being a cosmetic fixed constant).
+- README.md's "Known limitations" no longer lists Drive/files as an
+  unimplemented Misskey feature (it also no longer lists reactions/
+  notifications, both already inaccurate before this PR — see plan-77
+  §4).
 
 ## PR4: RSS/external-source icons and attribution
 

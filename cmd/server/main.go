@@ -15,6 +15,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/configstore"
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/drive"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/ingest"
@@ -130,6 +131,50 @@ func run() error {
 		OwnerUsername: cfg.Auth.OwnerUsername,
 		Broadcaster:   streamHub,
 	})
+
+	// driveSvc backs Issue #77 PR3's Misskey-compatible Drive API. Built
+	// unconditionally, like internal/drive.Local/S3 in PR1: DriveConfig
+	// has no Enabled flag (internal/config.DriveConfig's own doc
+	// comment), so there is no "off" state to skip this behind.
+	var driveStorage drive.Storage
+	switch cfg.Drive.Backend {
+	case "s3compat":
+		driveStorage, err = drive.NewS3(drive.S3Config{
+			Endpoint:        cfg.Drive.S3Endpoint,
+			Bucket:          cfg.Drive.S3Bucket,
+			AccessKeyID:     cfg.Drive.S3AccessKeyID,
+			SecretAccessKey: cfg.Drive.S3SecretAccessKey,
+			UseSSL:          cfg.Drive.S3UseSSL,
+			Region:          cfg.Drive.S3Region,
+		})
+		if err != nil {
+			return fmt.Errorf("build drive S3 client: %w", err)
+		}
+	default:
+		driveStorage = drive.NewLocal(cfg.Drive.DataDir)
+	}
+	driveSvc := drive.NewService(
+		driveStorage,
+		// upload-from-url's own SSRF-protected fetcher (AGENTS.md:
+		// "External fetchers require ... SSRF protections"), separate
+		// from RSS's client below: fixed, conservative redirect/scheme
+		// policy rather than a configurable one — no issue or plan
+		// section asked for per-feature-tunable fetch policy here, only
+		// for the fetch itself to be safe.
+		safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: false}),
+		db.Repos,
+		drive.Config{
+			MaxFileBytes:   cfg.Drive.MaxFileBytes,
+			MaxImageWidth:  cfg.Drive.MaxImageWidth,
+			MaxImageHeight: cfg.Drive.MaxImageHeight,
+			// CapacityBytes is POST /api/drive's advertised capacity —
+			// cosmetic only, see drive.Config.CapacityBytes's doc
+			// comment; this deployment enforces no real quota beyond
+			// MaxFileBytes per upload, so no configuration key exists
+			// for it.
+			CapacityBytes: driveCapacityBytes,
+		},
+	)
 
 	// jobsManager is built here, ahead of the feature blocks below (rather
 	// than just before Run, as it was before Issue #53), so the Open
@@ -277,12 +322,22 @@ func run() error {
 	}
 
 	opts := httpserver.Options{
-		Addr:                     cfg.HTTP.Addr(),
-		ReadTimeout:              cfg.HTTP.ReadTimeout,
-		ReadHeaderTimeout:        cfg.HTTP.ReadHeaderTimeout,
-		WriteTimeout:             cfg.HTTP.WriteTimeout,
-		IdleTimeout:              cfg.HTTP.IdleTimeout,
-		MaxRequestBodyBytes:      cfg.HTTP.MaxRequestBodyBytes,
+		Addr:              cfg.HTTP.Addr(),
+		ReadTimeout:       cfg.HTTP.ReadTimeout,
+		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		WriteTimeout:      cfg.HTTP.WriteTimeout,
+		IdleTimeout:       cfg.HTTP.IdleTimeout,
+		// max(HTTP_MAX_REQUEST_BODY_BYTES, DRIVE_MAX_FILE_BYTES +
+		// overhead): the global withMaxBody wrap around the whole mux
+		// (internal/httpserver/run.go) shares one ceiling across every
+		// route, so drive/files/create's multipart upload needs the
+		// outer cap to be no tighter than what Drive itself allows —
+		// HTTP_MAX_REQUEST_BODY_BYTES's own 1 MiB default exists to
+		// bound ordinary JSON API bodies, not uploads, and must not
+		// silently truncate a within-DRIVE_MAX_FILE_BYTES upload before
+		// internal/httpserver/drive_handlers.go's own, more specific
+		// size check ever runs.
+		MaxRequestBodyBytes:      max(cfg.HTTP.MaxRequestBodyBytes, cfg.Drive.MaxFileBytes+driveMultipartOverheadBytes),
 		ShutdownGracePeriod:      cfg.HTTP.ShutdownGracePeriod,
 		MiAuthService:            miauthSvc,
 		LocalOrigin:              cfg.Auth.LocalOrigin,
@@ -294,6 +349,8 @@ func run() error {
 		OpenWebUIBridge:          openWebUIBridge,
 		OpenWebUITurnLinks:       openWebUITurnLinks,
 		OpenWebUIViewerBaseURL:   cfg.OpenWebUI.ViewerBaseURL,
+		Drive:                    driveSvc,
+		DriveMaxFileBytes:        cfg.Drive.MaxFileBytes,
 	}
 
 	// Registered only when the feature is on: no Provider (and therefore
@@ -553,6 +610,24 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 		ShutdownGracePeriod: cfg.ShutdownGracePeriod,
 	}
 }
+
+// driveCapacityBytes is POST /api/drive's advertised capacity — cosmetic
+// only (see drive.Config.CapacityBytes's doc comment), so a fixed
+// generous constant rather than a configuration key. 10 GiB comfortably
+// exceeds what a single-owner deployment's raster-image Drive uploads
+// (DRIVE_MAX_FILE_BYTES-bounded, 10 MiB by default) would accumulate
+// before an operator notices and raises it in a future release, if ever
+// needed.
+const driveCapacityBytes = 10 * 1024 * 1024 * 1024
+
+// driveMultipartOverheadBytes is added to DRIVE_MAX_FILE_BYTES when
+// deriving the effective HTTP body-size ceiling (see opts.
+// MaxRequestBodyBytes below): headroom for POST /api/drive/files/
+// create's multipart boundary markers and its other form fields
+// (folderId, name, comment, isSensitive, the "i" token — each itself
+// bounded far below this by maxDriveTextFieldBytes in
+// internal/httpserver/drive_handlers.go), not for the file part itself.
+const driveMultipartOverheadBytes = 64 * 1024
 
 // configFilePath returns the dotenv-style config file to load, defaulting
 // to .env in the working directory. CONFIG_FILE overrides it; a missing
