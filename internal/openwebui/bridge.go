@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 )
@@ -66,14 +67,17 @@ type turnJobPayload struct {
 // the transaction that just created entry.
 //
 // Steps (plan §5.1): (1) restrict to a loginable author's user_post; (2)
-// require an enabled, generation-enabled workspace with an active
-// default model and the one known secret_ref; (3) build entry's reply-
-// tree path, skipping (not failing) the post when it is ineligible for
-// this bridge; (4) apply ADR-0005 D4's branch rule; (5) enqueue the job
-// and claim the link (new branch) or reuse it (continuation); (6) treat
-// a conflict on any of those writes as "this turn is already enqueued"
-// rather than an error, so a retried delivery of the same entry-creation
-// path never double-enqueues.
+// skip a post whose provider-facing text — entry.Body with every
+// @mention omitted (Issue #70) — is empty or whitespace-only, since
+// that is nothing for the provider to reply to; (3) require an enabled,
+// generation-enabled workspace with an active default model and the one
+// known secret_ref; (4) build entry's reply-tree path, skipping (not
+// failing) the post when it is ineligible for this bridge; (5) apply
+// ADR-0005 D4's branch rule; (6) enqueue the job and claim the link (new
+// branch) or reuse it (continuation); (7) treat a conflict on any of
+// those writes as "this turn is already enqueued" rather than an error,
+// so a retried delivery of the same entry-creation path never
+// double-enqueues.
 func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry domain.Entry) error {
 	if entry.Kind != domain.EntryUserPost {
 		return nil
@@ -83,6 +87,14 @@ func (b *Bridge) EnqueueTurn(ctx context.Context, repos domain.Repos, entry doma
 		return fmt.Errorf("openwebui: bridge: resolve entry author: %w", err)
 	}
 	if !author.IsLoginable() {
+		return nil
+	}
+	if strings.TrimSpace(stripMentionTagsForProvider(entry.Body)) == "" {
+		// Nothing but @mentions (and/or whitespace): once the mentions
+		// are omitted for the provider (Issue #70), there is no text
+		// left to send as this turn's own message. Skip quietly, the
+		// same as every other enqueue-time gate below — this is not a
+		// failure, just nothing to start a turn over.
 		return nil
 	}
 

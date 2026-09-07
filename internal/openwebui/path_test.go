@@ -294,17 +294,21 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 		{
 			name: "username and host",
 			body: "Hey @luna@ai.tail2c8c7.ts.net, what do you think?",
-			want: "Hey [mention removed], what do you think?",
+			want: "Hey , what do you think?",
 		},
 		{
-			name: "bare username without host",
+			// The single space that separated "cc" and "@owner" and the
+			// single space that separated "@owner" and "please" collapse
+			// to the one space that would have separated "cc" and
+			// "please" had the mention never been there.
+			name: "bare username without host, surrounding spaces collapse to one",
 			body: "cc @owner please review",
-			want: "cc [mention removed] please review",
+			want: "cc please review",
 		},
 		{
 			name: "multiple mentions separated by whitespace",
 			body: "@luna@ai.tail2c8c7.ts.net and @owner both @luna@ai.tail2c8c7.ts.net",
-			want: "[mention removed] and [mention removed] both [mention removed]",
+			want: "and both",
 		},
 		{
 			// The boundary bug this test guards against: a single
@@ -315,7 +319,7 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 			// unstripped (both "@" and host leaking to the provider).
 			name: "back-to-back mentions with no separator",
 			body: "cc @owner@host@luna@ai.tail2c8c7.ts.net done",
-			want: "cc [mention removed][mention removed] done",
+			want: "cc done",
 		},
 		{
 			// A third mention chained on with no separator still ends up
@@ -327,36 +331,40 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 			// matters here.
 			name: "three back-to-back mentions with no separator",
 			body: "@luna@host@owner@luna2@host2 chain",
-			want: "[mention removed][mention removed][mention removed] chain",
+			want: "chain",
 		},
 		{
+			// No surrounding whitespace is involved here (the mention sits
+			// between "(" and ")"), so nothing is left to collapse or trim.
 			name: "mention immediately followed by closing punctuation",
 			body: "reply(@luna@host) ok",
-			want: "reply([mention removed]) ok",
+			want: "reply() ok",
 		},
 		{
 			// The host label grammar (labels of letters/digits/hyphens
 			// joined by ".") never lets a sentence-ending period after the
 			// host be swallowed into the match, since it is not followed
-			// by another label.
+			// by another label. The single space before "Thanks" is left
+			// as-is: it was never doubled, and adjusting spacing around
+			// punctuation is out of scope for the whitespace cleanup.
 			name: "sentence-ending period right after the host is preserved",
 			body: "Talk to @luna@host.example.com. Thanks",
-			want: "Talk to [mention removed]. Thanks",
+			want: "Talk to . Thanks",
 		},
 		{
 			name: "host with an explicit port is fully stripped",
 			body: "@luna@host.example.com:8080 with port",
-			want: "[mention removed] with port",
+			want: "with port",
 		},
 		{
 			name: "bracketed IPv6 literal host is fully stripped",
 			body: "@luna@[::1] ipv6-ish",
-			want: "[mention removed] ipv6-ish",
+			want: "ipv6-ish",
 		},
 		{
 			name: "bracketed IPv6 literal host with a port is fully stripped",
 			body: "@luna@[::1]:8080 ipv6 with port",
-			want: "[mention removed] ipv6 with port",
+			want: "ipv6 with port",
 		},
 		{
 			name: "no mention is unchanged",
@@ -367,6 +375,39 @@ func TestStripMentionTagsForProvider(t *testing.T) {
 			name: "email address is not a mention",
 			body: "contact me at foo@example.com please",
 			want: "contact me at foo@example.com please",
+		},
+		{
+			name: "message is nothing but a mention, result is empty",
+			body: "@owner",
+			want: "",
+		},
+		{
+			name: "mention at the very start, leading whitespace is trimmed",
+			body: "@owner hello team",
+			want: "hello team",
+		},
+		{
+			name: "mention at the very end, trailing whitespace is trimmed",
+			body: "goodbye @owner",
+			want: "goodbye",
+		},
+		{
+			name: "tab whitespace around a mention also collapses to one space",
+			body: "cc\t@owner\tplease",
+			want: "cc please",
+		},
+		{
+			// U+3000 IDEOGRAPHIC SPACE (a full-width space) is a common
+			// word separator in Japanese input and plays the same role a
+			// regular space does around a mention.
+			name: "full-width space around a mention also collapses to one space",
+			body: "cc　@owner　please",
+			want: "cc please",
+		},
+		{
+			name: "mixed ascii and full-width space around a mention collapses to one space",
+			body: "cc 　@owner　 please",
+			want: "cc please",
 		},
 	}
 
@@ -391,8 +432,8 @@ func TestProviderMessages_StripsMentionTagsButLeavesEntryBodyUntouched(t *testin
 	}
 
 	messages := ProviderMessages(path)
-	if len(messages) != 2 || messages[0].Content != "hey [mention removed] look at this" {
-		t.Errorf("ProviderMessages = %+v, want mention masked in messages[0]", messages)
+	if len(messages) != 2 || messages[0].Content != "hey look at this" {
+		t.Errorf("ProviderMessages = %+v, want mention omitted in messages[0]", messages)
 	}
 
 	stored, err := env.db.Entries.Get(t.Context(), m0.ID)
