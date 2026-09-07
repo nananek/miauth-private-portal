@@ -239,6 +239,70 @@ func TestParseOpenWebUIModelCapabilities_UnknownAndNullFields(t *testing.T) {
 	}
 }
 
+// TestOpenWebUISources_EncodeRoundTrip mirrors
+// TestOpenWebUIModelCapabilities_EncodeRoundTrip for the Issue #81/#84
+// sources_json column (ADR-0005 D22): a nil/empty list must encode to ""
+// (stored as SQL NULL, never an empty-array string) and every non-empty
+// case must round-trip exactly, URL/Arguments included.
+func TestOpenWebUISources_EncodeRoundTrip(t *testing.T) {
+	url := "https://example.com/result"
+	for _, want := range [][]Source{
+		nil,
+		{},
+		{{Kind: SourceKindWebSearchForTest, DisplayName: "web_search", URL: &url}},
+		{{Kind: SourceKindToolForTest, DisplayName: "get_weather", Arguments: map[string]string{"city": "Tokyo"}}},
+		{
+			{Kind: SourceKindToolForTest, DisplayName: "get_weather", Arguments: map[string]string{"city": "Tokyo"}},
+			{Kind: SourceKindWebSearchForTest, DisplayName: "web_search", URL: &url},
+		},
+	} {
+		encoded := EncodeSources(want)
+		if len(want) == 0 && encoded != "" {
+			t.Errorf("EncodeSources(%+v) = %q, want \"\" for an empty list", want, encoded)
+		}
+		got, err := ParseOpenWebUISources(encoded)
+		if err != nil {
+			t.Fatalf("ParseOpenWebUISources(%q): %v", encoded, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("round trip of %+v through %q = %+v", want, encoded, got)
+		}
+		for i := range want {
+			if got[i].Kind != want[i].Kind || got[i].DisplayName != want[i].DisplayName {
+				t.Errorf("round trip of %+v through %q = %+v", want, encoded, got)
+			}
+			if (got[i].URL == nil) != (want[i].URL == nil) || (got[i].URL != nil && *got[i].URL != *want[i].URL) {
+				t.Errorf("round trip URL of %+v through %q = %+v", want, encoded, got)
+			}
+		}
+	}
+}
+
+// TestParseOpenWebUISources_EmptyAndNullColumn covers the two "nothing
+// recorded" states the column legitimately reaches, mirroring
+// TestParseOpenWebUIModelCapabilities_UnknownAndNullFields: an empty
+// string (the ordinary un-set case) and a malformed document (real
+// corruption, which must still surface as an error rather than being
+// silently read as "no sources").
+func TestParseOpenWebUISources_EmptyAndNullColumn(t *testing.T) {
+	if got, err := ParseOpenWebUISources(""); err != nil || got != nil {
+		t.Errorf(`ParseOpenWebUISources("") = %+v, %v, want nil, nil`, got, err)
+	}
+	if _, err := ParseOpenWebUISources(`[{"kind":`); err == nil {
+		t.Error("ParseOpenWebUISources(malformed) = nil error, want one")
+	}
+}
+
+// SourceKindToolForTest/SourceKindWebSearchForTest mirror
+// internal/openwebui.SourceKindTool/SourceKindWebSearch's string values
+// without importing that package (this package must not depend on it —
+// see Source's own doc comment): domain.Source.Kind stores whichever
+// string the caller gives it, uninterpreted.
+const (
+	SourceKindToolForTest      = "tool"
+	SourceKindWebSearchForTest = "web_search"
+)
+
 func TestVirtualActor_Handle(t *testing.T) {
 	v := VirtualActor{Slug: "model", Host: "openwebui.example.net"}
 	if got, want := v.Handle(), "@model@openwebui.example.net"; got != want {

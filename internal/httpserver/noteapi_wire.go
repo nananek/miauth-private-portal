@@ -2,6 +2,9 @@ package httpserver
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -123,7 +126,80 @@ func (s *Server) projectNote(ctx context.Context, e domain.Entry, user userLite,
 		return note{}, err
 	}
 	n.MyReaction = my
+
+	// Issues #81 (citation footnotes) + #84 (chat title, viewer link)
+	// enrichment: only an Open WebUI-generated reply can have a turn to
+	// enrich from, and only when this deployment has one to look it up
+	// with at all (s.openWebUITurnLinks is nil while OPENWEBUI_ENABLED
+	// is off, the same guard virtualActors/openWebUIBridge already use).
+	if e.Kind == domain.EntryLLMReply && s.openWebUITurnLinks != nil {
+		text, err := s.enrichOpenWebUIReplyText(ctx, e)
+		switch {
+		case err == nil:
+			n.Text = &text
+		case errors.Is(err, domain.ErrNotFound):
+			// An Issue #9 plain LLM reply: no Open WebUI turn exists for
+			// this entry at all. n.Text stays wireText(e)'s output,
+			// unchanged from before this enrichment existed.
+		default:
+			return note{}, err
+		}
+	}
 	return n, nil
+}
+
+// enrichOpenWebUIReplyText extends wireText(e)'s "[reply]\n\n"+body
+// output with Issue #84's own generated chat title — once
+// s.openWebUITurnLinks reports one, it replaces the fixed "[reply]"
+// marker itself — Issue #81's citation footnotes, and (only when
+// OPENWEBUI_VIEWER_BASE_URL is configured) an owner-facing "view in Open
+// WebUI" link (ADR-0005 D22, D23). Each addition is independent and
+// degrades gracefully on its own: a turn with a title but no sources, or
+// neither, still enriches whatever it has.
+//
+// Returns domain.ErrNotFound unchanged when e has no Open WebUI turn at
+// all (an Issue #9 plain LLM reply) — the caller's job to fall back to
+// wireText(e) for.
+func (s *Server) enrichOpenWebUIReplyText(ctx context.Context, e domain.Entry) (string, error) {
+	turn, err := s.openWebUITurnLinks.GetByAssistantEntry(ctx, e.ID)
+	if err != nil {
+		return "", err
+	}
+	text := wireText(e)
+	if turn.RemoteChatTitle != nil && *turn.RemoteChatTitle != "" {
+		text = "[reply] " + *turn.RemoteChatTitle + "\n\n" + e.Body
+	}
+	if len(turn.Sources) > 0 {
+		text += "\n\n" + renderSourceFootnotes(turn.Sources)
+	}
+	if s.openWebUIViewerBaseURL != "" && turn.RemoteChatID != nil {
+		text += "\n\n" + s.openWebUIViewerBaseURL + "/c/" + *turn.RemoteChatID
+	}
+	return text, nil
+}
+
+// renderSourceFootnotes renders Issue #81's normalized citations as a
+// "[n] label (url)" block, one line per source, in array order —
+// matching the "[n]" markers the model's own answer text embeds for the
+// one case actually verified against a real instance (a single source).
+// For more than one source this ordering is an explicit, documented
+// assumption rather than a confirmed mapping — see domain.Source's own
+// doc comment (ADR-0005 D22) for what a wrong assumption would look
+// like here: a footnote's number disagreeing with the reply's own "[n]"
+// text, never a data leak or a failed turn.
+func renderSourceFootnotes(sources []domain.Source) string {
+	lines := make([]string, len(sources))
+	for i, src := range sources {
+		label := src.DisplayName
+		if label == "" {
+			label = src.Kind
+		}
+		if src.URL != nil && *src.URL != "" {
+			label += " (" + *src.URL + ")"
+		}
+		lines[i] = fmt.Sprintf("[%d] %s", i+1, label)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // wireText composes the wire-visible note text. Only llm_reply/

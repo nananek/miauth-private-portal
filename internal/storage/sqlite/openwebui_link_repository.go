@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -277,8 +278,8 @@ type openWebUITurnLinkRepository struct{ q querier }
 const openWebUITurnLinkSelectColumns = `SELECT id, link_id, branch_id, local_message_id, local_parent_id,
 	assistant_entry_id, request_id, revision, attempt, provider_status,
 	remote_chat_id, remote_message_id, remote_assistant_message_id, remote_parent_id, remote_current_id,
-	failure_category, prompt_tokens, completion_tokens, finish_reason, last_attempt_at, completed_at,
-	tombstoned_at, created_at, updated_at
+	failure_category, prompt_tokens, completion_tokens, finish_reason, remote_chat_title, sources_json,
+	last_attempt_at, completed_at, tombstoned_at, created_at, updated_at
 	FROM openwebui_turn_links`
 
 // Create inserts one turn. Two constraints make it safe to call from a
@@ -308,6 +309,16 @@ func (r *openWebUITurnLinkRepository) Get(ctx context.Context, id string) (domai
 func (r *openWebUITurnLinkRepository) GetByRequestID(ctx context.Context, requestID string) (domain.OpenWebUITurnLink, error) {
 	return scanOpenWebUITurnLink(r.q.QueryRowContext(ctx,
 		openWebUITurnLinkSelectColumns+` WHERE request_id = ?`, requestID))
+}
+
+// GetByAssistantEntry resolves the turn that authored assistantEntryID.
+// The partial unique index migration 0021 adds on assistant_entry_id
+// (WHERE assistant_entry_id IS NOT NULL) is what makes this a single-row
+// lookup the same way request_id's unique constraint makes GetByRequestID
+// one.
+func (r *openWebUITurnLinkRepository) GetByAssistantEntry(ctx context.Context, assistantEntryID string) (domain.OpenWebUITurnLink, error) {
+	return scanOpenWebUITurnLink(r.q.QueryRowContext(ctx,
+		openWebUITurnLinkSelectColumns+` WHERE assistant_entry_id = ?`, assistantEntryID))
 }
 
 // ListByLink orders by (created_at, id). The turns of a branch are read
@@ -402,13 +413,17 @@ func (r *openWebUITurnLinkRepository) RecordOutcome(ctx context.Context, id stri
 	if o.Status.IsTerminal() {
 		completedAt = formatTime(at)
 	}
+	var sourcesJSON *string
+	if encoded := domain.EncodeSources(o.Sources); encoded != "" {
+		sourcesJSON = &encoded
+	}
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE openwebui_turn_links
 		 SET provider_status = ?, failure_category = ?, prompt_tokens = ?, completion_tokens = ?,
-			finish_reason = ?, completed_at = COALESCE(?, completed_at), updated_at = ?
+			finish_reason = ?, remote_chat_title = ?, sources_json = ?, completed_at = COALESCE(?, completed_at), updated_at = ?
 		 WHERE id = ?`,
 		string(o.Status), nullableString(o.FailureCategory), nullableInt(o.PromptTokens), nullableInt(o.CompletionTokens),
-		nullableString(o.FinishReason), completedAt, formatTime(at), id,
+		nullableString(o.FinishReason), nullableString(o.Title), nullableString(sourcesJSON), completedAt, formatTime(at), id,
 	)
 	if err != nil {
 		return mapWriteError(err)
@@ -451,12 +466,13 @@ func scanOpenWebUITurnLink(row rowScanner) (domain.OpenWebUITurnLink, error) {
 	var localParentID, assistantEntryID, remoteChatID, remoteMessageID sql.NullString
 	var remoteAssistantMessageID, remoteParentID, remoteCurrentID, tombstonedAt sql.NullString
 	var failureCategory, finishReason, lastAttemptAt, completedAt sql.NullString
+	var remoteChatTitle, sourcesJSON sql.NullString
 	var promptTokens, completionTokens sql.NullInt64
 	if err := row.Scan(&t.ID, &t.LinkID, &t.BranchID, &t.LocalMessageID, &localParentID,
 		&assistantEntryID, &t.RequestID, &t.Revision, &t.Attempt, &providerStatus,
 		&remoteChatID, &remoteMessageID, &remoteAssistantMessageID, &remoteParentID, &remoteCurrentID,
-		&failureCategory, &promptTokens, &completionTokens, &finishReason, &lastAttemptAt, &completedAt,
-		&tombstonedAt, &createdAt, &updatedAt,
+		&failureCategory, &promptTokens, &completionTokens, &finishReason, &remoteChatTitle, &sourcesJSON,
+		&lastAttemptAt, &completedAt, &tombstonedAt, &createdAt, &updatedAt,
 	); err != nil {
 		return domain.OpenWebUITurnLink{}, mapReadError(err)
 	}
@@ -472,8 +488,14 @@ func scanOpenWebUITurnLink(row rowScanner) (domain.OpenWebUITurnLink, error) {
 	t.PromptTokens = intPtr(promptTokens)
 	t.CompletionTokens = intPtr(completionTokens)
 	t.FinishReason = stringPtr(finishReason)
+	t.RemoteChatTitle = stringPtr(remoteChatTitle)
 
 	var err error
+	if sourcesJSON.Valid {
+		if t.Sources, err = domain.ParseOpenWebUISources(sourcesJSON.String); err != nil {
+			return domain.OpenWebUITurnLink{}, fmt.Errorf("decode turn sources: %w", err)
+		}
+	}
 	if t.LastAttemptAt, err = parseTimePtr(lastAttemptAt); err != nil {
 		return domain.OpenWebUITurnLink{}, err
 	}

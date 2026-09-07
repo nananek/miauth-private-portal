@@ -405,6 +405,59 @@ no fixture of the appended state was retained, so it rests on the observation
 record alone (the weakest-evidenced streaming statement here). Streaming stays
 out of MVP (ADR-0005 D8).
 
+**(i) `sources[]` (Issue #81) and `title_generation`'s real completion timing
+(Issue #84) — both partially 要実機確認.**
+
+The 2026-09-07 real-instance capture behind Issue #81 additionally found a
+top-level `sources` array on the completions response whenever
+`params.function_calling=legacy` ((c) above) actually triggered a tool call
+or web search — absent otherwise. Two shapes were observed, both
+synthesized (not the real capture, which is not committed) into
+[`completions_response_sources_tool.json`](fixtures/openwebui/completions_response_sources_tool.json)
+and
+[`completions_response_sources_websearch.json`](fixtures/openwebui/completions_response_sources_websearch.json):
+
+- **Tool execution** (`tool_result: true`): `source.name` names the tool;
+  `metadata[].parameters` is the call's own arguments; `document[]` is the
+  tool's raw JSON output.
+- **Web search** (`tool_result` absent, `distances` present): `source.
+  {name, type, urls, queries}`; `metadata[]` has one entry per result chunk,
+  each `{title, description, source}` (`source` being that chunk's URL);
+  `document[]` is the page-text chunks themselves.
+
+`internal/provider/openwebui/client.go`'s `normalizeSources` turns each
+`sources[]` array element into one `openwebui.Source` record and never
+decodes `document[]` into memory at all (ADR-0005 D22). `sources` is
+decoded as raw JSON first and only then parsed into typed records
+(`decodeSources`); a shape this adapter cannot parse degrades to "no
+citations for this reply," never to a failed turn — the turn's own
+content already decoded successfully.
+
+**要実機確認, not yet resolved as of this PR (2026-09-08):** the real
+capture observed exactly **one** `sources[]` element, and the model's own
+`[1]` citation marker referred to it. Whether the model's `[n]` markers
+always correspond 1:1 with `sources[]` array order for **more than one**
+source — versus, say, one `sources[]` element grouping several web-search
+result chunks under a single citation number — was never exercised. Per
+the owner's 2026-09-08 direction, Issues #81/#84 ship on this explicit,
+documented assumption rather than waiting on further real-instance access;
+see ADR-0005 D22 and `openwebui.Source`'s own doc comment for what a wrong
+assumption would look like (a cosmetic footnote mismatch, never a
+`document[]` leak or a failed turn). Also **要実機確認**: whether
+`GET /api/v1/chats/{id}` ever carries `sources` for a completed turn — this
+adapter assumes not, and never depends on retrieving it a second time.
+
+Separately, **要実機確認**: whether `background_tasks.title_generation:
+true` ((g) above) resolves synchronously (the chat's `title` field is
+already updated by the time `runTurn`'s own post-completion
+`GET /api/v1/chats/{id}` lookup runs) or asynchronously (visible only on
+some later call, if ever). This PR does not add a second poll to chase a
+title that has not appeared yet; if generation turns out to be
+asynchronous, the observable effect is simply that most replies show no
+generated title (Issue #84's `"[reply]"` marker, unchanged), not an
+incorrect one. See ADR-0005 D23 and `StartChatRequest.
+EnableTitleGeneration`'s doc comment.
+
 ### `GET /api/v1/chats/{id}` (必要)
 
 Returns the same `ChatResponse` shape. The tree lives in
@@ -443,6 +496,11 @@ Returns the same `ChatResponse` shape. The tree lives in
 - This is the endpoint that turns the chat-managed path's ambiguous HTTP 200
   into a decision: `error` present → `failed`; `done: false` without `error` →
   `ambiguous`; `done: true` → success.
+- The response's top-level `title` (Issue #84) is what
+  `internal/provider/openwebui/client.go`'s `chatResponseBody.resolvedTitle`
+  reads, filtered against `createChat`'s own `"bridge-precreated"`
+  placeholder — see (i) above and ADR-0005 D23 for the synchronous/
+  asynchronous timing this adapter does not assume either way about.
 
 ### `GET /api/models` (必要) and the model-discovery endpoints (運用のみ)
 

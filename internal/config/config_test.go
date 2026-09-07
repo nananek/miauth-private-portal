@@ -1364,6 +1364,7 @@ func TestLoad_OpenWebUIDisabledIgnoresInvalidFields(t *testing.T) {
 		KeyOpenWebUIBaseURL:          "http://insecure.example.net/path",
 		KeyOpenWebUIAllowedOrigins:   "not-a-url",
 		KeyOpenWebUIPresentationHost: "https://scheme.example.net",
+		KeyOpenWebUIViewerBaseURL:    "not-a-url-either",
 	})
 	if err != nil {
 		t.Fatalf("a disabled feature must not validate its own fields: %v", err)
@@ -1570,6 +1571,61 @@ func TestLoad_OpenWebUIWebSearchEnabledIsTriState(t *testing.T) {
 	}
 	if cfgFalse.OpenWebUI.WebSearchEnabled == nil || *cfgFalse.OpenWebUI.WebSearchEnabled {
 		t.Errorf("WebSearchEnabled = %v, want a non-nil false", cfgFalse.OpenWebUI.WebSearchEnabled)
+	}
+}
+
+// TestLoad_OpenWebUIViewerBaseURLDefaultsToEmptyAndIsOptional backs
+// ADR-0005 D23: unlike OPENWEBUI_BASE_URL, this key is never required
+// even when OPENWEBUI_ENABLED is true — leaving it unset must not fail
+// startup, and must resolve to "" (Issue #84's own "the whole feature
+// stays off" signal, checked as `!= ""` throughout, not a pointer).
+func TestLoad_OpenWebUIViewerBaseURLDefaultsToEmptyAndIsOptional(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.ViewerBaseURL != "" {
+		t.Errorf("ViewerBaseURL default = %q, want \"\"", cfg.OpenWebUI.ViewerBaseURL)
+	}
+}
+
+// TestLoad_OpenWebUIViewerBaseURLAcceptsAnHTTPSOriginNotInAllowedOrigins
+// backs D23's "not added to OPENWEBUI_ALLOWED_ORIGINS" rule: a value
+// this server never dials succeeds even though it appears nowhere in
+// OPENWEBUI_ALLOWED_ORIGINS, unlike OPENWEBUI_BASE_URL's own exact-match
+// membership requirement.
+func TestLoad_OpenWebUIViewerBaseURLAcceptsAnHTTPSOriginNotInAllowedOrigins(t *testing.T) {
+	cfg, err := loadWithOpenWebUI(t, map[string]string{
+		KeyOpenWebUIViewerBaseURL: "https://viewer.example.net/",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenWebUI.ViewerBaseURL != "https://viewer.example.net" {
+		t.Errorf("ViewerBaseURL = %q, want the trailing slash trimmed", cfg.OpenWebUI.ViewerBaseURL)
+	}
+}
+
+// TestLoad_OpenWebUIViewerBaseURLRejectsNonHTTPSOrMalformedShapes mirrors
+// OPENWEBUI_BASE_URL's own shape checks (isHTTPSOrigin), minus the
+// allowlist-membership rule this key is deliberately exempt from.
+func TestLoad_OpenWebUIViewerBaseURLRejectsNonHTTPSOrMalformedShapes(t *testing.T) {
+	for _, v := range []string{
+		"http://viewer.example.net",       // not https
+		"https://user@viewer.example.net", // userinfo
+		"https://viewer.example.net/path", // path
+		"https://viewer.example.net?q=1",  // query
+		"not-a-url",
+	} {
+		t.Run(v, func(t *testing.T) {
+			_, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIViewerBaseURL: v})
+			if err == nil {
+				t.Fatalf("Load(%s=%q) succeeded, want a validation error", KeyOpenWebUIViewerBaseURL, v)
+			}
+			if !strings.Contains(err.Error(), KeyOpenWebUIViewerBaseURL) {
+				t.Errorf("error %q does not name %s", err.Error(), KeyOpenWebUIViewerBaseURL)
+			}
+		})
 	}
 }
 

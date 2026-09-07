@@ -77,6 +77,24 @@ type StartChatRequest struct {
 	// (Issue #72's original shape) the same way ToolIDs already moved
 	// per-call under Issue #75.
 	WebSearchEnabled bool
+	// EnableTitleGeneration sets background_tasks.title_generation on
+	// this chat's first completions call (Issue #84, ADR-0005 D23).
+	// TurnJob sets it from whether OPENWEBUI_VIEWER_BASE_URL is
+	// configured — the title and the viewer link are always enabled or
+	// disabled together (see TurnJobConfig.ViewerBaseURL), so there is
+	// no separate config key for this alone.
+	//
+	// UNVERIFIED (no real-instance access — see ADR-0005 D23's own note):
+	// whether Open WebUI resolves title generation synchronously (the
+	// title is already updated by the time this same turn's outcome
+	// lookup runs) or asynchronously (visible only on some later turn, if
+	// ever) was never confirmed against a real instance. This field only
+	// asks for it; TurnOutcome.Title reports whatever, if anything, the
+	// very next lookup actually observes — a title that arrives late
+	// simply is not captured for this reply, which degrades the feature
+	// to "no title shown," never to an incorrect one and never to a
+	// failed turn.
+	EnableTitleGeneration bool
 	// CorrelationID is a local request id for logging only. It is never
 	// sent to the provider and is not a provider idempotency key — Open
 	// WebUI has none (ADR-0005 D7).
@@ -113,6 +131,44 @@ type ContinueTurnRequest struct {
 	WebSearchEnabled bool
 }
 
+// SourceKind names the two sources[] shapes Issue #81's real-instance
+// check (2026-09-07) found — see Source's own doc comment.
+const (
+	SourceKindTool      = "tool"
+	SourceKindWebSearch = "web_search"
+)
+
+// Source is this port's own normalized shape of one Issue #81 sources[]
+// entry, decoded from a completions response — never document[]'s raw
+// tool/page text, which ADR-0005 D22 requires never be stored, logged,
+// or forwarded to Aria at all. Only a short display name, an optional
+// URL, and (for a tool call) its arguments survive.
+//
+// UNVERIFIED ASSUMPTION (2026-09-08, no real-instance access — see
+// ADR-0005 D22): the real-instance check behind this issue observed
+// exactly one sources[] entry. This adapter assumes each array element
+// maps 1:1 to one Source here, in array order, matching the "[n]"
+// citation markers the model's own answer text embeds — the only
+// mapping actually exercised. If a real multi-source response instead
+// nests several results under one sources[] element (for example
+// multiple web-search result chunks grouped under a single entry, rather
+// than one entry per chunk), this normalization under-represents it:
+// only that group's first URL/description is kept, and a footnote's
+// number could disagree with the "[n]" markers the reply text actually
+// shows. That failure mode is cosmetic only — a wrong or missing
+// footnote — never a data leak (document[] is never captured regardless
+// of this assumption) and never a turn failure (a sources-parsing
+// anomaly never fails the turn; see internal/provider/openwebui/
+// client.go's runTurn). Re-verify against a real multi-source turn
+// before removing this note.
+type Source struct {
+	// Kind is SourceKindTool or SourceKindWebSearch.
+	Kind        string
+	DisplayName string
+	URL         *string
+	Arguments   map[string]string
+}
+
 // TurnResult is a turn's confirmed successful outcome. RemoteCurrentID,
 // PromptTokens, CompletionTokens, and FinishReason are accounting and
 // correlation metadata only — nothing about them is authoritative for
@@ -123,6 +179,16 @@ type TurnResult struct {
 	PromptTokens     *int
 	CompletionTokens *int
 	FinishReason     *string
+	// Title is the chat's own generated title, observed on the same GET
+	// /api/v1/chats/{id} lookup runTurn already makes for confirmation —
+	// nil unless EnableTitleGeneration was set on this chat's first turn
+	// and the placeholder title had already been replaced by the time of
+	// that lookup (Issue #84; see EnableTitleGeneration's own doc
+	// comment on the synchronous/asynchronous uncertainty this implies).
+	Title *string
+	// Sources is Issue #81's normalized citation list for this turn,
+	// nil when the completions response carried none.
+	Sources []Source
 }
 
 // TurnOutcome is what LookupTurnOutcome reads back about one assistant
@@ -140,6 +206,24 @@ type TurnOutcome struct {
 	RemoteCurrentID  *string
 	PromptTokens     *int
 	CompletionTokens *int
+	// Title mirrors TurnResult.Title (Issue #84): the chat's own title,
+	// read from the same GET /api/v1/chats/{id} body this lookup already
+	// decodes, once it has moved past the "bridge-precreated"
+	// placeholder. Unlike Sources, a lookup can report this for a
+	// continuation or a retried turn too, since the chat title is
+	// chat-wide state, not turn-specific.
+	//
+	// There is deliberately no Sources field here: D22 records that
+	// sources[] is captured only from the completions response body
+	// itself, never re-derived from this GET path, because whether GET
+	// /api/v1/chats/{id} even carries sources for a completed turn was
+	// never confirmed. A turn recovered through this lookup path (Issue
+	// #53's uncertain-outcome retry) therefore never gets sources
+	// attached, even if the original completions call that produced it
+	// would have. That gap is cosmetic (a possibly-missing footnote
+	// list on an already-rare recovery path), not a correctness or
+	// security concern.
+	Title *string
 }
 
 // Provider is the outbound boundary a durable job handler (Issue #53's

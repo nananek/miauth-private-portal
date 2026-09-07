@@ -1,0 +1,40 @@
+{
+  "id": "chatcmpl-mock-tool-1",
+  "object": "chat.completion",
+  "created": 1788672400,
+  "model": "mock-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The weather in Tokyo is sunny [1]."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 15,
+    "total_tokens": 35
+  },
+  "sources": [
+    {
+      "source": {
+        "name": "get_weather"
+      },
+      "tool_result": true,
+      "metadata": [
+        {
+          "parameters": {
+            "city": "Tokyo",
+            "units": "metric"
+          }
+        }
+      ],
+      "document": [
+        "{\"temperature\": 22, \"condition\": \"sunny\"}"
+      ]
+    }
+  ]
+}

@@ -479,6 +479,55 @@ const (
 	FailureCategoryAmbiguousModelSelection = "ambiguous_model_selection"
 )
 
+// Source is a normalized citation the completion bridge attached to a
+// generated reply (Issue #81, ADR-0005 D22): what tool executed or what
+// web search ran, never the raw, potentially large and untrusted
+// document/page text those calls returned — D22 requires that never be
+// persisted at all, so there is deliberately no field here that could
+// hold it.
+//
+// Kind holds the same "tool"/"web_search" string
+// internal/openwebui.SourceKindTool/SourceKindWebSearch name; this
+// package stores the string only and does not import that package's
+// constants, so it never depends on the provider port at all (the same
+// boundary FailureCategory* already keeps for turn failures).
+type Source struct {
+	Kind        string            `json:"kind"`
+	DisplayName string            `json:"display_name"`
+	URL         *string           `json:"url,omitempty"`
+	Arguments   map[string]string `json:"arguments,omitempty"`
+}
+
+// ParseOpenWebUISources decodes a stored sources_json column value.
+// Mirrors ParseOpenWebUIModelCapabilities: an empty string (no sources
+// recorded, the ordinary case) or the literal "null" both mean "no
+// sources" rather than an error, since both are states the column
+// legitimately reaches.
+func ParseOpenWebUISources(raw string) ([]Source, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var sources []Source
+	if err := json.Unmarshal([]byte(raw), &sources); err != nil {
+		return nil, err
+	}
+	return sources, nil
+}
+
+// EncodeSources renders sources for storage, or "" (which the repository
+// stores as SQL NULL) for an empty list — a turn with no sources leaves
+// no sources_json row rather than an empty-array string.
+func EncodeSources(sources []Source) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	// json.Marshal cannot fail here: Source is a struct of strings, a
+	// *string, and a map[string]string, none of which json.Marshal ever
+	// rejects.
+	encoded, _ := json.Marshal(sources)
+	return string(encoded)
+}
+
 // OpenWebUITurnLink records one owner message and the assistant reply it
 // asked for, plus the opaque provider correlation values for both.
 //
@@ -534,6 +583,20 @@ type OpenWebUITurnLink struct {
 	// FinishReason is the provider's own completion-reason string for a
 	// succeeded turn (for example "stop" or "length"), nil otherwise.
 	FinishReason *string
+	// RemoteChatTitle is the provider's own chat title (Issue #84,
+	// ADR-0005 D23), captured once it has moved past the
+	// "bridge-precreated" placeholder — nil for every turn until then,
+	// and always nil while OPENWEBUI_VIEWER_BASE_URL is unconfigured
+	// (TurnJob never asks for title generation, and never records a
+	// title, in that case). Presentation metadata only, like every
+	// other Remote* field on this type: never consulted for identity,
+	// ordering, or authorization.
+	RemoteChatTitle *string
+	// Sources is Issue #81's normalized citation list (ADR-0005 D22),
+	// nil when the turn's completions response carried no sources[] at
+	// all. See Source's own doc comment for what is deliberately never
+	// captured here.
+	Sources []Source
 	// LastAttemptAt is when the most recent provider attempt for this
 	// turn was recorded as started (Issue #53's TurnJob calls
 	// BeginAttempt before making the call, so a lease expiry or crash
@@ -563,6 +626,15 @@ type TurnOutcomeRecord struct {
 	PromptTokens     *int
 	CompletionTokens *int
 	FinishReason     *string
+	// Title and Sources are Issue #84's and Issue #81's own additions,
+	// written the same unconditional way PromptTokens/CompletionTokens/
+	// FinishReason already are: RecordOutcome is called exactly once per
+	// terminal transition, so there is no prior successful value either
+	// could ever clobber. Title is nil unless TurnJob resolved one (see
+	// its own doc comment on the OPENWEBUI_VIEWER_BASE_URL gate); Sources
+	// is nil when the turn carried none.
+	Title   *string
+	Sources []Source
 }
 
 // OpenWebUITurnCorrelation carries the opaque provider ids recorded for
@@ -727,6 +799,14 @@ type OpenWebUITurnLinkRepository interface {
 	Get(ctx context.Context, id string) (OpenWebUITurnLink, error)
 	// GetByRequestID resolves a turn from its local correlation key.
 	GetByRequestID(ctx context.Context, requestID string) (OpenWebUITurnLink, error)
+	// GetByAssistantEntry resolves the turn that authored assistantEntryID
+	// (SetAssistantEntry's write) — the wire-projection enrichment path
+	// (Issues #81/#84) uses it to attach a generated reply's title,
+	// sources, and viewer link to its Aria-facing text. ErrNotFound means
+	// entryID names no Open WebUI-generated reply at all: an Issue #9
+	// plain LLM reply, or any other entry kind, both of which project
+	// unchanged.
+	GetByAssistantEntry(ctx context.Context, assistantEntryID string) (OpenWebUITurnLink, error)
 	// ListByLink returns a link's turns in a stable (created_at, id)
 	// order — never in any order derived from a remote id.
 	ListByLink(ctx context.Context, linkID string) ([]OpenWebUITurnLink, error)

@@ -808,6 +808,22 @@ finished, not a scope change reopened lightly.
   issue (OWUI-P/OWUI-B's own design) and needed only regression coverage,
   not new behavior.
 
+**Follow-up, shipped on top of this section's foundation: Issues #81
+(citation resolution) and #84 (chat title / viewer link), one PR.** A
+tool call or web search's `sources[]` response is normalized into
+short, length-bounded footnotes on a generated reply — never the raw
+`document[]` text a tool or web page returned (ADR-0005 D22). An optional
+`OPENWEBUI_VIEWER_BASE_URL` additionally shows a generated chat title and
+an owner-only "view in Open WebUI" link on the same reply — the first
+named, narrow exception to this document's own "remote ids never surface
+in a URL" rule (ADR-0005 D23), scoped to exactly that one rendered link.
+Both features shipped without further real-instance access past the one
+2026-09-07 capture (owner direction, 2026-09-08); the multi-source
+citation-order mapping and the title-generation timing are each recorded
+as an explicit, documented assumption rather than a confirmed contract —
+see `docs/compat/openwebui-0.11.3.md` point (i) and ADR-0005 D22/D23 for
+what a wrong assumption would look like.
+
 ## Auth, permission, and secret boundary
 
 The authentication and execution boundaries remain distinct:

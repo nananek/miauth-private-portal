@@ -360,6 +360,19 @@ type OpenWebUIConfig struct {
 	// type level, but meaningless (never read) while GenerationEnabled is
 	// false, the same relationship Enabled/GenerationEnabled already have.
 	WebSearchEnabled *bool
+	// ViewerBaseURL mirrors OPENWEBUI_VIEWER_BASE_URL (Issues #81+#84,
+	// ADR-0005 D23): a browser-reachable origin for the same instance,
+	// used only to render an owner-facing "view in Open WebUI" link into
+	// a generated reply's own text. Empty (the default) disables the
+	// link and, independently, gates whether this deployment ever asks
+	// the provider for title generation at all (see
+	// internal/openwebui.TurnJobConfig.ViewerBaseURL) — leaving it unset
+	// reproduces pre-#84 behavior exactly. Unlike BaseURL, it is never
+	// required to appear in AllowedOrigins: this server never dials it
+	// (D11's SSRF allowlist policy governs connections this server
+	// makes, and this value is display-only), so validation checks only
+	// its shape.
+	ViewerBaseURL string
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -636,6 +649,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.OpenWebUI.MaxRequestBytes = parseOptionalInt64(values, KeyOpenWebUIMaxRequestBytes, 1_048_576, openWebUIMaxRequestBytesMin, &errs)
 	cfg.OpenWebUI.MaxContextMessages = parseOptionalInt(values, KeyOpenWebUIMaxContextMessages, 100, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax, &errs)
 	cfg.OpenWebUI.WebSearchEnabled = parseOptionalBoolPtr(values, KeyOpenWebUIWebSearchEnabled, &errs)
+	cfg.OpenWebUI.ViewerBaseURL = strings.TrimRight(parseOptionalString(values, KeyOpenWebUIViewerBaseURL, ""), "/")
 
 	return cfg, errs
 }
@@ -791,6 +805,7 @@ func (c Config) Validate() error {
 		validateInt64Min(&errs, KeyOpenWebUIMaxResponseBytes, c.OpenWebUI.MaxResponseBytes, openWebUIMaxResponseBytesMin)
 		validateInt64Min(&errs, KeyOpenWebUIMaxRequestBytes, c.OpenWebUI.MaxRequestBytes, openWebUIMaxRequestBytesMin)
 		validateIntBounds(&errs, KeyOpenWebUIMaxContextMessages, c.OpenWebUI.MaxContextMessages, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax)
+		validateOpenWebUIViewerBaseURL(&errs, KeyOpenWebUIViewerBaseURL, c.OpenWebUI.ViewerBaseURL)
 	}
 
 	if c.Env == EnvProduction {
@@ -902,6 +917,7 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIMaxRequestBytes:    strconv.FormatInt(c.OpenWebUI.MaxRequestBytes, 10),
 		KeyOpenWebUIMaxContextMessages: strconv.Itoa(c.OpenWebUI.MaxContextMessages),
 		KeyOpenWebUIWebSearchEnabled:   optionalBoolString(c.OpenWebUI.WebSearchEnabled),
+		KeyOpenWebUIViewerBaseURL:      c.OpenWebUI.ViewerBaseURL,
 	}
 }
 
@@ -1282,6 +1298,24 @@ func validateOpenWebUIBaseURL(errs *[]FieldError, key, v string, allowed []strin
 	}
 	if !slices.Contains(allowed, v) {
 		*errs = append(*errs, FieldError{Key: key, Reason: "must appear verbatim in " + KeyOpenWebUIAllowedOrigins})
+		return false
+	}
+	return true
+}
+
+// validateOpenWebUIViewerBaseURL checks OPENWEBUI_VIEWER_BASE_URL's
+// shape only when it is set at all: unlike BaseURL, it is optional
+// (empty disables Issue #84's viewer link and title-generation request
+// entirely — ADR-0005 D23), and unlike BaseURL it is never checked
+// against AllowedOrigins, since this server never dials it — D11's SSRF
+// allowlist governs outbound connections this server makes, and this
+// value only ever appears in rendered Note text.
+func validateOpenWebUIViewerBaseURL(errs *[]FieldError, key, v string) bool {
+	if v == "" {
+		return true
+	}
+	if !isHTTPSOrigin(v) {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be an https origin URL with no userinfo, path, query, or fragment"})
 		return false
 	}
 	return true

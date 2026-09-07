@@ -243,6 +243,133 @@ func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
 	}
 }
 
+// TestTurnJob_StartChat_ViewerBaseURLUnset_NeverRequestsOrPersistsTitle
+// backs ADR-0005 D23's "leaving OPENWEBUI_VIEWER_BASE_URL unset
+// reproduces pre-#84 behavior exactly": with TurnJobConfig.ViewerBaseURL
+// left at its zero value, StartChat's EnableTitleGeneration is false,
+// and even if the provider returns a Title anyway (a fake standing in
+// for the "Open WebUI overwrote the placeholder on its own" known
+// constraint — docs/compat/openwebui-0.11.3.md point (i)), complete()
+// must never persist it.
+func TestTurnJob_StartChat_ViewerBaseURLUnset_NeverRequestsOrPersistsTitle(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if req.EnableTitleGeneration {
+			t.Error("StartChat EnableTitleGeneration = true, want false when ViewerBaseURL is unset")
+		}
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		title := "a title the provider sent anyway"
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1"), Title: &title}, nil
+	}
+
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.RemoteChatTitle != nil {
+		t.Errorf("turn.RemoteChatTitle = %v, want nil when ViewerBaseURL is unset, even though the provider returned one", turn.RemoteChatTitle)
+	}
+}
+
+// TestTurnJob_StartChat_ViewerBaseURLSet_RequestsAndPersistsTitleAndSources
+// is the same scenario with TurnJobConfig.ViewerBaseURL configured:
+// EnableTitleGeneration is now true, and both a returned Title and
+// Sources are persisted onto the turn.
+func TestTurnJob_StartChat_ViewerBaseURLSet_RequestsAndPersistsTitleAndSources(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if !req.EnableTitleGeneration {
+			t.Error("StartChat EnableTitleGeneration = false, want true when ViewerBaseURL is set")
+		}
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		title := "Weekend trip planning"
+		return TurnResult{
+			Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1"), Title: &title,
+			Sources: []Source{{Kind: SourceKindWebSearch, DisplayName: "web_search"}},
+		}, nil
+	}
+
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{ViewerBaseURL: "https://viewer.example.net"})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.RemoteChatTitle == nil || *turn.RemoteChatTitle != "Weekend trip planning" {
+		t.Errorf("turn.RemoteChatTitle = %v, want %q", turn.RemoteChatTitle, "Weekend trip planning")
+	}
+	if len(turn.Sources) != 1 || turn.Sources[0].DisplayName != "web_search" {
+		t.Errorf("turn.Sources = %+v, want one web_search source", turn.Sources)
+	}
+}
+
+// TestTurnJob_StartChat_SourcesPersistedRegardlessOfViewerBaseURL backs
+// the plan's own separation of concerns: Issue #81's citations are
+// unconditional (no config gate), unlike Issue #84's title/viewer link.
+func TestTurnJob_StartChat_SourcesPersistedRegardlessOfViewerBaseURL(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+	payload := mustTurnJobPayload(t, job)
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{
+			Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1"),
+			Sources: []Source{{Kind: SourceKindTool, DisplayName: "get_weather"}},
+		}, nil
+	}
+
+	// ViewerBaseURL left unset: only the title/link feature is gated by
+	// it, never sources.
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.Sources) != 1 || turn.Sources[0].DisplayName != "get_weather" {
+		t.Errorf("turn.Sources = %+v, want one get_weather source even with ViewerBaseURL unset", turn.Sources)
+	}
+}
+
 // TestTurnJob_ResolveWebSearchEnabled_PriorityRule backs ADR-0005 D21's
 // exact priority for Issue #75 AC#11: an explicit WebSearchOverride
 // always wins over the model's own synced default, in both directions;
@@ -794,6 +921,59 @@ func TestTurnJob_ContinueRetry_LookupDoneAdoptsWithoutResend(t *testing.T) {
 	}
 	if entry.Body != "recovered content" {
 		t.Errorf("recovered entry.Body = %q, want %q", entry.Body, "recovered content")
+	}
+}
+
+// TestTurnJob_ContinueRetry_LookupAdoptsTitleButNeverSources is
+// TestTurnJob_ContinueRetry_LookupDoneAdoptsWithoutResend extended for
+// Issues #81/#84: TurnOutcome.Title (available from the same GET lookup)
+// is adopted, but TurnOutcome carries no Sources field at all (see its
+// own doc comment on why), so a turn recovered this way never gets
+// citation footnotes even if the original completions call would have
+// produced some.
+func TestTurnJob_ContinueRetry_LookupAdoptsTitleButNeverSources(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "m0")
+	a0 := env.mustCreateReplyAs(t, m0, env.model.ActorID, domain.EntryLLMReply, "a0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+	env.mustSucceededTurn(t, link, m0, a0)
+	m1 := env.mustCreateReply(t, a0, "m1")
+
+	turn := domain.OpenWebUITurnLink{
+		ID: domain.NewID(), LinkID: link.ID, BranchID: link.BranchID,
+		LocalMessageID: m1.ID, LocalParentID: &a0.ID,
+		RequestID: domain.NewID(), Revision: 1, Attempt: 1, Status: domain.TurnPending,
+		RemoteChatID: strPtr("remote-chat-1"), RemoteMessageID: strPtr("remote-user-1"), RemoteAssistantMessageID: strPtr("remote-assistant-1"),
+		CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now(),
+	}
+	if err := env.db.OpenWebUITurnLinks.Create(t.Context(), turn); err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	payload, _ := json.Marshal(turnJobPayload{TurnID: turn.ID, LinkID: link.ID, Revision: 1, ThreadID: m0.ThreadID})
+	job := domain.Job{ID: domain.NewID(), JobType: JobType, Payload: string(payload), PayloadVersion: 1, State: domain.JobPending, Attempt: 1, SourceEntryID: &m1.ID, NextRunAt: env.clock.Now(), CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now()}
+	if err := env.db.Jobs.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	provider := newFakeProvider(t)
+	provider.lookupOutcome = func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error) {
+		title := "Recovered chat title"
+		return TurnOutcome{Found: true, Done: true, Content: "recovered content", RemoteCurrentID: strPtr("remote-assistant-1"), Title: &title}, nil
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{ViewerBaseURL: "https://viewer.example.net"})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	got, err := env.db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemoteChatTitle == nil || *got.RemoteChatTitle != "Recovered chat title" {
+		t.Errorf("turn.RemoteChatTitle = %v, want %q", got.RemoteChatTitle, "Recovered chat title")
+	}
+	if got.Sources != nil {
+		t.Errorf("turn.Sources = %+v, want nil — a lookup-recovered turn never carries sources", got.Sources)
 	}
 }
 
