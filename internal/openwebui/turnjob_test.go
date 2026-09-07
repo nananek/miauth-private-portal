@@ -224,6 +224,40 @@ func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
 	}
 }
 
+func TestTurnJob_StartChat_StripsMentionTagsFromProviderContentButKeepsEntryBodyIntact(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hey @luna@ai.tail2c8c7.ts.net, how are you?")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		if req.NewTurn.Content != "hey luna, how are you?" {
+			t.Errorf("StartChat NewTurn.Content = %q, want mention stripped", req.NewTurn.Content)
+		}
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "fine", RemoteCurrentID: strPtr("remote-msg-1")}, nil
+	}
+
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	stored, err := env.db.Entries.Get(t.Context(), root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Body != "hey @luna@ai.tail2c8c7.ts.net, how are you?" {
+		t.Errorf("stored Entry.Body = %q, want the original unmodified mention", stored.Body)
+	}
+}
+
 func TestTurnJob_DuplicateDelivery_NeverCallsProvider(t *testing.T) {
 	env := newTurnTestEnv(t)
 	bridge := newTestBridge(env)

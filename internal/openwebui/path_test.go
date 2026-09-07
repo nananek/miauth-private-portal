@@ -254,3 +254,70 @@ func TestSelectBranch_NoContinuationAfterFailedTurn(t *testing.T) {
 		t.Errorf("continuation = %+v, want nil for a re-ask after a failed turn", continuation)
 	}
 }
+
+func TestStripMentionTagsForProvider(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "username and host",
+			body: "Hey @luna@ai.tail2c8c7.ts.net, what do you think?",
+			want: "Hey luna, what do you think?",
+		},
+		{
+			name: "bare username without host",
+			body: "cc @owner please review",
+			want: "cc owner please review",
+		},
+		{
+			name: "multiple mentions at start and end",
+			body: "@luna@ai.tail2c8c7.ts.net and @owner both @luna@ai.tail2c8c7.ts.net",
+			want: "luna and owner both luna",
+		},
+		{
+			name: "no mention is unchanged",
+			body: "no mentions here, just text",
+			want: "no mentions here, just text",
+		},
+		{
+			name: "email address is not a mention",
+			body: "contact me at foo@example.com please",
+			want: "contact me at foo@example.com please",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripMentionTagsForProvider(tt.body); got != tt.want {
+				t.Errorf("stripMentionTagsForProvider(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderMessages_StripsMentionTagsButLeavesEntryBodyUntouched(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "hey @luna@ai.tail2c8c7.ts.net look at this")
+	a0 := env.mustCreateReplyAs(t, m0, env.assistantActorID(t), domain.EntryLLMReply, "assistant reply 0")
+	m1 := env.mustCreateReply(t, a0, "message 1")
+
+	path, err := BuildTurnPath(t.Context(), env.db.Repos, m1, PathBounds{MaxContextMessages: 100})
+	if err != nil {
+		t.Fatalf("BuildTurnPath: %v", err)
+	}
+
+	messages := ProviderMessages(path)
+	if len(messages) != 2 || messages[0].Content != "hey luna look at this" {
+		t.Errorf("ProviderMessages = %+v, want stripped mention in messages[0]", messages)
+	}
+
+	stored, err := env.db.Entries.Get(t.Context(), m0.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Body != "hey @luna@ai.tail2c8c7.ts.net look at this" {
+		t.Errorf("stored Entry.Body = %q, want the original unmodified mention", stored.Body)
+	}
+}
