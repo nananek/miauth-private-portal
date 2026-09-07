@@ -28,6 +28,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 )
 
@@ -61,6 +62,10 @@ type Server struct {
 	// maxConcurrentStreamConnections (streaming_handlers.go).
 	streamSem          chan struct{}
 	streamPingInterval time.Duration
+	// streamHub is Issue #95 PR2's live push source; see Options.StreamHub.
+	// nil disables push delivery entirely, leaving GET /streaming as
+	// Issue #41's handshake/ack/keepalive-only stub.
+	streamHub *streamhub.Hub
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -105,6 +110,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		openWebUIViewerBaseURL:   opts.OpenWebUIViewerBaseURL,
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
+		streamHub:                opts.StreamHub,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,11 +123,16 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	if opts.MiAuthService != nil {
 		s.Handle("GET /miauth/{session}", http.HandlerFunc(s.handleMiAuthStart))
 		s.Handle("POST /api/miauth/{session}/check", http.HandlerFunc(s.handleMiAuthCheck))
-		// GET /streaming only needs read:account authentication (Issue
-		// #41), not a timeline: it never pushes a real note/notification
-		// event yet, so it belongs in this MiAuthService-only group rather
-		// than mixed into the note-API group below, which exists because
-		// every route there needs both scoped auth and a timeline to read.
+		// GET /streaming's route registration only needs read:account
+		// authentication (Issue #41), not a timeline (opts.TimelineService
+		// may be nil here), so it belongs in this MiAuthService-only group
+		// rather than mixed into the note-API group below, which exists
+		// because every route there needs both scoped auth and a timeline
+		// to read. Since Issue #95 PR2, a connection subscribed to
+		// "homeTimeline" does receive a live note-create push, but only
+		// once opts.TimelineService and opts.StreamHub are also configured
+		// (serveStreamConn's nil checks) — cmd/server/main.go always wires
+		// all three together.
 		s.Handle("GET /streaming", http.HandlerFunc(s.handleStreaming))
 	}
 

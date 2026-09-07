@@ -69,6 +69,18 @@ func newTestService(t *testing.T) *testService {
 	}
 }
 
+// newTestServiceWithBroadcaster builds a testService the same way
+// newTestService does, but with Issue #95 PR2's EntryBroadcaster wired
+// to broadcaster. It reuses newTestService's DB/owner/clock setup and
+// only rebuilds the Service itself, mirroring
+// newTestServiceWithOwnerUsername's pattern.
+func newTestServiceWithBroadcaster(t *testing.T, broadcaster EntryBroadcaster) *testService {
+	t.Helper()
+	ts := newTestService(t)
+	ts.Service = NewService(ts.db, ts.db.Repos, Config{Clock: ts.clock, Broadcaster: broadcaster})
+	return ts
+}
+
 // newTestServiceWithOwnerUsername builds a testService the same way
 // newTestService does, but with Issue #23 PR5's self-mention detection
 // enabled for ownerUsername. It reuses newTestService's DB/owner/clock

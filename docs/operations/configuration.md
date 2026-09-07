@@ -277,10 +277,17 @@ notes" section.
 
 These routes register only when `httpserver.Options.TimelineService` is
 also set alongside `MiAuthService` (see `internal/httpserver.NewServer`);
-`cmd/server` always wires both. `POST /api/notes/update` and the
-WebSocket `/streaming` timeline channel are deliberately not implemented
-(docs/compat/aria-v1.5.11.md classifies both **不要** for this MVP), so
-`POST /api/endpoints` never advertises `notes/update`.
+`cmd/server` always wires both. `POST /api/notes/update` is deliberately
+not implemented (docs/compat/aria-v1.5.11.md classifies it **不要** for
+this MVP), so `POST /api/endpoints` never advertises `notes/update`. The
+WebSocket `/streaming` timeline channel is a separate case: it registers
+whenever `MiAuthService` alone is set (it needs no timeline), completes
+the handshake since Issue #41, and pushes a live `homeTimeline` note-create
+event since Issue #95 — see docs/compat/aria-v1.5.11.md's "Streaming
+decision" for why this remains a UX enhancement, not the correctness
+source of truth (`httpserver.Options.StreamHub`, wired from
+`cmd/server/main.go`, controls whether the push half is active; nil
+disables it and leaves the handshake-only stub).
 
 ### Wiring
 
