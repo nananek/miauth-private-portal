@@ -1541,24 +1541,35 @@ func TestLoad_OpenWebUIGenerationEnabledIsIndependentOfEnabled(t *testing.T) {
 	}
 }
 
-// TestLoad_OpenWebUIWebSearchEnabledDefaultsFalse backs Issue #72:
-// OPENWEBUI_WEB_SEARCH_ENABLED is a plain opt-in bool defaulting to
-// false, the same shape OPENWEBUI_GENERATION_ENABLED has.
-func TestLoad_OpenWebUIWebSearchEnabledDefaultsFalse(t *testing.T) {
+// TestLoad_OpenWebUIWebSearchEnabledIsTriState backs ADR-0005 D21 (Issue
+// #75 AC#11): OPENWEBUI_WEB_SEARCH_ENABLED left out of the environment
+// entirely resolves to nil (unset — TurnJob then defers per model to
+// FeatureDefaultCache, never to a hardcoded false), while an explicit
+// "true"/"false" resolves to the matching non-nil *bool that always
+// overrides every model uniformly.
+func TestLoad_OpenWebUIWebSearchEnabledIsTriState(t *testing.T) {
 	def, err := loadWithOpenWebUI(t, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if def.OpenWebUI.WebSearchEnabled {
-		t.Error("WebSearchEnabled default = true, want false")
+	if def.OpenWebUI.WebSearchEnabled != nil {
+		t.Errorf("WebSearchEnabled default = %v, want nil (unset)", *def.OpenWebUI.WebSearchEnabled)
 	}
 
-	cfg, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIWebSearchEnabled: "true"})
+	cfgTrue, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIWebSearchEnabled: "true"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.OpenWebUI.WebSearchEnabled {
-		t.Error("WebSearchEnabled = false, want true")
+	if cfgTrue.OpenWebUI.WebSearchEnabled == nil || !*cfgTrue.OpenWebUI.WebSearchEnabled {
+		t.Errorf("WebSearchEnabled = %v, want a non-nil true", cfgTrue.OpenWebUI.WebSearchEnabled)
+	}
+
+	cfgFalse, err := loadWithOpenWebUI(t, map[string]string{KeyOpenWebUIWebSearchEnabled: "false"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgFalse.OpenWebUI.WebSearchEnabled == nil || *cfgFalse.OpenWebUI.WebSearchEnabled {
+		t.Errorf("WebSearchEnabled = %v, want a non-nil false", cfgFalse.OpenWebUI.WebSearchEnabled)
 	}
 }
 

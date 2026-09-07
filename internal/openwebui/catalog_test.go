@@ -53,7 +53,7 @@ func TestSyncCatalog_DisabledReturnsErrDisabled(t *testing.T) {
 	cfg := validRegistryConfig()
 	cfg.Enabled = false
 	tr := newTestRegistry(t, cfg)
-	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{}, nil, nil); !errors.Is(err, ErrDisabled) {
+	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{}, nil, nil, nil); !errors.Is(err, ErrDisabled) {
 		t.Errorf("SyncCatalog() error = %v, want ErrDisabled", err)
 	}
 }
@@ -71,7 +71,7 @@ func TestSyncCatalog_ProviderErrorLeavesRegistryUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{err: errors.New("boom")}, nil, discardLogger()); err == nil {
+	if _, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{err: errors.New("boom")}, nil, nil, discardLogger()); err == nil {
 		t.Fatal("SyncCatalog with a failing provider should return an error")
 	}
 
@@ -108,7 +108,7 @@ func TestSyncCatalog_CreatesNewModelsWithGeneratedSlugs(t *testing.T) {
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B"},
 	}}
-	result, err := tr.SyncCatalog(t.Context(), provider, nil, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), provider, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("SyncCatalog: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B"},
 	}}
-	if _, err := tr.SyncCatalog(t.Context(), firstRound, nil, discardLogger()); err != nil {
+	if _, err := tr.SyncCatalog(t.Context(), firstRound, nil, nil, discardLogger()); err != nil {
 		t.Fatalf("first SyncCatalog: %v", err)
 	}
 	secondModel, err := tr.db.OpenWebUIModels.GetByExternalID(t.Context(), workspace.ID, "gpt-oss:120b")
@@ -196,7 +196,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 	secondRound := &fakeCatalogProvider{models: []RemoteModel{
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 	}}
-	result, err := tr.SyncCatalog(t.Context(), secondRound, nil, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), secondRound, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("second SyncCatalog: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestSyncCatalog_DeactivatesModelsNotInThisRoundAndReactivatesOnReturn(t *te
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B (renamed)"},
 	}}
-	result, err = tr.SyncCatalog(t.Context(), thirdRound, nil, discardLogger())
+	result, err = tr.SyncCatalog(t.Context(), thirdRound, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("third SyncCatalog: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSyncCatalog_EmptySuccessfulListDeactivatesEverything(t *testing.T) {
 	}
 
 	tr.clock.Advance(time.Hour)
-	result, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{models: nil}, nil, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), &fakeCatalogProvider{models: nil}, nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("SyncCatalog: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestSyncCatalog_PopulatesToolCachePerModel(t *testing.T) {
 		accessibleIDs: []string{"web_search", "calculator"},
 	}
 	toolCache := NewToolConfigCache()
-	if _, err := tr.SyncCatalog(t.Context(), provider, toolCache, discardLogger()); err != nil {
+	if _, err := tr.SyncCatalog(t.Context(), provider, toolCache, nil, discardLogger()); err != nil {
 		t.Fatalf("SyncCatalog: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestSyncCatalog_ListAccessibleToolsErrorKeepsPreviousToolCache(t *testing.T
 		models:        []RemoteModel{{ID: "gpt-oss:20b", Name: "GPT OSS 20B", ToolIDs: []string{"calculator"}}},
 		accessibleErr: errors.New("tools endpoint unreachable"),
 	}
-	result, err := tr.SyncCatalog(t.Context(), provider, toolCache, discardLogger())
+	result, err := tr.SyncCatalog(t.Context(), provider, toolCache, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("SyncCatalog should still succeed on the registry side: %v", err)
 	}
@@ -369,6 +369,68 @@ func TestSyncCatalog_ListAccessibleToolsErrorKeepsPreviousToolCache(t *testing.T
 	}
 	if got := toolCache.Get("gpt-oss:20b"); !reflect.DeepEqual(got, []string{"web_search"}) {
 		t.Errorf("toolCache.Get(gpt-oss:20b) = %v, want the previous round's value kept", got)
+	}
+}
+
+// TestResolveFeatureDefaults_DetectsWebSearchMember backs Issue #75
+// AC#11/ADR-0005 D21: a model's own DefaultFeatureIDs resolves to true
+// only when it actually contains "web_search" — any other member, an
+// empty list, or no list at all resolves to false (never guessed on),
+// and a member elsewhere in the list is still detected regardless of
+// position.
+func TestResolveFeatureDefaults_DetectsWebSearchMember(t *testing.T) {
+	eligible := []RemoteModel{
+		{ID: "model-a", DefaultFeatureIDs: []string{"web_search"}},
+		{ID: "model-b", DefaultFeatureIDs: []string{"image_generation", "web_search"}},
+		{ID: "model-c", DefaultFeatureIDs: []string{"image_generation"}},
+		{ID: "model-d"}, // no defaultFeatureIds at all
+	}
+	got := resolveFeatureDefaults(eligible)
+
+	if !got["model-a"] {
+		t.Error("model-a should default to web_search")
+	}
+	if !got["model-b"] {
+		t.Error("model-b should default to web_search (present alongside another feature id)")
+	}
+	if got["model-c"] {
+		t.Error("model-c should not default to web_search (only image_generation)")
+	}
+	if got["model-d"] {
+		t.Error("model-d should not default to web_search (no defaultFeatureIds at all)")
+	}
+}
+
+// TestSyncCatalog_PopulatesFeatureCachePerModel backs the integration
+// half: a sync round resolves each eligible model's own
+// DefaultFeatureIDs into the shared FeatureDefaultCache, keyed by
+// ExternalModelID, needing no second provider call the way toolCache's
+// accessible-tools filtering does.
+func TestSyncCatalog_PopulatesFeatureCachePerModel(t *testing.T) {
+	tr := newTestRegistry(t, validRegistryConfig())
+	if err := tr.Seed(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &fakeCatalogProvider{
+		models: []RemoteModel{
+			{ID: "gpt-oss:20b", Name: "GPT OSS 20B", DefaultFeatureIDs: []string{"web_search"}},
+			{ID: "gpt-oss:120b", Name: "GPT OSS 120B", DefaultFeatureIDs: []string{"image_generation"}},
+		},
+	}
+	featureCache := NewFeatureDefaultCache()
+	if _, err := tr.SyncCatalog(t.Context(), provider, nil, featureCache, discardLogger()); err != nil {
+		t.Fatalf("SyncCatalog: %v", err)
+	}
+
+	if !featureCache.Get("gpt-oss:20b") {
+		t.Error(`featureCache.Get(gpt-oss:20b) = false, want true`)
+	}
+	if featureCache.Get("gpt-oss:120b") {
+		t.Error(`featureCache.Get(gpt-oss:120b) = true, want false`)
+	}
+	if featureCache.Get("never-synced") {
+		t.Error(`featureCache.Get(never-synced) = true, want false (cache miss)`)
 	}
 }
 

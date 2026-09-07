@@ -130,7 +130,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_RESPONSE_BYTES` | no | `4194304` (4 MiB) | Issue #53's response-size bound. Larger than `RSS_MAX_RESPONSE_BYTES`/`IMAP_MAX_MESSAGE_BYTES` because `GET /api/v1/chats/{id}` returns the whole chat, not one message. Minimum `65536`. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
-| `OPENWEBUI_WEB_SEARCH_ENABLED` | no | `false` | Issue #72's opt-in: when `true`, every outbound completions call sets `features.web_search=true`. One deployment-wide flag for every model, deliberately kept that way by Issue #75 (ADR-0005 D20) rather than becoming per-model. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly). The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
+| `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1105,10 +1105,16 @@ multi-worker deployment would need to replace this with a database-backed
 lease — a separate issue, not built here.
 
 **Web search / tool use (Issues #72, #74, #75).** `OPENWEBUI_WEB_SEARCH_ENABLED`
-sets `features.web_search=true` on every completions call this bridge
-sends, for every model alike (one deployment-wide flag, Issue #75/ADR-0005
-D20). Each model's own `tool_ids` are resolved per model instead — there is
-no config key for them as of Issue #75: `Registry.SyncCatalog` reads each
+sets `features.web_search` on outbound completions calls, tri-state since
+Issue #75 AC#11 (ADR-0005 D21): an explicit `true`/`false` overrides every
+model uniformly, while leaving the key unset defers per model to that
+model's own most recently synced `GET /api/models`
+`info.meta.defaultFeatureIds` (on only when it contains `"web_search"`,
+resolved by `Registry.SyncCatalog` into `internal/openwebui.
+FeatureDefaultCache` on the same catalog sync round that already reads the
+response for the registry — no second provider call). Each model's own
+`tool_ids` are resolved per model too — there is no config key for them as
+of Issue #75: `Registry.SyncCatalog` reads each
 active model's own `GET /api/models` `info.meta.toolIds` on every catalog
 sync round (`OPENWEBUI_CATALOG_SYNC_INTERVAL` above), filters it fail-closed
 against `GET /api/v1/tools/` (an id this credential cannot actually invoke

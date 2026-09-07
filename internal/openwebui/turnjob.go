@@ -36,6 +36,13 @@ type TurnJobConfig struct {
 	// between enqueue and run) rather than trusting the bridge's
 	// enqueue-time check.
 	MaxContextMessages int
+	// WebSearchOverride mirrors OPENWEBUI_WEB_SEARCH_ENABLED (ADR-0005
+	// D21, Issue #75 AC#11): nil means unset — resolveWebSearchEnabled
+	// then falls back to the selected model's own synced
+	// defaultFeatureIds (featureCache) — while a non-nil value overrides
+	// every model uniformly, on or off, regardless of that model's own
+	// default.
+	WebSearchOverride *bool
 }
 
 // TurnJob implements internal/jobs.Handler for JobType. It depends on
@@ -43,14 +50,15 @@ type TurnJobConfig struct {
 // does (plan §1): both are use-case packages this one composes, not
 // storage or transport.
 type TurnJob struct {
-	repos     domain.Repos
-	timeline  *timeline.Service
-	provider  Provider
-	toolCache *ToolConfigCache
-	cfg       TurnJobConfig
-	locks     *threadLocks
-	clock     Clock
-	logger    *slog.Logger
+	repos        domain.Repos
+	timeline     *timeline.Service
+	provider     Provider
+	toolCache    *ToolConfigCache
+	featureCache *FeatureDefaultCache
+	cfg          TurnJobConfig
+	locks        *threadLocks
+	clock        Clock
+	logger       *slog.Logger
 }
 
 // NewTurnJob builds a TurnJob. repos is the standalone (non-
@@ -66,14 +74,20 @@ type TurnJob struct {
 // unsynced or newly discovered one — resolves to no tool_ids at all on
 // every request this job sends, the same safe default an inaccessible
 // or unconfigured id already falls back to.
-func NewTurnJob(repos domain.Repos, timelineSvc *timeline.Service, provider Provider, toolCache *ToolConfigCache, cfg TurnJobConfig, clock Clock, logger *slog.Logger) *TurnJob {
+//
+// featureCache is Issue #75 AC#11's per-model web_search default
+// (ADR-0005 D21), read by resolveWebSearchEnabled only when
+// cfg.WebSearchOverride is nil (OPENWEBUI_WEB_SEARCH_ENABLED left
+// unset); a nil featureCache resolves the same as an unsynced model
+// there too — false, never guessing a feature on.
+func NewTurnJob(repos domain.Repos, timelineSvc *timeline.Service, provider Provider, toolCache *ToolConfigCache, featureCache *FeatureDefaultCache, cfg TurnJobConfig, clock Clock, logger *slog.Logger) *TurnJob {
 	if clock == nil {
 		clock = realClock{}
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TurnJob{repos: repos, timeline: timelineSvc, provider: provider, toolCache: toolCache, cfg: cfg, locks: newThreadLocks(), clock: clock, logger: logger}
+	return &TurnJob{repos: repos, timeline: timelineSvc, provider: provider, toolCache: toolCache, featureCache: featureCache, cfg: cfg, locks: newThreadLocks(), clock: clock, logger: logger}
 }
 
 // resolveToolIDs looks up externalModelID's cached tool_ids, or nil if
@@ -83,6 +97,24 @@ func (j *TurnJob) resolveToolIDs(externalModelID string) []string {
 		return nil
 	}
 	return j.toolCache.Get(externalModelID)
+}
+
+// resolveWebSearchEnabled applies ADR-0005 D21's priority rule for one
+// model: an explicit cfg.WebSearchOverride (OPENWEBUI_WEB_SEARCH_ENABLED
+// set to true or false) always wins, applied uniformly regardless of
+// which model this turn resolved to; left nil (unset), it defers to
+// externalModelID's own most recently synced defaultFeatureIds via
+// featureCache — false for a nil cache or a cache miss, the same
+// "never guess a feature on" default resolveToolIDs already applies to
+// tool_ids.
+func (j *TurnJob) resolveWebSearchEnabled(externalModelID string) bool {
+	if j.cfg.WebSearchOverride != nil {
+		return *j.cfg.WebSearchOverride
+	}
+	if j.featureCache == nil {
+		return false
+	}
+	return j.featureCache.Get(externalModelID)
 }
 
 // Handle implements internal/jobs.Handler for JobType. See the package
@@ -236,13 +268,14 @@ func (j *TurnJob) handleCreationPending(
 	}
 
 	result, err := j.provider.StartChat(ctx, StartChatRequest{
-		ModelID:       model.ExternalModelID,
-		Messages:      ProviderMessages(path),
-		NewTurn:       Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
-		IDs:           TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID},
-		CorrelationID: turn.RequestID,
-		SentAt:        now,
-		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
+		ModelID:          model.ExternalModelID,
+		Messages:         ProviderMessages(path),
+		NewTurn:          Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
+		IDs:              TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID},
+		CorrelationID:    turn.RequestID,
+		SentAt:           now,
+		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
+		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
 		OnChatCreated: func(hookCtx context.Context, remoteChatID string) error {
 			confirmedAt := j.clock.Now().UTC()
 			if err := j.repos.OpenWebUILinks.MarkReady(hookCtx, link.ID, remoteChatID, nil, confirmedAt); err != nil {
@@ -357,14 +390,15 @@ func (j *TurnJob) handleReady(
 	}
 
 	result, err := j.provider.ContinueTurn(ctx, ContinueTurnRequest{
-		RemoteChatID:  *link.RemoteChatID,
-		ModelID:       model.ExternalModelID,
-		Messages:      ProviderMessages(path),
-		NewTurn:       Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
-		IDs:           TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID, ParentAssistantID: link.RemoteCurrentID},
-		CorrelationID: turn.RequestID,
-		SentAt:        now,
-		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
+		RemoteChatID:     *link.RemoteChatID,
+		ModelID:          model.ExternalModelID,
+		Messages:         ProviderMessages(path),
+		NewTurn:          Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
+		IDs:              TurnIDs{UserMessageID: userMsgID, AssistantMessageID: assistantMsgID, ParentAssistantID: link.RemoteCurrentID},
+		CorrelationID:    turn.RequestID,
+		SentAt:           now,
+		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
+		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
@@ -456,14 +490,15 @@ func (j *TurnJob) resendContinue(
 		return fmt.Errorf("openwebui: turn: begin attempt: %w", err)
 	}
 	result, err := j.provider.ContinueTurn(ctx, ContinueTurnRequest{
-		RemoteChatID:  remoteChatID,
-		ModelID:       model.ExternalModelID,
-		Messages:      ProviderMessages(path),
-		NewTurn:       Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
-		IDs:           TurnIDs{UserMessageID: *turn.RemoteMessageID, AssistantMessageID: *turn.RemoteAssistantMessageID, ParentAssistantID: turn.RemoteParentID},
-		CorrelationID: turn.RequestID,
-		SentAt:        now,
-		ToolIDs:       j.resolveToolIDs(model.ExternalModelID),
+		RemoteChatID:     remoteChatID,
+		ModelID:          model.ExternalModelID,
+		Messages:         ProviderMessages(path),
+		NewTurn:          Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
+		IDs:              TurnIDs{UserMessageID: *turn.RemoteMessageID, AssistantMessageID: *turn.RemoteAssistantMessageID, ParentAssistantID: turn.RemoteParentID},
+		CorrelationID:    turn.RequestID,
+		SentAt:           now,
+		ToolIDs:          j.resolveToolIDs(model.ExternalModelID),
+		WebSearchEnabled: j.resolveWebSearchEnabled(model.ExternalModelID),
 	})
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)

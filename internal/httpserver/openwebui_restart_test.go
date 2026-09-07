@@ -59,7 +59,7 @@ func (p *restartFakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatI
 func runOpenWebUITurnJobFor(t *testing.T, ts *noteAPITestServer, provider openwebui.Provider, sourceEntryID string) {
 	t.Helper()
 	turnJob := findOpenWebUITurnJobFor(t, ts, sourceEntryID)
-	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
+	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
 	if err := handler.Handle(t.Context(), turnJob); err != nil {
 		t.Fatalf("TurnJob.Handle: %v", err)
 	}

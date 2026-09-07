@@ -352,11 +352,14 @@ type OpenWebUIConfig struct {
 	// MaxRequestBytes: a byte bound alone would let a thread of many
 	// short messages slip through uncapped.
 	MaxContextMessages int
-	// WebSearchEnabled mirrors OPENWEBUI_WEB_SEARCH_ENABLED (Issue #72).
-	// Independent of GenerationEnabled at the type level, but meaningless
-	// (never read) while GenerationEnabled is false, the same relationship
-	// Enabled/GenerationEnabled already have.
-	WebSearchEnabled bool
+	// WebSearchEnabled mirrors OPENWEBUI_WEB_SEARCH_ENABLED. Tri-state
+	// since ADR-0005 D21 (Issue #75 AC#11): nil means unset — a turn's
+	// web_search feature then follows the selected model's own synced
+	// defaultFeatureIds instead — while a non-nil value overrides every
+	// model uniformly, on or off. Independent of GenerationEnabled at the
+	// type level, but meaningless (never read) while GenerationEnabled is
+	// false, the same relationship Enabled/GenerationEnabled already have.
+	WebSearchEnabled *bool
 }
 
 // FieldError names one invalid, missing, or unknown config field. It never
@@ -632,7 +635,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.OpenWebUI.MaxResponseBytes = parseOptionalInt64(values, KeyOpenWebUIMaxResponseBytes, 4_194_304, openWebUIMaxResponseBytesMin, &errs)
 	cfg.OpenWebUI.MaxRequestBytes = parseOptionalInt64(values, KeyOpenWebUIMaxRequestBytes, 1_048_576, openWebUIMaxRequestBytesMin, &errs)
 	cfg.OpenWebUI.MaxContextMessages = parseOptionalInt(values, KeyOpenWebUIMaxContextMessages, 100, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax, &errs)
-	cfg.OpenWebUI.WebSearchEnabled = parseOptionalBool(values, KeyOpenWebUIWebSearchEnabled, false, &errs)
+	cfg.OpenWebUI.WebSearchEnabled = parseOptionalBoolPtr(values, KeyOpenWebUIWebSearchEnabled, &errs)
 
 	return cfg, errs
 }
@@ -898,7 +901,7 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIMaxResponseBytes:   strconv.FormatInt(c.OpenWebUI.MaxResponseBytes, 10),
 		KeyOpenWebUIMaxRequestBytes:    strconv.FormatInt(c.OpenWebUI.MaxRequestBytes, 10),
 		KeyOpenWebUIMaxContextMessages: strconv.Itoa(c.OpenWebUI.MaxContextMessages),
-		KeyOpenWebUIWebSearchEnabled:   strconv.FormatBool(c.OpenWebUI.WebSearchEnabled),
+		KeyOpenWebUIWebSearchEnabled:   optionalBoolString(c.OpenWebUI.WebSearchEnabled),
 	}
 }
 
@@ -984,6 +987,34 @@ func parseOptionalBool(values map[string]string, key string, def bool, errs *[]F
 		return def
 	}
 	return b
+}
+
+// parseOptionalBoolPtr is parseOptionalBool's tri-state counterpart: an
+// absent or empty key returns nil (distinct from an explicit "false"),
+// for a field whose "unset" state means something different from either
+// boolean value (OpenWebUIConfig.WebSearchEnabled, ADR-0005 D21) rather
+// than merely picking a default.
+func parseOptionalBoolPtr(values map[string]string, key string, errs *[]FieldError) *bool {
+	v, ok := values[key]
+	if !ok || v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, FieldError{Key: key, Reason: "must be a boolean (true/false)"})
+		return nil
+	}
+	return &b
+}
+
+// optionalBoolString renders a *bool for Config.Redacted(): "unset" for
+// nil, otherwise the same strconv.FormatBool text every other boolean
+// field already uses.
+func optionalBoolString(v *bool) string {
+	if v == nil {
+		return "unset"
+	}
+	return strconv.FormatBool(*v)
 }
 
 func parseOptionalDuration(values map[string]string, key string, def time.Duration, errs *[]FieldError) time.Duration {

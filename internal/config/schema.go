@@ -99,12 +99,15 @@ const (
 	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
 
 	// KeyOpenWebUIWebSearchEnabled is Issue #72's opt-in web-search flag
-	// for the outbound completions call. It stays one deployment-wide
-	// setting (owner decision, Issue #75) — unlike per-model tool_ids
-	// (OPENWEBUI_TOOL_IDS, Issue #72's sibling flag, removed by that same
-	// decision: every model's tool_ids now come from its own
-	// GET /api/models info.meta.toolIds, resolved by catalog sync rather
-	// than overridden by a single deployment-wide config value).
+	// for the outbound completions call, tri-state since Issue #75 AC#11
+	// (ADR-0005 D21): unset defers per model to that model's own synced
+	// GET /api/models info.meta.defaultFeatureIds (whether it contains
+	// "web_search"), while an explicit true/false overrides every model
+	// uniformly regardless of its own default. Unlike per-model tool_ids
+	// (OPENWEBUI_TOOL_IDS, Issue #72's sibling flag, removed entirely by
+	// Issue #75 — every model's tool_ids come from its own toolIds alone,
+	// with no config override left at all), this key is kept, just no
+	// longer forced to a single deployment-wide boolean.
 	KeyOpenWebUIWebSearchEnabled = "OPENWEBUI_WEB_SEARCH_ENABLED"
 )
 

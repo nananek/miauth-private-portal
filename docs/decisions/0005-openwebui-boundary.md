@@ -656,6 +656,77 @@ bootstrap-client/two-read-only-call dance is removed with them; a single
 `ToolConfigCache` is built once and shared between the startup sync, the
 periodic `CatalogSyncJob`, and `TurnJob`.
 
+### D21. `OPENWEBUI_WEB_SEARCH_ENABLED` becomes tri-state: explicit config always wins, unset follows the model's own `defaultFeatureIds`
+
+D17 and D20 both explicitly left `OPENWEBUI_WEB_SEARCH_ENABLED` a plain,
+always-explicit, deployment-wide boolean — D17 because a tri-state upgrade
+was out of scope for Issue #72, D20 because the owner (2026-09-07) confirmed
+that reasoning rather than revisiting it even as `tool_ids` itself moved
+per-model in the same decision. The owner reversed that call the same day,
+while `issue-75-pr1-catalog-sync` (this issue's own implementation branch)
+was being rebased onto D20's `OPENWEBUI_TOOL_IDS` retirement: leaving
+`defaultFeatureIds` already captured on every `GET /api/models` call
+(`RemoteModel.DefaultFeatureIDs`, D18) but never read was judged an
+incomplete reading of Issue #75's Acceptance Criterion 11 ("Tool/default
+feature selection is resolved per selected model"), not a deliberate scope
+boundary worth keeping now that the branch was being finished rather than
+merely planned.
+
+**Decision: `OPENWEBUI_WEB_SEARCH_ENABLED` is now tri-state — unset /
+`true` / `false` — with unset (not `false`) the value that defers to the
+model.** `internal/config.OpenWebUIConfig.WebSearchEnabled` changes from
+`bool` to `*bool`: a nil pointer means "not configured", distinct from an
+explicit `false`. The priority rule, resolved once per turn per model
+(`TurnJob.resolveWebSearchEnabled`), mirrors `OPENWEBUI_TOOL_IDS`'s own
+pre-D20 three-state shape (D17) despite that key's retirement:
+
+| `OPENWEBUI_WEB_SEARCH_ENABLED` | resolved `features.web_search` |
+| --- | --- |
+| `true` | always on, for every model, regardless of that model's own `defaultFeatureIds` |
+| `false` | always off, for every model, regardless of that model's own `defaultFeatureIds` |
+| unset | on only for a model whose most recently synced `info.meta.defaultFeatureIds` contains `"web_search"`; off otherwise, including a model never yet synced |
+
+An explicit `true`/`false` always overrides every model uniformly — the
+same "whatever value is configured is sent verbatim" behavior D17 already
+described for the old plain-bool shape, just no longer the *only*
+reachable state. Only the unset state is new, and it is resolved per
+model rather than once for the whole deployment, matching D20's own
+per-model precedent for `tool_ids`.
+
+**Mechanism.** A new `internal/openwebui.FeatureDefaultCache`
+(`internal/openwebui/featurecache.go`) mirrors `ToolConfigCache`'s shape
+exactly (D20): keyed by `ExternalModelID`, written only by
+`Registry.SyncCatalog` at the end of a successful round, read only by
+`TurnJob`. Unlike `ToolConfigCache`, resolving it needs no second provider
+call and no fail-closed filtering step — a model's own advertised
+`defaultFeatureIds` is trusted the same way its `DisplayName` already is,
+not treated as a capability claim to verify against a separate
+accessible-tools list — so `resolveFeatureDefaults` runs unconditionally
+alongside the registry write, never skipped the way `toolCache`'s update
+can be on a `ListAccessibleTools` failure. `StartChatRequest`/
+`ContinueTurnRequest` each gain a `WebSearchEnabled bool` field
+(`internal/openwebui/provider.go`), computed by
+`TurnJob.resolveWebSearchEnabled` from `TurnJobConfig.WebSearchOverride`
+(the explicit config value, if set) or else `FeatureDefaultCache.Get` —
+moving `OPENWEBUI_WEB_SEARCH_ENABLED` from a `Client`-construction-time
+setting to a per-call one, exactly the move D20 already made for
+`tool_ids`. `internal/provider/openwebui.Client.Config.WebSearchEnabled`
+is removed entirely: `runTurn` now takes the resolved value as a
+parameter on every call instead of reading a field fixed at construction.
+
+This does not relitigate Issue #72's original "independent of, and never
+inferred from, any per-model web-search setting configured in the Open
+WebUI instance's own **admin/web UI**" statement
+([`docs/operations/configuration.md`](../operations/configuration.md)),
+which D17 was careful to distinguish from `defaultFeatureIds`:
+`defaultFeatureIds` is a value `GET /api/models` itself already returns to
+any caller of that endpoint (compat's own documented contract, not the
+separate web-UI-only per-model settings surface D17's own text warns
+against conflating), so reading it back here consumes the same API
+contract this adapter already depends on for `tool_ids`, not inferring
+provider-internal configuration from a side channel Open WebUI never
+exposes to an API-key caller.
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
@@ -671,14 +742,17 @@ periodic `CatalogSyncJob`, and `TurnJob`.
   redaction test asserts on `sk-mock-upstream-secret`.
 - **#54 (OWUI-R)** inherits D14 as release evidence: the digest, the
   observation record, and the re-verification requirement.
-- **#75** gets its catalog-sync, mention-routing, and per-model tool-
-  resolution inputs from D18, D19, and D20 — each amending, not replacing,
-  the #52/#53/#72/#74 decisions it builds on: D18 amends D9 (identity
-  projection now spans every visible model, not one seeded row), D19
-  amends D5 (the branch rule's "reply to an earlier node" generalizes to
-  "reply naming a different model"), and D20 amends D16/D17 (tool
-  resolution is per model and per sync round, never a single
-  deployment-wide override resolved once at boot).
+- **#75** gets its catalog-sync, mention-routing, and per-model tool/
+  feature-resolution inputs from D18, D19, D20, and D21 — each amending,
+  not replacing, the #52/#53/#72/#74 decisions it builds on: D18 amends D9
+  (identity projection now spans every visible model, not one seeded
+  row), D19 amends D5 (the branch rule's "reply to an earlier node"
+  generalizes to "reply naming a different model"), D20 amends D16/D17
+  (tool resolution is per model and per sync round, never a single
+  deployment-wide override resolved once at boot), and D21 amends D17/D20
+  again (web_search's own deployment-wide-only shape, confirmed once
+  already by D20, is reversed into the same explicit-wins/unset-follows-
+  model-default tri-state shape D17 originally gave `tool_ids`).
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Streaming, regeneration, remote branch management, and cancellation each
   need their own contract work before they can be picked up; none of them is

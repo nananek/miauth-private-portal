@@ -755,7 +755,7 @@ position* rule to a *model identity* rule: mixing two models' turns into
 one remote chat was never permitted, and this closes the one gap where a
 reply's local tree position alone did not already prevent it.
 
-### Per-model tool resolution
+### Per-model tool and web-search-default resolution
 
 Issue #74's tool/web-search resolution (`OPENWEBUI_TOOL_IDS`, resolved once
 at boot for the single default model) is generalized to every active model,
@@ -765,9 +765,17 @@ has the full mechanism. `OPENWEBUI_TOOL_IDS` itself is removed: a model's
 `tool_ids` now come solely from its own `GET /api/models`
 `info.meta.toolIds`, filtered fail-closed against what the configured
 account may actually invoke, exactly as before but per model instead of
-once for one. `OPENWEBUI_WEB_SEARCH_ENABLED` is unchanged — still one
-deployment-wide flag, an explicit owner decision not to relitigate that
-scope.
+once for one.
+
+`OPENWEBUI_WEB_SEARCH_ENABLED` is tri-state (ADR-0005 D21, AC#11): unset
+(not `false`) defers per model to that model's own synced
+`info.meta.defaultFeatureIds` (on only when it contains `"web_search"`,
+via a second small cache, `internal/openwebui.FeatureDefaultCache`, filled
+the same sync-round-not-per-turn way as `ToolConfigCache`), while an
+explicit `true`/`false` overrides every model uniformly regardless of its
+own default. This reverses PR5's original "stays one deployment-wide
+flag" note — resolved as a gap against AC#11 once the branch was being
+finished, not a scope change reopened lightly.
 
 ### Acceptance criteria
 
@@ -786,9 +794,14 @@ scope.
   a configurable interval thereafter, independent of the generation gate.
   (PR4)
 - [x] Per-model tool resolution replaces the single deployment-wide
-  override; `OPENWEBUI_WEB_SEARCH_ENABLED` stays unchanged. (PR5)
+  override; `OPENWEBUI_TOOL_IDS` itself is removed. (PR5)
 - [x] Documentation (this roadmap, ADR-0005, the compat document, and
-  operations docs) reflects the multi-model design. (PR6, this update)
+  operations docs) reflects the multi-model design. (PR6)
+- [x] `OPENWEBUI_WEB_SEARCH_ENABLED` becomes tri-state: an explicit
+  true/false overrides every model uniformly, and unset defers per model
+  to that model's own synced `defaultFeatureIds` (ADR-0005 D21) —
+  Acceptance Criterion 11's full scope, closing the gap PR5 originally
+  left open.
 - VirtualActor exclusion from login/MiAuth paths, addressing-mention
   stripping before a message reaches the provider, and linked-continuation
   model pinning were already correct for a multi-model registry before this

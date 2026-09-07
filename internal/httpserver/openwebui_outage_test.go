@@ -99,7 +99,7 @@ func TestOpenWebUIOutage_DuplicateJobDeliveryNeverDuplicatesReplyOrRemoteChat(t 
 		},
 	}
 	turnJob := findOpenWebUITurnJobFor(t, ts, rootID)
-	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
+	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
 
 	if err := handler.Handle(t.Context(), turnJob); err != nil {
 		t.Fatalf("first Handle: %v", err)

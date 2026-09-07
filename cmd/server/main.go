@@ -150,6 +150,11 @@ func run() error {
 		// OPENWEBUI_TOOL_IDS override, per owner decision — every model's
 		// tool_ids now come from its own info.meta.toolIds alone.
 		toolCache := openwebui.NewToolConfigCache()
+		// featureCache holds every active model's own "defaults to
+		// web_search" flag (Issue #75 AC#11, ADR-0005 D21), the same
+		// lifecycle as toolCache — read by TurnJob only when
+		// OPENWEBUI_WEB_SEARCH_ENABLED is left unset.
+		featureCache := openwebui.NewFeatureDefaultCache()
 
 		// A bounded, best-effort attempt at boot: a target that is merely
 		// unreachable at startup must not prevent the rest of the server
@@ -158,12 +163,12 @@ func run() error {
 		// keeps using until the periodic scheduler's next successful
 		// round.
 		startupSyncCtx, cancelStartupSync := context.WithTimeout(ctx, cfg.OpenWebUI.Timeout)
-		if _, err := registry.SyncCatalog(startupSyncCtx, catalogClient, toolCache, logger); err != nil {
+		if _, err := registry.SyncCatalog(startupSyncCtx, catalogClient, toolCache, featureCache, logger); err != nil {
 			logger.Error("openwebui: startup catalog sync failed; continuing with the last known registry", "error", err)
 		}
 		cancelStartupSync()
 
-		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, toolCache, logger).Handle)
+		jobsManager.Register(openwebui.JobTypeCatalogSync, openwebui.NewCatalogSyncJob(registry, catalogClient, toolCache, featureCache, logger).Handle)
 		openWebUICatalogScheduler = openwebui.NewCatalogScheduler(db.Jobs, openwebui.CatalogSchedulerConfig{
 			Interval: cfg.OpenWebUI.CatalogSyncInterval,
 		}, logger)
@@ -184,7 +189,6 @@ func run() error {
 				Timeout:          cfg.OpenWebUI.Timeout,
 				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
 				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-				WebSearchEnabled: cfg.OpenWebUI.WebSearchEnabled,
 			})
 			if err != nil {
 				return fmt.Errorf("build openwebui provider client: %w", err)
@@ -192,9 +196,10 @@ func run() error {
 			bridge := openwebui.NewBridge(openwebui.BridgeConfig{
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
 			}, nil, logger)
-			turnJob := openwebui.NewTurnJob(db.Repos, timelineSvc, owuiProvider, toolCache, openwebui.TurnJobConfig{
+			turnJob := openwebui.NewTurnJob(db.Repos, timelineSvc, owuiProvider, toolCache, featureCache, openwebui.TurnJobConfig{
 				MaxAttempts:        cfg.Jobs.MaxAttempts,
 				MaxContextMessages: cfg.OpenWebUI.MaxContextMessages,
+				WebSearchOverride:  cfg.OpenWebUI.WebSearchEnabled,
 			}, nil, logger)
 			openWebUIBridge = bridge.EnqueueTurn
 			jobsManager.Register(openwebui.JobType, turnJob.Handle)
