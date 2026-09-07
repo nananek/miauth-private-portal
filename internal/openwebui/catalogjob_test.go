@@ -88,7 +88,7 @@ func TestCatalogSyncJob_HandleCallsSyncCatalog(t *testing.T) {
 		{ID: "gpt-oss:20b", Name: "GPT OSS 20B"},
 		{ID: "gpt-oss:120b", Name: "GPT OSS 120B"},
 	}}
-	job := NewCatalogSyncJob(tr.Registry, provider, nil, nil)
+	job := NewCatalogSyncJob(tr.Registry, provider, nil, nil, nil)
 	if err := job.Handle(t.Context(), domain.Job{ID: domain.NewID(), JobType: JobTypeCatalogSync}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestCatalogSyncJob_HandleReturnsProviderError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	job := NewCatalogSyncJob(tr.Registry, &fakeCatalogProvider{err: errors.New("boom")}, nil, nil)
+	job := NewCatalogSyncJob(tr.Registry, &fakeCatalogProvider{err: errors.New("boom")}, nil, nil, nil)
 	if err := job.Handle(t.Context(), domain.Job{ID: domain.NewID(), JobType: JobTypeCatalogSync}); err == nil {
 		t.Fatal("Handle should return the provider error")
 	}

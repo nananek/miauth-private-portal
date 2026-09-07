@@ -290,10 +290,10 @@ func TestClient_ContinueTurn_LinearAgainstFixtures(t *testing.T) {
 
 // TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys backs
 // plan §7's "existing fixture-matching tests keep passing" requirement:
-// with Config.WebSearchEnabled and the request's ToolIDs left at their
-// zero values, the completions request body must carry neither a
-// "features" nor a "tool_ids" key at all, not merely false/empty values
-// — the exact request shape this client sent before Issue #72.
+// with the request's WebSearchEnabled and ToolIDs left at their zero
+// values, the completions request body must carry neither a "features"
+// nor a "tool_ids" key at all, not merely false/empty values — the exact
+// request shape this client sent before Issue #72.
 func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *testing.T) {
 	const assistantID = "assistant-1"
 	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
@@ -320,7 +320,7 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *test
 		t.Fatalf("ContinueTurn: %v", err)
 	}
 	if _, ok := sawKeys["features"]; ok {
-		t.Error(`completions request has a "features" key, want it entirely absent when WebSearchEnabled is false`)
+		t.Error(`completions request has a "features" key, want it entirely absent when req.WebSearchEnabled is false`)
 	}
 	if _, ok := sawKeys["tool_ids"]; ok {
 		t.Error(`completions request has a "tool_ids" key, want it entirely absent when ToolIDs is empty`)
@@ -328,8 +328,8 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys(t *test
 }
 
 // TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth backs
-// plan §1.3, generalized by Issue #75 PR5: an operator with
-// WebSearchEnabled set gets features.web_search=true on every call, and
+// plan §1.3, generalized by Issue #75 PR5/AC#11: a request with
+// WebSearchEnabled set gets features.web_search=true on that call, and
 // whatever ToolIDs a caller resolved for this turn's model is sent
 // verbatim as tool_ids.
 func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.T) {
@@ -355,13 +355,12 @@ func TestClient_ContinueTurn_WebSearchAndToolIDsConfigured_SendsBoth(t *testing.
 		}
 	}))
 	defer server.Close()
-	client := newTestClient(t, server, func(cfg *Config) {
-		cfg.WebSearchEnabled = true
-	})
+	client := newTestClient(t, server, nil)
 
 	req := minimalContinueTurnReq("chat-1")
 	req.IDs.AssistantMessageID = assistantID
 	req.ToolIDs = []string{"web_search", "server:mcp:example"}
+	req.WebSearchEnabled = true
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
@@ -478,12 +477,11 @@ func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *t
 		}
 	}))
 	defer server.Close()
-	client := newTestClient(t, server, func(cfg *Config) {
-		cfg.WebSearchEnabled = true
-	})
+	client := newTestClient(t, server, nil)
 
 	req := minimalContinueTurnReq("chat-1")
 	req.IDs.AssistantMessageID = assistantID
+	req.WebSearchEnabled = true
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}

@@ -39,7 +39,7 @@ func TestOpenWebUIAmbiguity_ChatCreationResponseLossNeverAutoRetriesOrDuplicates
 		},
 	}
 	turnJob := findOpenWebUITurnJobFor(t, ts, rootID)
-	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
+	handler := openwebui.NewTurnJob(ts.db.Repos, ts.timeline, provider, nil, nil, openwebui.TurnJobConfig{MaxAttempts: 8, MaxContextMessages: 100}, ts.clock, nil)
 
 	err := handler.Handle(t.Context(), turnJob)
 	var permanent *jobs.PermanentError

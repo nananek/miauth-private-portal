@@ -116,16 +116,24 @@ func mustTurnJobPayload(t *testing.T, job domain.Job) turnJobPayload {
 }
 
 func newTestTurnJob(env *turnTestEnv, provider Provider, cfg TurnJobConfig) (*TurnJob, *timeline.Service) {
-	return newTestTurnJobWithToolCache(env, provider, nil, cfg)
+	return newTestTurnJobWithCaches(env, provider, nil, nil, cfg)
 }
 
 // newTestTurnJobWithToolCache is newTestTurnJob with an explicit
-// *ToolConfigCache, for the one test (below) exercising Issue #75 PR5's
-// per-model tool_ids resolution — every other test in this file goes
-// through the nil-cache shorthand above, since ToolIDs's zero value
-// (omit the key entirely) is Provider.StartChat/ContinueTurn's existing,
+// *ToolConfigCache, for the tests exercising Issue #75 PR5's per-model
+// tool_ids resolution — every other test in this file goes through the
+// nil-cache shorthand above, since ToolIDs's zero value (omit the key
+// entirely) is Provider.StartChat/ContinueTurn's existing,
 // already-covered default.
 func newTestTurnJobWithToolCache(env *turnTestEnv, provider Provider, toolCache *ToolConfigCache, cfg TurnJobConfig) (*TurnJob, *timeline.Service) {
+	return newTestTurnJobWithCaches(env, provider, toolCache, nil, cfg)
+}
+
+// newTestTurnJobWithCaches is the shared constructor newTestTurnJob and
+// newTestTurnJobWithToolCache both delegate to, adding an explicit
+// *FeatureDefaultCache for the tests exercising Issue #75 AC#11's
+// per-model web_search default resolution (ADR-0005 D21).
+func newTestTurnJobWithCaches(env *turnTestEnv, provider Provider, toolCache *ToolConfigCache, featureCache *FeatureDefaultCache, cfg TurnJobConfig) (*TurnJob, *timeline.Service) {
 	timelineSvc := timeline.NewService(env.db, env.db.Repos, timeline.Config{Clock: env.clock})
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 8
@@ -133,7 +141,7 @@ func newTestTurnJobWithToolCache(env *turnTestEnv, provider Provider, toolCache 
 	if cfg.MaxContextMessages == 0 {
 		cfg.MaxContextMessages = 100
 	}
-	return NewTurnJob(env.db.Repos, timelineSvc, provider, toolCache, cfg, env.clock, nil), timelineSvc
+	return NewTurnJob(env.db.Repos, timelineSvc, provider, toolCache, featureCache, cfg, env.clock, nil), timelineSvc
 }
 
 func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
@@ -235,6 +243,40 @@ func TestTurnJob_StartChat_SuccessCreatesReplyAndNotification(t *testing.T) {
 	}
 }
 
+// TestTurnJob_ResolveWebSearchEnabled_PriorityRule backs ADR-0005 D21's
+// exact priority for Issue #75 AC#11: an explicit WebSearchOverride
+// always wins over the model's own synced default, in both directions;
+// left unset, the model's own default decides, and a cache miss (nil
+// cache, or a model FeatureDefaultCache has never resolved) is false.
+func TestTurnJob_ResolveWebSearchEnabled_PriorityRule(t *testing.T) {
+	featureCache := NewFeatureDefaultCache()
+	featureCache.Replace(map[string]bool{"model-on": true, "model-off": false})
+	boolPtr := func(b bool) *bool { return &b }
+
+	cases := []struct {
+		name            string
+		override        *bool
+		featureCache    *FeatureDefaultCache
+		externalModelID string
+		want            bool
+	}{
+		{"unset follows model default true", nil, featureCache, "model-on", true},
+		{"unset follows model default false", nil, featureCache, "model-off", false},
+		{"unset cache miss is false", nil, featureCache, "never-synced", false},
+		{"unset nil cache is false", nil, nil, "model-on", false},
+		{"explicit true overrides model default false", boolPtr(true), featureCache, "model-off", true},
+		{"explicit false overrides model default true", boolPtr(false), featureCache, "model-on", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &TurnJob{cfg: TurnJobConfig{WebSearchOverride: tc.override}, featureCache: tc.featureCache}
+			if got := j.resolveWebSearchEnabled(tc.externalModelID); got != tc.want {
+				t.Errorf("resolveWebSearchEnabled(%q) = %v, want %v", tc.externalModelID, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTurnJob_StartChat_SendsResolvedToolIDs backs Issue #75 PR5: a
 // StartChat request carries whatever tool_ids the shared ToolConfigCache
 // resolved for this turn's model (Registry.SyncCatalog's own writes,
@@ -307,6 +349,82 @@ func TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs(t *testing.T) {
 	}
 	if len(sawToolIDs) != 0 {
 		t.Errorf("StartChat ToolIDs = %v, want none for an unresolved model", sawToolIDs)
+	}
+}
+
+// TestTurnJob_StartChat_SendsResolvedWebSearchEnabled backs Issue #75
+// AC#11 end to end: with OPENWEBUI_WEB_SEARCH_ENABLED left unset
+// (TurnJobConfig.WebSearchOverride nil), a StartChat request's
+// WebSearchEnabled follows the shared FeatureDefaultCache's resolution
+// for this turn's model.
+func TestTurnJob_StartChat_SendsResolvedWebSearchEnabled(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+
+	featureCache := NewFeatureDefaultCache()
+	featureCache.Replace(map[string]bool{env.model.ExternalModelID: true})
+
+	var sawWebSearchEnabled bool
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		sawWebSearchEnabled = req.WebSearchEnabled
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
+	}
+
+	turnJob, _ := newTestTurnJobWithCaches(env, provider, nil, featureCache, TurnJobConfig{})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !sawWebSearchEnabled {
+		t.Error("StartChat WebSearchEnabled = false, want true (following the model's synced default)")
+	}
+}
+
+// TestTurnJob_StartChat_ExplicitWebSearchOverrideWinsOverModelDefault
+// backs the other half of ADR-0005 D21: an explicit
+// OPENWEBUI_WEB_SEARCH_ENABLED=false overrides even a model whose own
+// synced default is true.
+func TestTurnJob_StartChat_ExplicitWebSearchOverrideWinsOverModelDefault(t *testing.T) {
+	env := newTurnTestEnv(t)
+	bridge := newTestBridge(env)
+	root := env.mustCreateRoot(t, "hello model")
+	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
+		t.Fatalf("EnqueueTurn: %v", err)
+	}
+	job := mustSoleJob(t, env)
+
+	featureCache := NewFeatureDefaultCache()
+	featureCache.Replace(map[string]bool{env.model.ExternalModelID: true})
+	override := false
+
+	var sawWebSearchEnabled, sawCall bool
+	provider := newFakeProvider(t)
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
+		sawWebSearchEnabled = req.WebSearchEnabled
+		sawCall = true
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
+	}
+
+	turnJob, _ := newTestTurnJobWithCaches(env, provider, nil, featureCache, TurnJobConfig{WebSearchOverride: &override})
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !sawCall {
+		t.Fatal("StartChat was never called")
+	}
+	if sawWebSearchEnabled {
+		t.Error("StartChat WebSearchEnabled = true, want false (explicit override must win over the model's own default)")
 	}
 }
 

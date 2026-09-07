@@ -69,15 +69,6 @@ type Config struct {
 	// production deployment never sets it: OPENWEBUI_BASE_URL is
 	// validated as an HTTPS origin before a Client is ever built.
 	AllowInsecureHTTPForTesting bool
-	// WebSearchEnabled sets features.web_search on every completions
-	// call this Client makes (Issue #72). false (the default) sends no
-	// "features" key at all, identical to this client's pre-#72 shape.
-	// Unlike ToolIDs (below Issue #75 moved it to a per-call
-	// openwebui.StartChatRequest/ContinueTurnRequest field, resolved per
-	// model), this stays a construction-time, deployment-wide setting —
-	// OPENWEBUI_WEB_SEARCH_ENABLED is one flag for the whole deployment,
-	// an explicit owner decision Issue #75 kept unchanged.
-	WebSearchEnabled bool
 }
 
 // Client calls the three endpoints docs/compat/openwebui-0.11.3.md
@@ -90,7 +81,6 @@ type Client struct {
 	maxResponseBytes int64
 	maxRequestBytes  int64
 	httpClient       *safehttp.Client
-	webSearchEnabled bool
 }
 
 // NewClient builds a Client against cfg. It errors if BaseURL is not a
@@ -123,7 +113,6 @@ func NewClient(cfg Config) (*Client, error) {
 			AllowInsecureHTTP: cfg.AllowInsecureHTTPForTesting,
 			AllowIPForTesting: cfg.AllowIPForTesting,
 		}),
-		webSearchEnabled: cfg.WebSearchEnabled,
 	}, nil
 }
 
@@ -291,7 +280,7 @@ type completionsResponseBody struct {
 // both funnel through this: the only difference between them is
 // parentID (nil for the former, the previous assistant message id for
 // the latter).
-func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string) (openwebui.TurnResult, error) {
+func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string, webSearchEnabled bool) (openwebui.TurnResult, error) {
 	wireMessages := make([]wireMessage, 0, len(messages)+1)
 	for _, m := range messages {
 		wireMessages = append(wireMessages, wireMessage{Role: m.Role, Content: m.Content})
@@ -315,7 +304,7 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 		Messages:        wireMessages,
 		BackgroundTasks: backgroundTasksBody{},
 	}
-	if c.webSearchEnabled {
+	if webSearchEnabled {
 		reqBody.Features = &featuresBody{WebSearch: true}
 	}
 	if len(toolIDs) > 0 {
@@ -386,12 +375,12 @@ func (c *Client) StartChat(ctx context.Context, req openwebui.StartChatRequest) 
 			return openwebui.TurnResult{}, err
 		}
 	}
-	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs)
+	return c.runTurn(ctx, remoteChatID, nil, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled)
 }
 
 // ContinueTurn implements openwebui.Provider.
 func (c *Client) ContinueTurn(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error) {
-	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs)
+	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled)
 }
 
 // --- GET /api/models ---

@@ -123,7 +123,14 @@ func eligibleRemoteModels(models []RemoteModel, logger *slog.Logger) []RemoteMod
 // as the previous successful round left it, the same fail-open-not-
 // fail-closed treatment #74 gave a startup-time outage). Pass nil to
 // skip tool resolution entirely.
-func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, toolCache *ToolConfigCache, logger *slog.Logger) (SyncResult, error) {
+//
+// featureCache, if non-nil, is refreshed the same way with every eligible
+// model's own "defaults to web_search" flag (Issue #75 AC#11, ADR-0005
+// D21) — but unconditionally once the registry write commits, never
+// skipped on a ListAccessibleTools failure the way toolCache's update
+// can be, since resolving it needs no second provider call at all. Pass
+// nil to skip feature-default resolution entirely.
+func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, toolCache *ToolConfigCache, featureCache *FeatureDefaultCache, logger *slog.Logger) (SyncResult, error) {
 	if !r.cfg.Enabled {
 		return SyncResult{}, ErrDisabled
 	}
@@ -205,6 +212,10 @@ func (r *Registry) SyncCatalog(ctx context.Context, provider CatalogProvider, to
 	})
 	if err != nil {
 		return SyncResult{}, err
+	}
+
+	if featureCache != nil {
+		featureCache.Replace(resolveFeatureDefaults(eligible))
 	}
 
 	if toolCache != nil {

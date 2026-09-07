@@ -66,11 +66,17 @@ type StartChatRequest struct {
 	// /api/models, filtered against what this credential may actually
 	// invoke), unlike Issue #72's original single deployment-wide
 	// OPENWEBUI_TOOL_IDS override, which Issue #75 retires. Nil/empty
-	// sends no "tool_ids" key at all. WebSearchEnabled has no per-call
-	// counterpart: OPENWEBUI_WEB_SEARCH_ENABLED stays one deployment-wide
-	// flag (owner decision, Issue #75), so the adapter still carries it
-	// as a construction-time Config field.
+	// sends no "tool_ids" key at all.
 	ToolIDs []string
+	// WebSearchEnabled sets features.web_search on this one call.
+	// TurnJob.resolveWebSearchEnabled computes it per model (ADR-0005
+	// D21, Issue #75 AC#11): an explicit OPENWEBUI_WEB_SEARCH_ENABLED
+	// overrides every model uniformly; left unset, it follows the
+	// selected model's own most recently synced defaultFeatureIds
+	// instead. Moved here from a Client-construction-time Config field
+	// (Issue #72's original shape) the same way ToolIDs already moved
+	// per-call under Issue #75.
+	WebSearchEnabled bool
 	// CorrelationID is a local request id for logging only. It is never
 	// sent to the provider and is not a provider idempotency key — Open
 	// WebUI has none (ADR-0005 D7).
@@ -102,6 +108,9 @@ type ContinueTurnRequest struct {
 	SentAt        time.Time
 	// ToolIDs mirrors StartChatRequest.ToolIDs — see its doc comment.
 	ToolIDs []string
+	// WebSearchEnabled mirrors StartChatRequest.WebSearchEnabled — see
+	// its doc comment.
+	WebSearchEnabled bool
 }
 
 // TurnResult is a turn's confirmed successful outcome. RemoteCurrentID,
