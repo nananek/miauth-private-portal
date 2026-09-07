@@ -200,6 +200,49 @@ Verification:
    `go run ./cmd/openwebuictl links` (see "Incident response" above) show
    whether the turn is still pending, failed, or landed `ambiguous`.
 
+### Model catalog: adding, removing, or losing access to a model
+
+Since Issue #75, every model the configured account can see through
+`GET /api/models` is synced into the registry automatically — there is no
+separate enable step per model, and no config key names any model but the
+one `OPENWEBUI_DEFAULT_MODEL_ID` fallback. `Registry.SyncCatalog` runs once
+at startup (bounded, logged and non-fatal on failure) and then every
+`OPENWEBUI_CATALOG_SYNC_INTERVAL` (default `10m`) as an ordinary
+`openwebui_catalog_sync` durable job.
+
+- **A new model appears in Open WebUI (a new connection, or a newly
+  granted workspace custom model).** It becomes a VirtualActor on this
+  service's next sync round — up to `OPENWEBUI_CATALOG_SYNC_INTERVAL` after
+  it becomes visible to the account, never immediately. There is no manual
+  "sync now" trigger as of this issue; to force it sooner, restart the
+  process (the startup sync runs immediately) or shorten
+  `OPENWEBUI_CATALOG_SYNC_INTERVAL` and restart. `go run ./cmd/jobsctl list
+  --type=openwebui_catalog_sync` shows whether a round has run recently and
+  whether it succeeded.
+- **A model's access is revoked, or it is removed from Open WebUI.** The
+  next successful sync round deactivates it: its VirtualActor stops
+  resolving (`POST /api/users/search` no longer returns it, and a new
+  `@mention` of its slug falls back to the default model per the decision
+  table in [configuration.md](configuration.md#outbound-turn-bridge-issue-53)),
+  but its row, actor, and every entry it already authored are left alone —
+  nothing is deleted. If it reappears later, it is reactivated under its
+  original local id, actor, and slug rather than being re-created.
+- **The sync round itself fails (the target unreachable, a malformed
+  response).** The registry is left exactly as the last successful round
+  produced it — a transient outage never deactivates every model. Check
+  `go run ./cmd/jobsctl list --type=openwebui_catalog_sync` for the job's
+  own failure/retry state, and the service log for `openwebui: catalog
+  sync job` errors.
+- **A model's display name changed in Open WebUI.** The next sync round
+  updates `openwebui_models.display_name`, but its handle slug never
+  changes once assigned (the roadmap's stable-actor-ID requirement applied
+  to the handle, not only the row id) — catalog sync never renames a
+  handle to match. `internal/openwebui.Registry.RenameModel` exists at the
+  use-case layer for this, but as of this issue no CLI or HTTP path calls
+  it yet; a handle mismatch after a display-name change is cosmetic only
+  (the model still resolves and still routes `@mention`s correctly under
+  its existing slug).
+
 ### Disabling
 
 - **Stop new replies only** (keep the VirtualActor and its history

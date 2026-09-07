@@ -130,8 +130,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_RESPONSE_BYTES` | no | `4194304` (4 MiB) | Issue #53's response-size bound. Larger than `RSS_MAX_RESPONSE_BYTES`/`IMAP_MAX_MESSAGE_BYTES` because `GET /api/v1/chats/{id}` returns the whole chat, not one message. Minimum `65536`. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_REQUEST_BYTES` | no | `1048576` (1 MiB) | Issue #53's outbound request-size bound; exceeding it is meant to fail a turn closed rather than silently truncate the conversation context sent to the model. Not yet consumed by anything. |
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
-| `OPENWEBUI_WEB_SEARCH_ENABLED` | no | `false` | Issue #72's opt-in: when `true`, every outbound completions call sets `features.web_search=true`. This is independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly). The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
-| `OPENWEBUI_TOOL_IDS` | no | `""` (unset) | Issue #72's opt-in, resolved at startup per Issue #74's three-state rule: **unset** defers to the configured model's own `toolIds` (`GET /api/models`); a **comma-separated list** (a builtin like `web_search`, or an MCP Tool Server's own `server:mcp:<id>`) overrides the model's default entirely; the literal single value `none` explicitly disables tools even though the model has its own `toolIds` configured. Whichever list results is then filtered fail-closed against `GET /api/v1/tools/` (ids this credential cannot actually invoke are dropped and logged, never sent as-is) before being sent verbatim as `tool_ids` on every outbound completions call. If either resolution call itself fails at startup (the target unreachable, say), `tool_ids`/`web_search` are both disabled for that run rather than blocking startup — see ADR-0005 D17. |
+| `OPENWEBUI_WEB_SEARCH_ENABLED` | no | `false` | Issue #72's opt-in: when `true`, every outbound completions call sets `features.web_search=true`. One deployment-wide flag for every model, deliberately kept that way by Issue #75 (ADR-0005 D20) rather than becoming per-model. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly). The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1058,14 +1057,32 @@ workspace, model, or reply-tree path is not eligible enqueues nothing at
 all, leaving the post itself unaffected either way (a local post's
 success never depends on the provider being reachable).
 
-**Branch rule (ADR-0005 D4).** A reply continues the thread's existing
-link only when its parent is exactly that link's current head (the
-`assistant_entry_id` of its latest non-superseded succeeded turn) *and*
-no turn already replies to that same parent. A thread root, a reply to
-an earlier node, a second reply to the same head, and a re-ask after a
-failed turn all start a **new** link (and therefore a new remote chat)
-instead — Open WebUI's own per-chat sibling/fork features are never
-used, so one local branch always maps to at most one remote chat.
+**Model selection (ADR-0005 D19, Issue #75).** Which model a post routes
+to is resolved from its body's `@mention`s before the branch rule below
+ever runs:
+
+| `@mention`s resolved to active models | routes to |
+| --- | --- |
+| none | the workspace's `OPENWEBUI_DEFAULT_MODEL_ID` model |
+| exactly one | that model |
+| an unknown slug, or an inactive model's slug | folds into "none" above — never an error |
+| two or more distinct models | `ambiguous_model_selection`: no job is enqueued; a failed link and turn are recorded for owner-facing visibility only (`go run ./cmd/openwebuictl links --state=failed`) |
+
+A bare `@slug` or a fully-qualified `@slug@<presentation host>` both match;
+a mention naming a *different* presentation host is never a candidate.
+
+**Branch rule (ADR-0005 D4, generalized by D19).** A reply continues the
+thread's existing link only when its parent is exactly that link's
+current head (the `assistant_entry_id` of its latest non-superseded
+succeeded turn), no turn already replies to that same parent, *and* the
+link is bound to the model selection above resolved. A thread root, a
+reply to an earlier node, a second reply to the same head, a re-ask after
+a failed turn, and — since Issue #75 — a reply whose resolved model
+differs from its parent link's own model, all start a **new** link (and
+therefore a new remote chat) instead — Open WebUI's own per-chat
+sibling/fork features are never used, so one local branch always maps to
+at most one remote chat, and one remote chat is always talking to exactly
+one model.
 
 **Path construction.** Before either enqueueing or actually sending a
 turn, the reply chain from the new message back to the thread root is
@@ -1087,30 +1104,40 @@ thread waits for the first to finish rather than racing it. A future
 multi-worker deployment would need to replace this with a database-backed
 lease — a separate issue, not built here.
 
-**Web search / tool use (Issues #72, #74).** `OPENWEBUI_WEB_SEARCH_ENABLED`
-and `OPENWEBUI_TOOL_IDS` set request-level `features`/`tool_ids` flags on
-every completions call this bridge sends; when either is configured, any
-resulting tool call (web search or otherwise, MCP-backed or built in)
-runs entirely inside the target Open WebUI instance's own request-
-handling loop, the same buffered, single-HTTP-call shape this bridge
-already relies on (ADR-0005 D3) — this codebase never executes a tool,
-runs an MCP server, or interprets a tool call itself. A tool's output
-(a web search result, an MCP response) reaches the model's final answer
-the same way any other upstream text does, so it is untrusted data by
-the same AGENTS.md rule that already applies to Open WebUI's own reply
-content, feeds, and mail.
+**Web search / tool use (Issues #72, #74, #75).** `OPENWEBUI_WEB_SEARCH_ENABLED`
+sets `features.web_search=true` on every completions call this bridge
+sends, for every model alike (one deployment-wide flag, Issue #75/ADR-0005
+D20). Each model's own `tool_ids` are resolved per model instead — there is
+no config key for them as of Issue #75: `Registry.SyncCatalog` reads each
+active model's own `GET /api/models` `info.meta.toolIds` on every catalog
+sync round (`OPENWEBUI_CATALOG_SYNC_INTERVAL` above), filters it fail-closed
+against `GET /api/v1/tools/` (an id this credential cannot actually invoke
+is dropped and logged, never sent as-is — the same rule Issue #74
+originally applied to one model, now applied to every one), and caches the
+result in memory (`internal/openwebui.ToolConfigCache`) for `TurnJob` to
+read per turn by the turn's own model. A model discovered since the last
+sync round, or resolved before any round has ever succeeded, sends no
+`tool_ids` at all — the same safe default a stale or inaccessible id
+already fell back to. Whichever flags end up set, any resulting tool call
+(web search or otherwise, MCP-backed or built in) runs entirely inside the
+target Open WebUI instance's own request-handling loop, the same buffered,
+single-HTTP-call shape this bridge already relies on (ADR-0005 D3) — this
+codebase never executes a tool, runs an MCP server, or interprets a tool
+call itself. A tool's output (a web search result, an MCP response) reaches
+the model's final answer the same way any other upstream text does, so it
+is untrusted data by the same AGENTS.md rule that already applies to Open
+WebUI's own reply content, feeds, and mail.
 
 Making that buffered call actually complete additionally requires
 `"params": {"function_calling": "legacy"}` on the same request (sent
-automatically whenever `features` or `tool_ids` is set, never otherwise):
-Open WebUI's non-streaming response handler never processes a native
-`tool_calls` response, so without this flag a turn whose model decides to
-call a tool wedges the assistant message at `done:false` forever, and
-`features.web_search` alone silently does nothing at all (Issue #74; see
-ADR-0005 D17 for the mechanism and `docs/compat/openwebui-0.11.3.md`'s
-Phase 0 record for the real-instance evidence). `OPENWEBUI_TOOL_IDS`'s
-resolved list is also filtered fail-closed at startup against what this
-credential can actually invoke — see the key's own row above.
+automatically whenever `features` or `tool_ids` is set on that call, never
+otherwise): Open WebUI's non-streaming response handler never processes a
+native `tool_calls` response, so without this flag a turn whose model
+decides to call a tool wedges the assistant message at `done:false`
+forever, and `features.web_search` alone silently does nothing at all
+(Issue #74; see ADR-0005 D17 for the mechanism and
+`docs/compat/openwebui-0.11.3.md`'s Phase 0 record for the real-instance
+evidence).
 
 **Outcome and retry.** Every provider call this bridge makes is
 classified into a `failure_category` (never provider error text — the
