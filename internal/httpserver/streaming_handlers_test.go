@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,29 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 )
 
+// syncBuffer is a concurrency-safe io.Writer/String() pair for capturing
+// the Server-under-test's log output (see newStreamingTestServer): the
+// real Server runs its logger calls on background connection goroutines
+// while a test's own goroutine reads the buffer, so a plain bytes.Buffer
+// would race under `go test -race` (mirrors internal/integration's
+// harness_test.go helper of the same name/shape for the same reason).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // newStreamingTestServer starts a real Server through Run on an
 // ephemeral TCP listener — not httptest.NewRecorder() (its
 // ResponseWriter does not implement http.Hijacker at all) and not
@@ -28,11 +53,11 @@ import (
 // handling exists to get right). It mirrors run_test.go's mustListen /
 // waitForServing pattern.
 //
-// It returns the server's address and a valid API token with the given
-// scope, issued through a throwaway Server sharing the same
+// It returns the server's address, a valid API token with the given
+// scope (issued through a throwaway Server sharing the same
 // miauth.Service/database Run's internal Server will authenticate
-// against.
-func newStreamingTestServer(t *testing.T, opts Options, tokenScope string) (addr, token string) {
+// against), and the Server-under-test's own log output.
+func newStreamingTestServer(t *testing.T, opts Options, tokenScope string) (addr, token string, logs *syncBuffer) {
 	t.Helper()
 	if tokenScope == "" {
 		tokenScope = miauth.ScopeReadAccount
@@ -52,8 +77,9 @@ func newStreamingTestServer(t *testing.T, opts Options, tokenScope string) (addr
 		t.Fatalf("ensure reserved actors: %v", err)
 	}
 
+	logs = &syncBuffer{}
 	miauthSvc := miauth.NewService(db, db.Repos, defaultMiAuthTestConfig())
-	logger := logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"})
+	logger := logging.New(logs, logging.Config{Format: "json", Level: "info"})
 	reg := health.NewRegistry()
 
 	setupSrv := NewServer(logger, reg, Options{MiAuthService: miauthSvc})
@@ -93,7 +119,7 @@ func newStreamingTestServer(t *testing.T, opts Options, tokenScope string) (addr
 	})
 
 	waitForServing(t, addr)
-	return addr, token
+	return addr, token, logs
 }
 
 func dialStreaming(url string) (*websocket.Conn, *http.Response, error) {
@@ -113,7 +139,7 @@ func isTimeoutErr(err error) bool {
 }
 
 func TestHandleStreaming_ValidTokenUpgradesAndAcksConnect(t *testing.T) {
-	addr, token := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+	addr, token, _ := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
 
 	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
 	if err != nil {
@@ -147,7 +173,7 @@ func TestHandleStreaming_ValidTokenUpgradesAndAcksConnect(t *testing.T) {
 }
 
 func TestHandleStreaming_RejectsMissingOrInvalidTokenBeforeUpgrade(t *testing.T) {
-	addr, _ := newStreamingTestServer(t, Options{}, "")
+	addr, _, _ := newStreamingTestServer(t, Options{}, "")
 
 	cases := []struct {
 		name string
@@ -172,7 +198,7 @@ func TestHandleStreaming_RejectsMissingOrInvalidTokenBeforeUpgrade(t *testing.T)
 
 func TestHandleStreaming_RejectsTokenMissingRequiredScope(t *testing.T) {
 	// write:notes only, deliberately without read:account.
-	addr, token := newStreamingTestServer(t, Options{}, miauth.ScopeWriteNotes)
+	addr, token, _ := newStreamingTestServer(t, Options{}, miauth.ScopeWriteNotes)
 
 	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
 	if err == nil {
@@ -186,7 +212,7 @@ func TestHandleStreaming_RejectsTokenMissingRequiredScope(t *testing.T) {
 
 func TestHandleStreaming_SendsPeriodicPingAndSurvivesConfiguredWriteTimeout(t *testing.T) {
 	const pingInterval = 200 * time.Millisecond
-	addr, token := newStreamingTestServer(t, Options{
+	addr, token, _ := newStreamingTestServer(t, Options{
 		StreamPingInterval: pingInterval,
 		// Deliberately shorter than this test's runtime: proves
 		// handleStreaming's own deadline management (streaming_handlers.go)
@@ -243,7 +269,7 @@ func TestHandleStreaming_SendsPeriodicPingAndSurvivesConfiguredWriteTimeout(t *t
 }
 
 func TestHandleStreaming_SubscriptionMessagesProduceNoReply(t *testing.T) {
-	addr, token := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+	addr, token, _ := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
 	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
 	if err != nil {
 		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
@@ -270,7 +296,7 @@ func TestHandleStreaming_SubscriptionMessagesProduceNoReply(t *testing.T) {
 }
 
 func TestHandleStreaming_UnknownMessageTypeIsIgnoredNotErrored(t *testing.T) {
-	addr, token := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+	addr, token, _ := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
 	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
 	if err != nil {
 		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
@@ -303,7 +329,7 @@ func TestHandleStreaming_UnknownMessageTypeIsIgnoredNotErrored(t *testing.T) {
 }
 
 func TestHandleStreaming_RejectsConnectionsBeyondConcurrencyLimit(t *testing.T) {
-	addr, token := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+	addr, token, logs := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
 
 	var conns []*websocket.Conn
 	defer func() {
@@ -327,10 +353,16 @@ func TestHandleStreaming_RejectsConnectionsBeyondConcurrencyLimit(t *testing.T) 
 	if respStatus(resp) != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", respStatus(resp), http.StatusServiceUnavailable)
 	}
+
+	// Issue #95 PR1 observability: a rejection due to the concurrency
+	// limit must be logged so operators can correlate it with 503s.
+	if !strings.Contains(logs.String(), "streaming connection rejected: concurrency limit reached") {
+		t.Errorf("expected a concurrency-limit warning log, got: %s", logs.String())
+	}
 }
 
 func TestHandleStreaming_ClosingConnectionsReleasesGoroutinesAndSemaphoreSlots(t *testing.T) {
-	addr, token := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+	addr, token, _ := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
 
 	before := runtime.NumGoroutine()
 
@@ -368,5 +400,67 @@ func TestHandleStreaming_ClosingConnectionsReleasesGoroutinesAndSemaphoreSlots(t
 			t.Fatalf("dial after cleanup %d: %v (status=%d)", i, err, respStatus(resp))
 		}
 		conns = append(conns, conn)
+	}
+}
+
+// waitForLogLine polls logs until it contains want or the deadline
+// passes, returning the final buffer contents either way — a plain
+// assertion right after closing/dialing would race the server's
+// background connection goroutine, which logs asynchronously.
+func waitForLogLine(t *testing.T, logs *syncBuffer, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if s := logs.String(); strings.Contains(s, want) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			return logs.String()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestHandleStreaming_LogsAbnormalDisconnect(t *testing.T) {
+	addr, token, logs := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+
+	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
+	if err != nil {
+		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
+	}
+	// A bare TCP close, not a WebSocket close handshake — this is the
+	// zombie-connection shape the pong-timeout hypothesis
+	// (maxConcurrentStreamConnections' doc comment) cares about: the
+	// server never sees a clean disconnect signal from the peer.
+	conn.Close()
+
+	got := waitForLogLine(t, logs, "streaming connection ended abnormally")
+	if !strings.Contains(got, "streaming connection ended abnormally") {
+		t.Errorf("expected an abnormal-disconnect warning log, got: %s", got)
+	}
+}
+
+func TestHandleStreaming_DoesNotLogCleanClientClose(t *testing.T) {
+	addr, token, logs := newStreamingTestServer(t, Options{StreamPingInterval: time.Hour}, "")
+
+	conn, resp, err := dialStreaming("ws://" + addr + "/streaming?i=" + token)
+	if err != nil {
+		t.Fatalf("dial: %v (status=%d)", err, respStatus(resp))
+	}
+	if err := conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(streamWriteWait)); err != nil {
+		t.Fatalf("write close: %v", err)
+	}
+	conn.Close()
+
+	// Give the server ample time to process the close and (if it were
+	// buggy) log it, then assert it did not: a routine client-initiated
+	// close must not add noise to a log operators rely on for spotting
+	// abnormal disconnects.
+	time.Sleep(300 * time.Millisecond)
+	if got := logs.String(); strings.Contains(got, "streaming connection ended abnormally") ||
+		strings.Contains(got, "streaming connection timed out") {
+		t.Errorf("expected no disconnect warning for a clean close, got: %s", got)
 	}
 }

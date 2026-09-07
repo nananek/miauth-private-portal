@@ -3,6 +3,8 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -65,7 +67,16 @@ const streamWriteWait = 10 * time.Second
 // to satisfy AGENTS.md's general concurrency-bounding rule against a
 // buggy or misbehaving client opening connections in a loop, not because
 // real usage is expected to approach it.
-const maxConcurrentStreamConnections = 8
+//
+// Raised from 8 to 32 (Issue #95 PR1): the leading hypothesis for
+// observed 503s with a single real client is that Aria's reconnect
+// interval (5s after a failed connection) outpaces this server's dead-
+// connection detection (pongWait = pingInterval * 2, default 60s), so a
+// flaky network period can pile up several zombie connections from one
+// device before the oldest ones are noticed as dead. 32 gives that a lot
+// more headroom while still bounding a misbehaving client's connection
+// count, per the same rule this const exists to satisfy.
+const maxConcurrentStreamConnections = 32
 
 // streamReadLimit bounds a single incoming WebSocket message. Every
 // message this handler understands (connect/disconnect/subNote/
@@ -105,6 +116,10 @@ func (s *Server) handleStreaming(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.streamSem <- struct{}{}:
 	default:
+		s.logger.Warn("streaming connection rejected: concurrency limit reached",
+			"request_id", logging.RequestIDFromContext(r.Context()),
+			"limit", maxConcurrentStreamConnections,
+		)
 		http.Error(w, "too many concurrent streaming connections", http.StatusServiceUnavailable)
 		return
 	}
@@ -127,7 +142,7 @@ func (s *Server) handleStreaming(w http.ResponseWriter, r *http.Request) {
 		setter.SetHijackedStatus(http.StatusSwitchingProtocols)
 	}
 
-	serveStreamConn(conn, s.streamPingInterval)
+	serveStreamConn(conn, s.streamPingInterval, s.logger, logging.RequestIDFromContext(r.Context()))
 }
 
 // streamEnvelope is the generic Misskey streaming wire envelope every
@@ -250,9 +265,15 @@ func nonEmptyStringPtr(s string) *string {
 // block/tick forever, leaking one goroutine pair and one
 // maxConcurrentStreamConnections slot per such connection (AGENTS.md:
 // "Bound request sizes, timeouts, concurrency").
-func serveStreamConn(conn *websocket.Conn, pingInterval time.Duration) {
+//
+// logger/requestID are used only to record how the connection ended
+// (see logStreamDisconnect) — Issue #95 PR1 observability for the
+// pong-timeout zombie-connection hypothesis (maxConcurrentStreamConnections'
+// doc comment).
+func serveStreamConn(conn *websocket.Conn, pingInterval time.Duration, logger *slog.Logger, requestID string) {
 	pongWait := pingInterval * streamPongGraceMultiplier
 	conn.SetReadLimit(streamReadLimit)
+	connectedAt := time.Now()
 
 	var writeMu sync.Mutex // gorilla/websocket: at most one concurrent writer per connection
 	writePing := func() error {
@@ -293,18 +314,48 @@ func serveStreamConn(conn *websocket.Conn, pingInterval time.Duration) {
 		}
 	}()
 
+	var endErr error
+	defer func() { logStreamDisconnect(logger, requestID, endErr, time.Since(connectedAt)) }()
+
 	state := &streamConnState{channels: map[string]string{}, notes: map[string]struct{}{}}
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			endErr = err
 			return // client disconnect, read-deadline expiry, or protocol error
 		}
 		reply, ok := state.handleMessage(raw)
 		if !ok {
 			continue
 		}
-		if writeJSON(reply) != nil {
+		if err := writeJSON(reply); err != nil {
+			endErr = err
 			return
 		}
 	}
+}
+
+// logStreamDisconnect records why one /streaming connection ended, for
+// Issue #95 PR1's zombie-connection observability goal
+// (maxConcurrentStreamConnections' doc comment). A clean client-initiated
+// close (WebSocket close code 1000/1001) is expected, routine behavior —
+// not logged, to avoid drowning genuinely interesting lines in noise
+// every time Aria backgrounds or a tab closes. Anything else, including a
+// read-deadline timeout (the leading zombie-connection hypothesis: a
+// missed pong), is logged at Warn so operators can correlate this with
+// 503s from the concurrency limit above.
+func logStreamDisconnect(logger *slog.Logger, requestID string, err error, connected time.Duration) {
+	if err == nil || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		return
+	}
+	msg := "streaming connection ended abnormally"
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		msg = "streaming connection timed out waiting for a pong"
+	}
+	logger.Warn(msg,
+		"request_id", requestID,
+		"error", err.Error(),
+		"connected_ms", connected.Milliseconds(),
+	)
 }
