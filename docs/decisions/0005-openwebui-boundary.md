@@ -774,19 +774,26 @@ model display name. `sources` is captured from the completions response
 body itself, at the point `runTurn` decodes it — not re-derived from a later
 `GET /api/v1/chats/{id}` call: whether the chat-managed GET path also
 carries `sources` for a completed turn is unverified, so the adapter must
-not depend on being able to retrieve it a second time. `sources` is decoded
+not depend on being able to retrieve it a second time. **Amended by D28
+(Issue #127): the GET path never carries a field literally named
+`sources`, but the same assistant message's own `output[]` carries an
+equivalent trace this adapter now normalizes as a fallback — see D28 for
+what changed and why "must not depend on" no longer holds unconditionally.**
+`sources` is decoded
 as `json.RawMessage` at the top level and only then parsed into typed
 records (`decodeSources`); a shape this adapter cannot parse — schema
 drift, or a provider bug — yields no sources for that reply rather than
 failing the whole completions decode, since a turn whose actual content
 (`choices`) decoded fine must still succeed: citations are enrichment,
-never load-bearing for turn success. One consequence
-(documented on `TurnOutcome.Title`'s own field, not repeated here) is that a
-turn recovered through the uncertain-outcome lookup-and-adopt path (Issue
-#53's `handleReadyRetry`) never gets sources attached, even if the original
-completions call that produced it would have — a possibly-missing footnote
-list on an already-rare recovery path, not a correctness or security
-concern.
+never load-bearing for turn success. One consequence, as originally
+written here, was that a turn recovered through the uncertain-outcome
+lookup-and-adopt path (Issue #53's `handleReadyRetry`) never got sources
+attached, even if the original completions call that produced it would
+have — a possibly-missing footnote list on an already-rare recovery path,
+not a correctness or security concern. **D28 fixes this as a side effect
+of giving `TurnOutcome` its own `Sources` field**: `handleReadyRetry`'s
+adopted `TurnResult` now carries whatever `output[]` had, the same as any
+other confirmation path.
 
 The `[n]` citation markers Open WebUI writes into the model's own answer
 text are assumed to correspond to `sources[]` in array order — the only
@@ -1383,7 +1390,85 @@ at whether `GET /api/v1/chats/{id}` might carry `sources` for a done
 message (itself still an open 要実機確認, section (i)) — **this needs an
 owner decision (accept the regression, or block Issue #123 on
 re-verifying the GET body / finding another source of `sources[]` for
-native mode) before this ships.**
+native mode) before this ships.** (Resolved by D28, Issue #127: the GET
+body carries no `sources` field, but the same assistant message's
+`output[]` carries an equivalent tool-call trace this adapter now
+normalizes instead — the regression was not accepted, and Issue #123 was
+not blocked on it either.)
+
+### D28. A native turn's citations are recovered from `GET /api/v1/chats/{id}`'s own `output[]` trace, not `sources[]`
+
+**Decided (Issue #127, 2026-09-08), resolving D27's own "self-review gap"
+and amending D22's "not re-derived from a later GET" premise.** Issue
+#127's own real-instance check (deployed revision `e5039ff`, PR #125's
+merge commit — the same build D27 shipped) sent the same `chat_id` +
+`stream:true` + `tool_ids` + `features.web_search` shape `runTurn`'s
+native branch sends, then inspected
+the completed turn's `GET /api/v1/chats/{id}` body. The assistant message
+carries no field named `sources`, `citation`, or `tool_result` anywhere —
+D22's "unverified" premise resolves to **no**, not to "unconfirmed" — but it
+does carry a top-level `output[]` array: the OpenAI Responses API's own
+item-trace shape (`reasoning`, `function_call`, `function_call_output`,
+`message` items, in that order for the one round captured), with
+`function_call`'s `call_id` matching `function_call_output`'s own `call_id`
+for the same tool round. A `function_call` item carries `name` and
+`arguments` — the same two facts a legacy-path tool source's `DisplayName`/
+`Arguments` already carry (D22) — and a `function_call_output` item carries
+the tool's raw result under its own `output` member.
+
+**The citation data was never lost — D27's "self-review gap" is not a data
+loss, only a wrong read location.** `internal/provider/openwebui/client.go`
+gains `wireOutputItem`/`decodeOutputItems`/`functionCallArguments`/
+`normalizeOutputSources`, decoding `chatMessageBody.Output` the same
+defense-in-depth way `wireSource` already decodes `sources[]`: only `type`,
+`name`, `call_id`, and `arguments` are ever typed anywhere in this path.
+`function_call_output`'s own `output` member — the tool's raw, untrusted
+result text, `document[]`'s exact counterpart — and a `reasoning` item's
+`encrypted_content` have no field anywhere in this decode path at all, the
+same "no field for it, so encoding/json's unknown-field-skipping enforces
+D22's never-decode rule for free" technique `wireSource` already relies on.
+A `function_call` becomes a `Source` only once a `function_call_output`
+sharing its `call_id` is also present — a tool round that actually
+completed, not one still in flight when the turn otherwise finished —
+mirroring the completion signal `tool_result: true` already gives a
+legacy-path `sources[]` entry.
+
+**`openwebui.TurnOutcome` gains its own `Sources []Source` field**
+(`internal/openwebui/provider.go`), populated by `LookupTurnOutcome` from
+`normalizeOutputSources`. `internal/provider/openwebui/client.go`'s
+`runTurn` now falls back to it whenever the completions-response-derived
+`sources[]` came back empty — unconditionally true for every native turn
+(D27: its POST body is always empty), and harmlessly true for a legacy-path
+turn that genuinely called nothing. Because `awaitTurnDone`'s poll loop is
+already every native turn's *sole* confirmation step (D27), this single
+change is what actually restores citations for the common case D27's gap
+named — not merely `handleReadyRetry`'s rare uncertain-outcome retry, which
+gets the same fix as a side effect of `TurnOutcome` gaining the field at
+all (`internal/openwebui/turnjob.go`).
+
+**Two assumptions ship UNVERIFIED, on the same "documented assumption,
+owner directed to proceed without further real-instance access" basis
+D22/D24/D27 already established:**
+
+- **A native turn's web-search round's own shape in `output[]` is
+  unconfirmed.** Issue #127's capture exercised a tool-call round only —
+  no web search ran in it. `normalizeOutputSources` does not attempt to
+  recognize a web-search item at all: an `output[]` entry whose `type` is
+  neither `function_call` nor `function_call_output` is silently skipped,
+  exactly like an unrecognized `sources[]` entry already is. A native
+  turn's web-search citations remain lost until a real instance confirms
+  the shape and a follow-up extends this decode.
+- **Multi-round pairing is unexercised.** Issue #127's capture observed
+  exactly one `function_call`/`function_call_output` pair.
+  `normalizeOutputSources` pairs by `call_id` rather than assuming array
+  position specifically so it generalizes to several pairs, but this was
+  never run against a real multi-round native turn.
+
+Neither gap is a data-leak or turn-failure risk, the same reasoning D22's
+own unverified-assumption note already gives: `output[]`'s untrusted
+members are never decoded regardless, and a sources-normalization anomaly
+here never fails the turn (`runTurn`'s success path does not depend on
+`Sources` decoding to anything in particular).
 
 ## Consequences
 

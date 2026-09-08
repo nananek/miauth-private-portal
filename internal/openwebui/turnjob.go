@@ -476,11 +476,12 @@ func (j *TurnJob) handleReadyRetry(
 		return j.complete(ctx, turn, link, model, entry, TurnResult{
 			Content: outcome.Content, RemoteCurrentID: outcome.RemoteCurrentID,
 			PromptTokens: outcome.PromptTokens, CompletionTokens: outcome.CompletionTokens,
-			// Title, but never Sources: a turn recovered through this
-			// lookup-only path never gets sources attached — see
-			// TurnOutcome.Sources's absence, documented on TurnOutcome
-			// itself, for why.
-			Title: outcome.Title,
+			// Title and Sources both come straight off outcome: ADR-0005
+			// D28 (Issue #127) gave TurnOutcome its own Sources field, so
+			// a turn recovered through this lookup-only path gets
+			// citations attached too, not just the rare-path gap D22
+			// originally documented here.
+			Title: outcome.Title, Sources: outcome.Sources,
 		}, true)
 	case outcome.HasError || !outcome.Found || (outcome.Done && outcome.Content == ""):
 		return j.resendContinue(ctx, job, turn, link, model, entry, path)

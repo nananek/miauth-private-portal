@@ -1130,6 +1130,58 @@ func TestTurnJob_ContinueRetry_MissingTurnChatIDFallsBackToLink(t *testing.T) {
 	}
 }
 
+// TestTurnJob_ReadyRetry_AdoptedOutcomePersistsSources backs ADR-0005
+// D28: a turn recovered through handleReadyRetry's lookup-and-adopt path
+// (Issue #53's uncertain-outcome retry) now gets whatever Sources
+// LookupTurnOutcome reported attached too, not just Content/Title — the
+// gap D22 originally documented on TurnOutcome, closed by D28 giving it
+// its own Sources field (populated, in a real adapter, from
+// internal/provider/openwebui/client.go's normalizeOutputSources).
+func TestTurnJob_ReadyRetry_AdoptedOutcomePersistsSources(t *testing.T) {
+	env := newTurnTestEnv(t)
+	m0 := env.mustCreateRoot(t, "m0")
+	link := env.mustReadyLink(t, m0.ThreadID)
+
+	turn := domain.OpenWebUITurnLink{
+		ID: domain.NewID(), LinkID: link.ID, BranchID: link.BranchID,
+		LocalMessageID: m0.ID,
+		RequestID:      domain.NewID(), Revision: 1, Attempt: 1, Status: domain.TurnPending,
+		RemoteChatID:    link.RemoteChatID,
+		RemoteMessageID: strPtr("remote-user-1"), RemoteAssistantMessageID: strPtr("remote-assistant-1"),
+		CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now(),
+	}
+	if err := env.db.OpenWebUITurnLinks.Create(t.Context(), turn); err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	payload, _ := json.Marshal(turnJobPayload{TurnID: turn.ID, LinkID: link.ID, Revision: 1, ThreadID: m0.ThreadID})
+	job := domain.Job{ID: domain.NewID(), JobType: JobType, Payload: string(payload), PayloadVersion: 1, State: domain.JobPending, Attempt: 1, SourceEntryID: &m0.ID, NextRunAt: env.clock.Now(), CreatedAt: env.clock.Now(), UpdatedAt: env.clock.Now()}
+	if err := env.db.Jobs.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	provider := newFakeProvider(t)
+	provider.lookupOutcome = func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error) {
+		return TurnOutcome{
+			Found: true, Done: true, Content: "recovered",
+			RemoteCurrentID: strPtr("remote-assistant-1"),
+			Sources:         []Source{{Kind: SourceKindTool, DisplayName: "get_weather"}},
+		}, nil
+	}
+	turnJob, _ := newTestTurnJob(env, provider, TurnJobConfig{})
+
+	if err := turnJob.Handle(t.Context(), job); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	got, err := env.db.OpenWebUITurnLinks.Get(t.Context(), turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sources) != 1 || got.Sources[0].DisplayName != "get_weather" {
+		t.Errorf("turn.Sources = %+v, want one get_weather source recovered via the lookup-and-adopt path", got.Sources)
+	}
+}
+
 func TestTurnJob_ContinueTurn_AuthFailedNeverRetries(t *testing.T) {
 	env := newTurnTestEnv(t)
 	m0 := env.mustCreateRoot(t, "m0")
