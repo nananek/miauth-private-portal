@@ -101,14 +101,7 @@ func run(args []string, stdout io.Writer) error {
 	// never touch.
 	var provider openwebui.Provider
 	if sub == "confirm" {
-		client, err := owuiprovider.NewClient(owuiprovider.Config{
-			BaseURL:          cfg.OpenWebUI.BaseURL,
-			AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
-			APIKey:           cfg.OpenWebUI.APIKey,
-			Timeout:          cfg.OpenWebUI.Timeout,
-			MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
-			MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-		})
+		client, err := owuiprovider.NewClient(owuiprovider.ConfigFrom(cfg.OpenWebUI))
 		if err != nil {
 			return fmt.Errorf("build openwebui provider client: %w", err)
 		}

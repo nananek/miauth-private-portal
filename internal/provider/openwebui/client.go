@@ -24,6 +24,7 @@ import (
 
 	sse "github.com/tmaxmax/go-sse"
 
+	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
 )
@@ -40,10 +41,11 @@ var _ openwebui.Provider = (*Client)(nil)
 var remoteIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 // Config builds a Client. BaseURL, AllowedOrigins, and APIKey come from
-// internal/config.OpenWebUIConfig's already-validated fields; cmd/server
-// is the only production caller and passes them through unmodified
-// (ADR-0005 D10: this adapter reads the key from a typed Config, never
-// os.Getenv).
+// internal/config.OpenWebUIConfig's already-validated fields; every
+// production caller builds one through ConfigFrom rather than listing
+// the fields inline (Issue #116: three call sites once did that
+// separately, and two of them silently dropped ToolTurnTimeout) (ADR-0005
+// D10: this adapter reads the key from a typed Config, never os.Getenv).
 type Config struct {
 	// BaseURL is the workspace's configured origin — no path beyond the
 	// endpoint paths this client appends.
@@ -94,11 +96,44 @@ type Client struct {
 	httpClient       *safehttp.Client
 }
 
+// ConfigFrom builds a Config from internal/config.OpenWebUIConfig's
+// already-validated fields — the one place that mapping happens, so
+// every production caller (cmd/server's catalog and turn clients,
+// cmd/openwebuictl's confirm subcommand) stays in sync by construction.
+// Issue #116: before this existed, each call site listed the fields
+// inline, and two of the three silently omitted ToolTurnTimeout, leaving
+// it at its zero value — which NewClient now rejects outright rather
+// than building a Client that fails every StreamTurn instantly.
+func ConfigFrom(oc config.OpenWebUIConfig) Config {
+	return Config{
+		BaseURL:          oc.BaseURL,
+		AllowedOrigins:   oc.AllowedOrigins,
+		APIKey:           oc.APIKey,
+		Timeout:          oc.Timeout,
+		ToolTurnTimeout:  oc.ToolTurnTimeout,
+		MaxResponseBytes: oc.MaxResponseBytes,
+		MaxRequestBytes:  oc.MaxRequestBytes,
+	}
+}
+
 // NewClient builds a Client against cfg. It errors if BaseURL is not a
 // member of AllowedOrigins: every request this client ever makes starts
 // from BaseURL, so that membership check is the one place the whole
-// allowlist policy is enforced for this client's lifetime.
+// allowlist policy is enforced for this client's lifetime. It also
+// errors if Timeout or ToolTurnTimeout is not positive (Issue #116): a
+// zero-value context.WithTimeout deadline expires the instant it is
+// created, so a Client built with either left unset would fail every
+// call it makes — StreamTurn's within microseconds, never reaching the
+// network — instead of failing loudly here, at startup, where the cause
+// is obvious.
 func NewClient(cfg Config) (*Client, error) {
+	if cfg.Timeout <= 0 {
+		return nil, fmt.Errorf("openwebui: Timeout must be positive, got %s", cfg.Timeout)
+	}
+	if cfg.ToolTurnTimeout <= 0 {
+		return nil, fmt.Errorf("openwebui: ToolTurnTimeout must be positive, got %s", cfg.ToolTurnTimeout)
+	}
+
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
 	allowed := false
 	for _, origin := range cfg.AllowedOrigins {
