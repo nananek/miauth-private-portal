@@ -480,6 +480,16 @@ the "unset" state would relitigate that decision, not merely extend it —
 so even a future tri-state upgrade should not wire `defaultFeatureIds`
 into this key without first revisiting Issue #72's own reasoning.
 
+**Amended by D27 (Issue #123):** `"params": {"function_calling":
+"legacy"}` is no longer sent for a tool-carrying turn at all — D27 replaces
+it with `stream:true` and no `params` key, letting Open WebUI's native loop
+run instead of forcing legacy pre-resolution. `runTurn` no longer has any
+caller that sets `params`, so `completionsRequestBody.Params`/`paramsBody`
+are removed from the adapter. This paragraph's account of *why* legacy mode
+was chosen over native under `stream:false` remains accurate history; it
+no longer describes this adapter's present behavior, since no code path
+sends a `stream:false` tool-carrying request anymore.
+
 ### D18. Catalog sync replaces the single seeded model with every model the account can see
 
 The roadmap's OWUI-P section originally said the MVP "publishes only the

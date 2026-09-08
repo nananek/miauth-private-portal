@@ -413,24 +413,24 @@ func TestClient_ContinueTurn_NeitherFeatureNorToolIDs_OmitsParams(t *testing.T) 
 	}
 }
 
-// TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling
-// and TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling
-// back Issue #74's fix: whenever either opt-in flag is in use, the
-// completions request also carries params.function_calling="legacy" -
-// Open WebUI's non_streaming_chat_response_handler never processes a
-// native tool_calls response (ADR-0005's tool/web-search addendum), so
-// this buffered stream:false adapter would otherwise hang the assistant
-// message at done:false forever whenever the model decided to call a
-// tool (Issue #74's exact report).
-func TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling(t *testing.T) {
+// TestClient_ContinueTurn_ToolIDsConfigured_SendsStreamTrueNoParams and
+// TestClient_ContinueTurn_WebSearchConfigured_SendsStreamTrueNoParams back
+// ADR-0005 D27 (Issue #123): whenever either opt-in flag is in use, the
+// completions request is sent with stream:true and no params key at all,
+// so Open WebUI's native tool-calling loop actually runs — replacing
+// Issue #74's params.function_calling="legacy" fix (D17), which D27
+// retires entirely (its buffered stream:false shape is what Issue #93/
+// #120 showed cannot itself run a tool over HTTP without D24's separate,
+// now-also-retired stateless mode).
+func TestClient_ContinueTurn_ToolIDsConfigured_SendsStreamTrueNoParams(t *testing.T) {
 	const assistantID = "assistant-1"
 	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
 
 	var sawBody struct {
-		Params *struct {
-			FunctionCalling string `json:"function_calling"`
-		} `json:"params"`
+		Stream bool            `json:"stream"`
+		Params json.RawMessage `json:"params"`
 	}
+	sawKeys := map[string]json.RawMessage{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -438,7 +438,10 @@ func TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling(t *tes
 			if err := json.Unmarshal(body, &sawBody); err != nil {
 				t.Fatalf("decode completions request: %v", err)
 			}
-			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+			if err := json.Unmarshal(body, &sawKeys); err != nil {
+				t.Fatalf("decode completions request keys: %v", err)
+			}
+			writeJSON(t, w, []byte(`null`), http.StatusOK)
 		case http.MethodGet:
 			writeJSON(t, w, getResp, http.StatusOK)
 		}
@@ -452,20 +455,22 @@ func TestClient_ContinueTurn_ToolIDsConfigured_SendsLegacyFunctionCalling(t *tes
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
-	if sawBody.Params == nil || sawBody.Params.FunctionCalling != "legacy" {
-		t.Errorf("completions request params = %+v, want {function_calling: legacy}", sawBody.Params)
+	if !sawBody.Stream {
+		t.Error("completions request stream = false, want true for a tool-carrying turn")
+	}
+	if _, ok := sawKeys["params"]; ok {
+		t.Errorf(`completions request has a "params" key = %s, want it entirely absent`, sawBody.Params)
 	}
 }
 
-func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *testing.T) {
+func TestClient_ContinueTurn_WebSearchConfigured_SendsStreamTrueNoParams(t *testing.T) {
 	const assistantID = "assistant-1"
 	getResp := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "ok"}, assistantID)
 
 	var sawBody struct {
-		Params *struct {
-			FunctionCalling string `json:"function_calling"`
-		} `json:"params"`
+		Stream bool `json:"stream"`
 	}
+	sawKeys := map[string]json.RawMessage{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -473,7 +478,10 @@ func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *t
 			if err := json.Unmarshal(body, &sawBody); err != nil {
 				t.Fatalf("decode completions request: %v", err)
 			}
-			writeJSON(t, w, []byte(`{}`), http.StatusOK)
+			if err := json.Unmarshal(body, &sawKeys); err != nil {
+				t.Fatalf("decode completions request keys: %v", err)
+			}
+			writeJSON(t, w, []byte(`null`), http.StatusOK)
 		case http.MethodGet:
 			writeJSON(t, w, getResp, http.StatusOK)
 		}
@@ -487,8 +495,121 @@ func TestClient_ContinueTurn_WebSearchConfigured_SendsLegacyFunctionCalling(t *t
 	if _, err := client.ContinueTurn(t.Context(), req); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
-	if sawBody.Params == nil || sawBody.Params.FunctionCalling != "legacy" {
-		t.Errorf("completions request params = %+v, want {function_calling: legacy}", sawBody.Params)
+	if !sawBody.Stream {
+		t.Error("completions request stream = false, want true for a tool-carrying turn")
+	}
+	if _, ok := sawKeys["params"]; ok {
+		t.Error(`completions request has a "params" key, want it entirely absent`)
+	}
+}
+
+// TestClient_ContinueTurn_NativeMode_PollsUntilDoneAcrossMultipleChecks is
+// awaitTurnDone's core assertion (ADR-0005 D27, Issue #123): a native
+// turn's completion is not known after one GET the way a legacy turn's
+// is — it must be polled — so this pins that a not-yet-done response does
+// not fail or return early, and a later done:true response is what
+// success is built from.
+func TestClient_ContinueTurn_NativeMode_PollsUntilDoneAcrossMultipleChecks(t *testing.T) {
+	const assistantID = "assistant-1"
+	notDone := chatGetBody(t, assistantID, map[string]any{"done": false, "content": ""}, assistantID)
+	done := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "the answer"}, assistantID)
+
+	getCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			getCalls++
+			if getCalls < 2 {
+				writeJSON(t, w, notDone, http.StatusOK)
+				return
+			}
+			writeJSON(t, w, done, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) { cfg.ToolTurnTimeout = 4 * time.Second })
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	req.ToolIDs = []string{"calculator"}
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if result.Content != "the answer" {
+		t.Errorf("Content = %q, want %q", result.Content, "the answer")
+	}
+	if getCalls < 2 {
+		t.Errorf("GET calls = %d, want at least 2 (awaitTurnDone must have polled rather than trusting the first not-done response)", getCalls)
+	}
+}
+
+// TestClient_ContinueTurn_NativeMode_PollTimeoutBecomesAmbiguous confirms
+// ADR-0005 D25's withdrawal (D27): a native turn that never reaches
+// done/error within ToolTurnTimeout ends CategoryAmbiguous — D6's
+// ordinary "resolve it later from a GET" case, the same as any other
+// chat-managed turn whose completion is unconfirmed — never a distinct
+// timeout error and never a fabricated success.
+func TestClient_ContinueTurn_NativeMode_PollTimeoutBecomesAmbiguous(t *testing.T) {
+	const assistantID = "assistant-1"
+	notDone := chatGetBody(t, assistantID, map[string]any{"done": false, "content": ""}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, notDone, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	// Shorter than nativeTurnPollInterval, so awaitTurnDone's poll budget
+	// is exhausted on the very first tick's select — this must resolve
+	// quickly rather than requiring a real multi-second wait to observe.
+	client := newTestClient(t, server, func(cfg *Config) { cfg.ToolTurnTimeout = 20 * time.Millisecond })
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	req.WebSearchEnabled = true
+	_, err := client.ContinueTurn(t.Context(), req)
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryAmbiguous {
+		t.Errorf("Category = %q, want %q", pe.Category, openwebui.CategoryAmbiguous)
+	}
+}
+
+// TestClient_ContinueTurn_NativeMode_HardLookupFailureStopsPollingImmediately
+// confirms awaitTurnDone does not spend its polling budget re-asking a
+// question a rejected credential can never answer differently.
+func TestClient_ContinueTurn_NativeMode_HardLookupFailureStopsPollingImmediately(t *testing.T) {
+	getCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			getCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+	// Long enough that reaching the deadline (rather than the hard
+	// failure returning immediately) would make this test visibly slow —
+	// a regression here would show up as a multi-second test, not just a
+	// wrong category.
+	client := newTestClient(t, server, func(cfg *Config) { cfg.ToolTurnTimeout = 4 * time.Second })
+
+	req := minimalContinueTurnReq("chat-1")
+	req.ToolIDs = []string{"calculator"}
+	_, err := client.ContinueTurn(t.Context(), req)
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryAuthFailed {
+		t.Errorf("Category = %q, want %q", pe.Category, openwebui.CategoryAuthFailed)
+	}
+	if getCalls != 1 {
+		t.Errorf("GET calls = %d, want exactly 1 (a rejected credential must not be retried)", getCalls)
 	}
 }
 
