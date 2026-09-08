@@ -1480,10 +1480,10 @@ func TestNewClient_RejectsBaseURLNotInAllowlist(t *testing.T) {
 
 // TestNewClient_RejectsNonPositiveTimeouts is Issue #116's own regression
 // case: a zero-value Timeout or ToolTurnTimeout makes context.WithTimeout
-// return an already-expired context, so every call this Client makes
-// (StreamTurn's within microseconds, never reaching the network) would
-// fail instantly and silently instead of NewClient refusing to build the
-// Client at all.
+// return an already-expired context, so every call this Client makes (a
+// native turn's awaitTurnDone poll within microseconds, never reaching
+// the network) would fail instantly and silently instead of NewClient
+// refusing to build the Client at all.
 func TestNewClient_RejectsNonPositiveTimeouts(t *testing.T) {
 	base := Config{
 		BaseURL:         "https://openwebui.example.net",

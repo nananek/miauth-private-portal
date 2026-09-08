@@ -55,14 +55,16 @@ type Config struct {
 	AllowedOrigins []string
 	APIKey         string
 	// Timeout bounds every individual HTTP call this client makes,
-	// except StreamTurn (see ToolTurnTimeout).
+	// including each poll awaitTurnDone performs (see ToolTurnTimeout for
+	// that loop's own, separate overall budget).
 	Timeout time.Duration
-	// ToolTurnTimeout bounds StreamTurn's own HTTP call only (ADR-0005
-	// D24, Issue #93): unlike every other call this client makes, a
-	// StreamTurn connection stays open for as long as Open WebUI's
-	// native tool-call loop takes — potentially several rounds — so it
-	// needs a longer, independently configurable budget than Timeout's
-	// default is sized for.
+	// ToolTurnTimeout bounds awaitTurnDone's polling budget for a native
+	// (tool-carrying) turn's confirmation only (ADR-0005 D27, Issue #123;
+	// originally sized for the now-retired Client.StreamTurn's own held-
+	// open connection, ADR-0005 D24, Issue #93): Open WebUI's native
+	// tool-call loop can take several rounds before the assistant message
+	// is done, so this needs a longer, independently configurable budget
+	// than Timeout's default is sized for.
 	ToolTurnTimeout time.Duration
 	// MaxResponseBytes and MaxRequestBytes are this client's own
 	// client-side bounds (ADR-0005 D11: no server-side limit could be
@@ -101,7 +103,8 @@ type Client struct {
 // Issue #116: before this existed, each call site listed the fields
 // inline, and two of the three silently omitted ToolTurnTimeout, leaving
 // it at its zero value — which NewClient now rejects outright rather
-// than building a Client that fails every StreamTurn instantly.
+// than building a Client that fails every native turn's polling
+// confirmation instantly.
 func ConfigFrom(oc config.OpenWebUIConfig) Config {
 	return Config{
 		BaseURL:          oc.BaseURL,
@@ -121,9 +124,9 @@ func ConfigFrom(oc config.OpenWebUIConfig) Config {
 // errors if Timeout or ToolTurnTimeout is not positive (Issue #116): a
 // zero-value context.WithTimeout deadline expires the instant it is
 // created, so a Client built with either left unset would fail every
-// call it makes — StreamTurn's within microseconds, never reaching the
-// network — instead of failing loudly here, at startup, where the cause
-// is obvious.
+// call it makes — a native turn's awaitTurnDone poll within
+// microseconds, never reaching the network — instead of failing loudly
+// here, at startup, where the cause is obvious.
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.Timeout <= 0 {
 		return nil, fmt.Errorf("openwebui: Timeout must be positive, got %s", cfg.Timeout)

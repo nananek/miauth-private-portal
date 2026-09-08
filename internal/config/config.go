@@ -389,13 +389,13 @@ type OpenWebUIConfig struct {
 	// makes, and this value is display-only), so validation checks only
 	// its shape.
 	ViewerBaseURL string
-	// ToolTurnTimeout mirrors OPENWEBUI_TOOL_TURN_TIMEOUT (Issue #93,
-	// ADR-0005 D24): the per-HTTP-call bound
-	// internal/provider/openwebui.Client.StreamTurn uses instead of
-	// Timeout, sized for Open WebUI's own native tool-call loop rather
-	// than one buffered call. Meaningless (never read) while
-	// GenerationEnabled is false, the same relationship Timeout already
-	// has.
+	// ToolTurnTimeout mirrors OPENWEBUI_TOOL_TURN_TIMEOUT (ADR-0005 D27,
+	// Issue #123): the polling budget
+	// internal/provider/openwebui.Client.awaitTurnDone uses instead of
+	// Timeout for a native (tool-carrying) turn's confirmation, sized for
+	// Open WebUI's own native tool-call loop rather than one buffered
+	// call. Meaningless (never read) while GenerationEnabled is false,
+	// the same relationship Timeout already has.
 	ToolTurnTimeout time.Duration
 }
 

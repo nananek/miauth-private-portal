@@ -1262,12 +1262,20 @@ state any longer. Migration `0032`'s widened `state` CHECK constraint is
 the same precedent `0016`/`0027` already set for a since-superseded `CHECK`
 value — so the column merely permits a value nothing writes anymore, the
 same harmless state those earlier migrations' own now-unused values are in.
-Any link a production window between Issue #116 and this decision actually
-drove into `LinkStateless` (expected to be none: Issue #120's finding means
-no stateless turn could have reached success in the first place) is already
-handled correctly by existing code with no migration or backfill: `Allows
-Continue`'s `state == LinkReady` check treats it, like `LinkFailed`/
-`LinkDead`, as a dead branch a reply must start fresh from.
+Any link that somehow reached `LinkStateless` before this decision is
+already handled correctly by existing code with no migration or backfill:
+`AllowsContinue`'s `state == LinkReady` check treats it, like `LinkFailed`/
+`LinkDead`, as a dead branch a reply must start fresh from. In practice
+none is expected to exist, for two independent, stacking reasons covering
+the whole time `StreamTurn` was ever dispatched to: from Issue #93's own
+original merge until Issue #116 fixed it, `ToolTurnTimeout` was never
+wired into the turn client, so every call failed a
+`context.WithTimeout(ctx, 0)` deadline before ever reaching the network;
+after Issue #116's fix, Issue #120's capture shows the upstream connection
+speaks the Responses API regardless of whether a tool was actually called
+(`sse_passthrough_responses_api.sse.txt`, no `tool_ids` needed to
+reproduce it), so the read never reaches the literal `data: [DONE]`
+`StreamTurn` required for success either way.
 
 **`Client.StreamTurn` and its entire SSE-reading mechanism —
 `postStream`, `decodeStreamingCompletion`, `streamChunkBody`,
@@ -1349,7 +1357,9 @@ security concern.
   `tool_ids`/`web_search` call for it, and every continuation through
   D16/D17's chat-managed path unchanged, exactly the split D26 describes
   — Issue #93's own staged migration plan, both stages landing in the
-  same PR series.
+  same PR series. (Superseded by D27, Issue #123: D24's mechanism, D25,
+  and D26's dispatch split are all retired — see D27 for what replaced
+  them.)
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Regeneration, remote branch management, and cancellation each still need
   their own contract work before they can be picked up; none of them is a

@@ -241,12 +241,14 @@ const (
 // constant here. Migration `0032`'s widened `state` CHECK constraint is
 // not reverted (never edit an applied migration), so the string remains
 // a technically-permitted column value; no Go code reads or compares
-// against it. A pre-existing row in this state (if any survive from
-// before this decision — Issue #120 found the mode could still succeed
-// for a turn whose model never actually decided to call a tool) is not
-// specially recognized by IsTerminal below; it was never the terminal
-// state's own success/failure classification (domain.TurnSucceeded/
-// TurnFailed, on the turn, not the link) that mattered operationally.
+// against it. No row is actually expected to exist in this state at all
+// (Issue #93 through #116: ToolTurnTimeout was never wired into the turn
+// client, so every call failed before reaching the network; #116 through
+// #123: Issue #120's capture shows the read never reaches the completion
+// signal StreamTurn required regardless of tool use) — see ADR-0005 D27
+// for the full reasoning. Even if one somehow does, it is not specially
+// recognized by IsTerminal below; nothing reads or writes this string as
+// a Go value anymore.
 
 // LinkEvent names one thing that can happen to a conversation link.
 // Events are distinguished by their authority as well as their outcome:
