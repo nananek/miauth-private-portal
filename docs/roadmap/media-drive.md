@@ -1,7 +1,7 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
-- Status: PR0 (investigation) and PR1 (Drive foundation) complete.
-  PR2–PR7 not started.
+- Status: PR0 (investigation), PR1 (Drive foundation), and PR2 (static
+  app icons) complete. PR3–PR7 not started.
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -48,7 +48,7 @@ PR1 (Drive foundation: Storage abstraction, local disk + S3-compatible,
      files table, image validation)
   -> PR3, PR4, PR5, PR6
 
-PR2 (static app/source icons) — independent, no dependency on PR1/PR0
+PR2 (static app/source icons, done) — independent, no dependency on PR1/PR0
 
 PR7 (operational hardening: orphan GC, backup/restore docs, storage
      failure tests, image-validation tests) — last, depends on the whole
@@ -167,8 +167,44 @@ table — unit tests only. This is the foundation PR3/PR4/PR5/PR6 build on.
 
 ## PR2: Portal/app static icons
 
-**Status: not started.** Fixed favicon/OGP/PWA icon set served via
-`embed.FS`. Independent of Drive; can proceed in parallel with PR1.
+**Status: complete.** Fixed favicon/OGP/PWA icon set served via
+`embed.FS`. Independent of Drive; ran after PR1 in this repository's
+implementation order but has no dependency on it.
+
+- This repository has no real logo or brand asset and no HTML page of
+  its own (AGENTS.md: do not add a custom web UI), so the icon set is a
+  code-generated "monogram" placeholder — a solid-color square with a
+  white "M" — rather than hand-designed art or a page with `<link>`
+  tags: see
+  [`internal/httpserver/staticassets/doc.go`](../../internal/httpserver/staticassets/doc.go)
+  and [`gen/main.go`](../../internal/httpserver/staticassets/gen/main.go)'s
+  doc comments for the exact design and why it is meant to be replaced
+  by real design work later. `gen/main.go` uses
+  `golang.org/x/image/font/{opentype,gofont/goregular}` — already a
+  dependency since PR1 added `golang.org/x/image` for WebP decoding, so
+  this needed no new one — to render the letter, and a small in-package
+  ICO encoder (the standard "PNG-in-ICO" container; Go's standard
+  library has no ICO encoder) to build `favicon.ico`. Regenerate with
+  `go generate ./internal/httpserver/staticassets/...`; the output is
+  deterministic (no timestamps, no randomness) and committed as static
+  files, not generated at server startup.
+- `internal/httpserver/staticicons.go` embeds the generated files and
+  serves each at its conventional well-known path unconditionally (like
+  `GET /healthz`, no configuration or dependency): `GET /favicon.ico`,
+  `/favicon-{16x16,32x32}.png`, `/favicon-{16x16,32x32}-dark.png`,
+  `/apple-touch-icon.png`, `/icon-{192,512}.png`, `/og-image.png`,
+  `/site.webmanifest`. This satisfies Issue #77's "新規インストール直後
+  でもfavicon・アプリアイコンが表示される" acceptance criterion for a
+  browser tab pointed at this origin — for example during the MiAuth
+  flow's plain-text page (`miauth_handlers.go`'s `writePlainTextPage`) —
+  which auto-requests `/favicon.ico`/`/apple-touch-icon.png` with no
+  markup needed.
+- The `*-dark.png` variants and `/og-image.png`/`/site.webmanifest` are
+  served now but have no consumer yet: dark-mode favicon switching and
+  Open Graph meta tags both require an HTML `<head>` to put a `<link>`/
+  `<meta>` tag on, and this repository has none. They exist at fixed
+  paths so a future page (if one is ever added) can reference them
+  without a further asset change.
 
 ## PR3: Misskey-compatible Drive API
 
