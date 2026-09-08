@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
 )
 
@@ -1345,13 +1346,87 @@ func TestClient_StartChat_RedirectIsPolicyViolation_NoSecondRequest(t *testing.T
 
 func TestNewClient_RejectsBaseURLNotInAllowlist(t *testing.T) {
 	_, err := NewClient(Config{
-		BaseURL:        "http://evil.example",
-		AllowedOrigins: []string{"https://openwebui.example.net"},
-		APIKey:         testAPIKey,
-		Timeout:        time.Second,
+		BaseURL:         "http://evil.example",
+		AllowedOrigins:  []string{"https://openwebui.example.net"},
+		APIKey:          testAPIKey,
+		Timeout:         time.Second,
+		ToolTurnTimeout: time.Second,
 	})
 	if err == nil {
 		t.Fatal("NewClient with a base URL outside the allowlist did not error")
+	}
+}
+
+// TestNewClient_RejectsNonPositiveTimeouts is Issue #116's own regression
+// case: a zero-value Timeout or ToolTurnTimeout makes context.WithTimeout
+// return an already-expired context, so every call this Client makes
+// (StreamTurn's within microseconds, never reaching the network) would
+// fail instantly and silently instead of NewClient refusing to build the
+// Client at all.
+func TestNewClient_RejectsNonPositiveTimeouts(t *testing.T) {
+	base := Config{
+		BaseURL:         "https://openwebui.example.net",
+		AllowedOrigins:  []string{"https://openwebui.example.net"},
+		APIKey:          testAPIKey,
+		Timeout:         time.Second,
+		ToolTurnTimeout: time.Second,
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"zero Timeout", func(c *Config) { c.Timeout = 0 }, "Timeout"},
+		{"negative Timeout", func(c *Config) { c.Timeout = -time.Second }, "Timeout"},
+		{"zero ToolTurnTimeout", func(c *Config) { c.ToolTurnTimeout = 0 }, "ToolTurnTimeout"},
+		{"negative ToolTurnTimeout", func(c *Config) { c.ToolTurnTimeout = -time.Second }, "ToolTurnTimeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			tt.mutate(&cfg)
+			_, err := NewClient(cfg)
+			if err == nil {
+				t.Fatalf("NewClient(%+v) did not error", cfg)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("NewClient(%+v) error = %q, want it to mention %q", cfg, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestConfigFrom_MapsEveryField is Issue #116's own regression case: the
+// bug was that three separate call sites (cmd/server's catalog and turn
+// clients, cmd/openwebuictl's confirm subcommand) each built a Config
+// inline from config.OpenWebUIConfig, and two of them silently dropped
+// ToolTurnTimeout. Routing every call site through ConfigFrom instead
+// makes this the one place such a mapping mistake can happen — and this
+// test the one place it gets caught, for every field, not just the one
+// Issue #116 already found.
+func TestConfigFrom_MapsEveryField(t *testing.T) {
+	oc := config.OpenWebUIConfig{
+		BaseURL:          "https://openwebui.example.net",
+		AllowedOrigins:   []string{"https://openwebui.example.net", "https://other.example.net"},
+		APIKey:           testAPIKey,
+		Timeout:          7 * time.Second,
+		ToolTurnTimeout:  11 * time.Minute,
+		MaxResponseBytes: 1 << 21,
+		MaxRequestBytes:  1 << 19,
+	}
+	got := ConfigFrom(oc)
+	want := Config{
+		BaseURL:          oc.BaseURL,
+		AllowedOrigins:   oc.AllowedOrigins,
+		APIKey:           oc.APIKey,
+		Timeout:          oc.Timeout,
+		ToolTurnTimeout:  oc.ToolTurnTimeout,
+		MaxResponseBytes: oc.MaxResponseBytes,
+		MaxRequestBytes:  oc.MaxRequestBytes,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ConfigFrom(%+v) = %+v, want %+v", oc, got, want)
 	}
 }
 

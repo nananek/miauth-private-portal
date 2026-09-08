@@ -251,14 +251,7 @@ func run() error {
 		// VirtualActor projection and search results in step with every
 		// model the configured account can see, which is useful on a
 		// deployment that never turns outbound generation on at all.
-		catalogClient, err := owuiprovider.NewClient(owuiprovider.Config{
-			BaseURL:          cfg.OpenWebUI.BaseURL,
-			AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
-			APIKey:           cfg.OpenWebUI.APIKey,
-			Timeout:          cfg.OpenWebUI.Timeout,
-			MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
-			MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-		})
+		catalogClient, err := owuiprovider.NewClient(owuiprovider.ConfigFrom(cfg.OpenWebUI))
 		if err != nil {
 			return fmt.Errorf("build openwebui catalog client: %w", err)
 		}
@@ -305,14 +298,7 @@ func run() error {
 		// rather than dropped — the same unregistered-job-type recovery
 		// path LLM's gate relies on.
 		if cfg.OpenWebUI.GenerationEnabled {
-			owuiProvider, err := owuiprovider.NewClient(owuiprovider.Config{
-				BaseURL:          cfg.OpenWebUI.BaseURL,
-				AllowedOrigins:   cfg.OpenWebUI.AllowedOrigins,
-				APIKey:           cfg.OpenWebUI.APIKey,
-				Timeout:          cfg.OpenWebUI.Timeout,
-				MaxResponseBytes: cfg.OpenWebUI.MaxResponseBytes,
-				MaxRequestBytes:  cfg.OpenWebUI.MaxRequestBytes,
-			})
+			owuiProvider, err := owuiprovider.NewClient(owuiprovider.ConfigFrom(cfg.OpenWebUI))
 			if err != nil {
 				return fmt.Errorf("build openwebui provider client: %w", err)
 			}
