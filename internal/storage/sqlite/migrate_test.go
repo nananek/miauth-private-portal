@@ -1030,10 +1030,10 @@ func TestMigrate_UpgradeAppliesOpenWebUITurnOutcomeColumns(t *testing.T) {
 	}
 }
 
-// TestMigrate_UpgradeAppliesFilesTable backs migration 0022 (Issue #77
+// TestMigrate_UpgradeAppliesFilesTable backs migration 0024 (Issue #77
 // PR1). No repository writes through this table yet (PR3/PR4/PR5/PR6
 // are what will), so this only checks the table and its constraints
-// exist and accept a row shaped like ADR-0006 describes, the same
+// exist and accept a row shaped like ADR-0007 describes, the same
 // "new empty table" upgrade shape as
 // TestMigrate_UpgradeAppliesOpenWebUIRegistryTables.
 func TestMigrate_UpgradeAppliesFilesTable(t *testing.T) {

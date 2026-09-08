@@ -1,7 +1,7 @@
--- Issue #77 PR1 (renumbered to 0022 on rebase onto main: 0021 was taken
--- by openwebui_turn_reply_metadata, Issue #81/#84, which landed on main
--- after this PR was originally authored): the files table backing
--- internal/drive's Storage abstraction (ADR-0006). This migration only
+-- Issue #77 PR1 (renumbered to 0024 when this PR was cherry-picked onto
+-- main after Issue #76's own migrations 0021-0023 landed, which post-
+-- date this PR's original authorship): the files table backing
+-- internal/drive's Storage abstraction (ADR-0007). This migration only
 -- creates the table; no row is written and nothing reads from it yet.
 -- PR3 (Misskey-compatible
 -- Drive API), PR4 (external-source favicons), PR5 (profile avatars), and
@@ -11,7 +11,7 @@
 -- storage_key is the opaque key internal/drive.Storage.Put/Get/Delete
 -- use; it says nothing about the configured backend (local disk or
 -- S3-compatible) — a deployment picks exactly one backend for its whole
--- lifetime (ADR-0006), so no column here distinguishes rows by backend.
+-- lifetime (ADR-0007), so no column here distinguishes rows by backend.
 CREATE TABLE files (
     id TEXT PRIMARY KEY,
     -- NULL for a file with no single owning actor (for example a PR4
@@ -29,7 +29,7 @@ CREATE TABLE files (
     -- files rows must never race to write (or delete) the same
     -- underlying object.
     storage_key TEXT NOT NULL UNIQUE,
-    -- Raster images only (ADR-0006 rejects SVG/vector); NULL together
+    -- Raster images only (ADR-0007 rejects SVG/vector); NULL together
     -- for a non-image file.
     width INTEGER,
     height INTEGER,

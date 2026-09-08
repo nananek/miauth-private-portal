@@ -145,7 +145,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 | `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
-| `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0006): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
+| `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0007): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
 | `DRIVE_DATA_DIR` | no | `./data/drive` | The `localdisk` backend's root directory (`internal/drive.Local`). Must not be empty when `DRIVE_BACKEND=localdisk`; this package does not check it exists on disk — `internal/drive.Local` fails closed at first use (`Put`/`Get`/`Delete`) if it does not, the same "config validates shape, the consumer validates reachability" split `DB_PATH` already has. |
 | `DRIVE_S3_ENDPOINT` | required if `DRIVE_BACKEND=s3compat` | `""` | The S3-compatible API's `host[:port]`, no scheme (`minio-go`'s own convention) — for example `minio.internal:9000`, or an AWS S3 regional endpoint. |
 | `DRIVE_S3_BUCKET` | required if `DRIVE_BACKEND=s3compat` | `""` | The single bucket every Drive file is stored under. `internal/drive.S3` never creates or configures it; it must already exist. |
@@ -1442,20 +1442,20 @@ repository reads or writes through it yet.
   (`internal/drive/s3.go`), reaching an S3-compatible store (AWS S3 or a
   self-hosted MinIO) through `minio-go` — chosen over the full AWS SDK for
   Go v2 because this deployment targets "some S3-compatible object store,"
-  not AWS-specific features (see ADR-0006).
+  not AWS-specific features (see ADR-0007).
 - `ValidateImage` (`internal/drive/validate.go`) decodes an upload's
   claimed image structure with `image.DecodeConfig` against an allowlist
   (PNG, JPEG, WebP) — never trusting a client-declared `Content-Type` or
   file extension. SVG is rejected by this same fails-to-decode path: it is
   XML, not any of these formats' binary header, so no dedicated
-  SVG-detection code exists or is needed (ADR-0006).
-- The `files` table (migration `0022_files.sql`) holds one row per stored
+  SVG-detection code exists or is needed (ADR-0007).
+- The `files` table (migration `0024_files.sql`) holds one row per stored
   object's metadata (`purpose`, `mime`, `byte_size`, `sha256`,
   `storage_key`, optional `width`/`height`, optional `owner_actor_id`). No
   repository reads or writes it yet; PR3/PR4/PR5/PR6 add the use case that
   populates it, each through its own repository added when that use case
   exists, rather than this PR guessing at an interface nothing calls yet.
-- See [ADR-0006](../decisions/0006-drive-storage-boundary.md) for the
+- See [ADR-0007](../decisions/0007-drive-storage-boundary.md) for the
   backend-selection, credential, and image-validation design decisions,
   and [`docs/roadmap/media-drive.md`](../roadmap/media-drive.md) for the
   full PR0-PR7 breakdown this foundation is the second step of (after

@@ -125,31 +125,31 @@ table — unit tests only. This is the foundation PR3/PR4/PR5/PR6 build on.
   per-request): `Local` (`internal/drive/localdisk.go`, writes under
   `DRIVE_DATA_DIR`, keys checked with `filepath.IsLocal` and rejected
   rather than silently renormalized) and `S3` (`internal/drive/s3.go`,
-  via `minio-go` — see ADR-0006 D4 for why not the full AWS SDK for Go
+  via `minio-go` — see ADR-0007 D4 for why not the full AWS SDK for Go
   v2). Both share one contract test suite
   (`internal/drive/storage_contract_test.go`); `S3`'s own tests run
   against an in-process fake S3-compatible `httptest.Server`
   (`internal/drive/s3_test.go`), not a real MinIO/S3 endpoint.
-- `files` table (migration `0022_files.sql`): `id`, `owner_actor_id`
+- `files` table (migration `0024_files.sql`): `id`, `owner_actor_id`
   (nullable), `purpose` (closed enum: `avatar`/`source_favicon`/
   `attachment`/`app_icon`), `mime`, `byte_size`, `sha256`, `storage_key`
   (unique), `width`/`height` (nullable), `created_at`. No repository
-  reads or writes it yet — see ADR-0006 D6 for why that is deferred to
+  reads or writes it yet — see ADR-0007 D6 for why that is deferred to
   PR3/PR4/PR5/PR6, the same precedent migration `0017` (OWUI-C) set.
 - Image validation (`internal/drive/validate.go`'s `ValidateImage`):
   decodes against an allowlist (`png`, `jpeg`, `webp`) with Go's
   `image.DecodeConfig`, ignoring any client-declared `Content-Type`.
-  SVG is rejected by the same fails-to-decode path (ADR-0006 D2) — no
+  SVG is rejected by the same fails-to-decode path (ADR-0007 D2) — no
   dedicated SVG/XML detector exists. Width/height ceilings
   (`DRIVE_MAX_IMAGE_WIDTH`/`DRIVE_MAX_IMAGE_HEIGHT`) are checked against
   the decoded header, independent of `DRIVE_MAX_FILE_BYTES`.
 - S3 credentials (`DRIVE_S3_ACCESS_KEY_ID`/`DRIVE_S3_SECRET_ACCESS_KEY`)
   are plain configured values in this PR, not a `secret_ref` indirection
-  — see ADR-0006 D5 for why `internal/openwebui/registry.go`'s pattern
+  — see ADR-0007 D5 for why `internal/openwebui/registry.go`'s pattern
   does not apply here yet (no Drive configuration is persisted to any
   database row for a `secret_ref` to name).
 - New configuration keys (`internal/config.DriveConfig`, no
-  `DRIVE_ENABLED` flag — see ADR-0006's "Consequences"):
+  `DRIVE_ENABLED` flag — see ADR-0007's "Consequences"):
   `DRIVE_BACKEND` (default `localdisk`), `DRIVE_DATA_DIR` (default
   `./data/drive`), `DRIVE_S3_ENDPOINT`/`DRIVE_S3_BUCKET`/
   `DRIVE_S3_ACCESS_KEY_ID`/`DRIVE_S3_SECRET_ACCESS_KEY` (required when
@@ -158,10 +158,10 @@ table — unit tests only. This is the foundation PR3/PR4/PR5/PR6 build on.
   `DRIVE_MAX_IMAGE_WIDTH`/`DRIVE_MAX_IMAGE_HEIGHT` (default 8000).
   Documented in `docs/operations/configuration.md`'s "Known
   configuration keys" table and "Drive storage foundation" section.
-- New ADR: [`docs/decisions/0006-drive-storage-boundary.md`](../decisions/0006-drive-storage-boundary.md).
+- New ADR: [`docs/decisions/0007-drive-storage-boundary.md`](../decisions/0007-drive-storage-boundary.md).
 - New dependencies: `github.com/minio/minio-go/v7` (S3-compatible
-  client, ADR-0006 D4) and `golang.org/x/image` (WebP decode support,
-  ADR-0006 D2) — both standard-library-adjacent or narrowly scoped to
+  client, ADR-0007 D4) and `golang.org/x/image` (WebP decode support,
+  ADR-0007 D2) — both standard-library-adjacent or narrowly scoped to
   the concrete need above, per AGENTS.md's "new dependencies require a
   concrete reason."
 
