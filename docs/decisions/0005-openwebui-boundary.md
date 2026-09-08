@@ -874,6 +874,51 @@ instance before this note is removed from `EnableTitleGeneration`'s and
 
 ### D24. A new, stateless, true-SSE turn mode carries native multi-round tool execution — mechanism only, not yet dispatched to
 
+> **Superseded in premise — decision requested (Issue #120, 2026-09-08).**
+> This decision rests on "row 1 of (h) delivers native multi-round tool
+> execution over plain HTTP". A real-instance capture falsifies that: row 1 is
+> served by `stream_wrapper` (`utils/middleware.py:6320`), a pure proxy, while
+> the native tool loop (`:5576`) sits inside `if event_emitter:`, and
+> `event_emitter` exists only when the request carries `chat_id` **and**
+> `message_id` (`:3127`). A row-1 request therefore cannot enter the branch that
+> runs tools, and the same branch is what returns `null` instead of a body
+> (`:4252`, returned at `:6315`) — so receiving tokens over HTTP and having the
+> server execute tools are mutually exclusive on this endpoint. Captures and the
+> full trace are in `docs/compat/openwebui-0.11.3.md` (h.1)/(j).
+>
+> In production this surfaces as every tool- or web-search-carrying first turn
+> failing `contract_failed` (the stream ends at the upstream provider's own
+> terminal frame, never at `data: [DONE]`), which D25 classifies as permanent,
+> so the turn is not retried and the post receives no reply.
+>
+> Per AGENTS.md ("stop implementation and record or request an ADR update; do
+> not silently invent a protocol") this PR changes no behavior. **Recommended
+> replacement, for the owner to accept or reject:** send the tool-carrying turn
+> **chat-managed** (`chat_id` + `id` + `user_message`, `stream: true`), ignore
+> the `null` body, and wait for completion by polling
+> `GET /api/v1/chats/{id}` — the read `Client.LookupTurnOutcome`
+> (`internal/provider/openwebui/client.go`) already performs — until the
+> assistant message reports `done`, bounded by `OPENWEBUI_TOOL_TURN_TIMEOUT`.
+> That branch is the one that runs the native loop to
+> `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS` rounds and persists the result with
+> `done: true` (`:6249`); it needs no socket listener, because
+> `get_event_emitter` (`socket/main.py:1057`) emits into an unattended room and
+> then writes to the database. Its costs are explicit: D25 below must be
+> withdrawn (polling reintroduces exactly the `ambiguous` outcome D25 removed,
+> and D6's chat-state classification returns), `LookupTurnOutcome` is currently
+> a single-shot read with no waiting loop, and `StreamTurn` today sends no
+> chat-management keys at all, so a chat must be created for it as the buffered
+> path does. Browser-side "direct" tools and the pyodide code interpreter stay
+> unavailable either way — they need `event_caller`, hence a real `session_id`
+> (`:3131`).
+>
+> Alternatives considered and not recommended: implementing a socket.io client
+> (large surface, and the same result is already durably readable from the chat);
+> teaching the reader the Responses API framing (the frames arrive, but nothing
+> executes the tool call they carry, so multi-round execution is still absent);
+> and withdrawing native mode entirely (returns to D17's one-round ceiling, which
+> is the limitation Issue #93 exists to remove).
+
 Issue #93 found that D17's `params.function_calling: "legacy"` fix, while
 correct for the `done:false`-forever bug it targeted, has its own side
 effect: legacy mode resolves tool calls and web search in exactly **one**
@@ -977,6 +1022,15 @@ an operational (not correctness) concern worth its own follow-up —
 before this mode is ever dispatched to in production.
 
 ### D25. The stateless mode has no `ambiguous` outcome: every failure discards partial content and ends the whole turn
+
+> **Conditional on D24 (Issue #120, 2026-09-08).** This decision holds only
+> while the mode is stateless. D24's recommended replacement is chat-managed, so
+> a chat *does* exist for a later `GET /api/v1/chats/{id}` to read — the exact
+> premise this decision denies — and adopting it means withdrawing this decision
+> and letting D6's classification apply to tool-carrying turns as well. Note
+> also the practical effect of keeping it as written while D24's premise is
+> broken: `contract_failed` is permanent, so today's failing turns are not
+> retried at all.
 
 D6's `ambiguous` classification exists because the chat-managed path can
 always fall back on `GET /api/v1/chats/{id}` to find out what actually

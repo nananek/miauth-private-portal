@@ -389,7 +389,7 @@ chunks usefully over plain HTTP:
 
 | Request | Response | Persistence |
 | --- | --- | --- |
-| no `chat_id` | 200 `text/event-stream`, the upstream SSE passed straight through ([`sse_passthrough_finish.sse.txt`](fixtures/openwebui/sse_passthrough_finish.sse.txt)) | none |
+| no `chat_id` | 200 `text/event-stream`, the upstream SSE passed straight through (mock-shaped [`sse_passthrough_finish.sse.txt`](fixtures/openwebui/sse_passthrough_finish.sse.txt); real captures in the Issue #120 rows below) | none |
 | `id` + `session_id`, with or without `chat_id` | 200 JSON `{"status":true,"task_ids":["…"],"chat_id":"…"}` returned immediately ([`streaming_task_response.json`](fixtures/openwebui/streaming_task_response.json), captured from the no-`chat_id` variant, so its `chat_id` is the id of the chat the call had just created) | generated in the background and saved |
 | `chat_id` + `id`, no `session_id` | 200 JSON `null` ([`streaming_no_session_response.json`](fixtures/openwebui/streaming_no_session_response.json)) | generated in the background and saved |
 
@@ -404,6 +404,51 @@ re-running a `stream:true` request against an already-filled message id, but
 no fixture of the appended state was retained, so it rests on the observation
 record alone (the weakest-evidenced streaming statement here). Streaming stays
 out of MVP (ADR-0005 D8).
+
+**(h.1) What row 1 actually carries, and why it can never run a tool
+(Issue #120, 2026-09-08 real-instance capture).** The row-1 fixture above is a
+mock; these two are the first real captures of that row, taken with the exact
+request shape `StreamTurn` sends (`model`, `stream: true`, `messages`, and
+optionally `tool_ids`/`features.web_search` — no chat-management keys, no
+`params.function_calling`):
+
+| Capture | What arrives |
+| --- | --- |
+| [`sse_passthrough_responses_api.sse.txt`](fixtures/openwebui/sse_passthrough_responses_api.sse.txt) | OpenAI **Responses API** framing: `event: response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `…done`, terminating at `event: response.completed`. **No `data: [DONE]` anywhere.** |
+| [`sse_passthrough_responses_api_toolcall.sse.txt`](fixtures/openwebui/sse_passthrough_responses_api_toolcall.sse.txt) | Same framing plus `response.function_call_arguments.delta` ×16 and `…done`, then `event: response.completed`. The model asks for a tool; **nothing executes it and no further round follows.** |
+
+Two consequences, both structural rather than model-specific:
+
+1. **Row 1's framing is whatever the upstream connection speaks.** `stream_wrapper`
+   (`utils/middleware.py:6320`) is a pure proxy: it applies stream filters and
+   re-yields each frame. An upstream that speaks the Responses API therefore
+   reaches the caller as `response.*` events, not `chat.completion.chunk`
+   objects, and never emits the `data: [DONE]` sentinel a Chat-Completions
+   stream ends with. The mock fixture above shows the other shape; both are
+   valid row-1 responses depending on the model's connection.
+2. **Tool execution is exclusive to the chat-managed branch.** The native
+   tool-call loop (`while tool_calls and (…)`, `utils/middleware.py:5576`) sits
+   inside `if event_emitter:`, and `event_emitter` is created only when the
+   request carries `chat_id` **and** `message_id` (`utils/middleware.py:3127`) —
+   `session_id` is irrelevant to it. Row 1 has no `chat_id`, so it never enters
+   that branch.
+
+Because the same `event_emitter` branch is what returns `None` for a streaming
+request (`response_handler` has no return statement, `utils/middleware.py:4252`,
+returned at `:6315`), **"receive the tokens over HTTP" and "have the server run
+tools" are mutually exclusive on this endpoint**: row 1 streams but never
+executes, rows 2-3 execute but hand back no body. Rows 2-3 do complete
+server-side without any socket listener — `get_event_emitter`
+(`socket/main.py:1057`) emits into an unattended room and then writes the result
+through `Chats.upsert_message_to_chat_by_id_and_message_id` with `done: true`
+(`utils/middleware.py:6249`) — so an API-key caller can still obtain the
+finished turn, by reading the chat rather than the response. The exceptions are
+browser-side "direct" tools and the pyodide code interpreter, which need
+`event_caller` and therefore a real `session_id` (`utils/middleware.py:3131`).
+
+The synthetic `sse_native_tool_round_trip.sse.txt` fixture models a multi-round
+tool exchange arriving over row 1. No such response was ever observed; per the
+two points above it cannot occur.
 
 **(i) `sources[]` (Issue #81) and `title_generation`'s real completion timing
 (Issue #84) — both partially 要実機確認.**
@@ -460,6 +505,20 @@ EnableTitleGeneration`'s doc comment.
 
 **(j) Issue #93 (native multi-round tool execution over the same row-1 SSE
 path) — 全項目 要実機確認, none of it exercised against a real instance.**
+
+> **2026-09-08 update (Issue #120): points 1 and 3 are now resolved against a
+> real instance, and the answers falsify this section's premise.** Point 1: the
+> combined request does reach row 1 — that is exactly the problem, because row 1
+> is a pure proxy that never runs a tool (see (h.1)). Point 3: an in-progress
+> tool call does surface on the wire, but as the upstream provider's own frames
+> (`response.function_call_arguments.delta`), after which the stream simply
+> completes with nothing having executed. Consequently no answer to point 3
+> could have made this mode work: `delta.content` accumulation up to
+> `data: [DONE]` describes a response this path does not produce, and the
+> tool-execution loop it was meant to consume lives in a branch this request
+> shape cannot enter. Points 2 and 4 are moot while the mode is unusable. The
+> paragraphs below are retained as the record of what was assumed when Issue #93
+> shipped; ADR-0005 D24 carries the decision request that follows from this.
 
 D8/(h)'s row 1 (`stream:true`, no `chat_id`) was captured with neither
 `tool_ids` nor `features` set. Issue #93 needs exactly that combination —
