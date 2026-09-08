@@ -613,6 +613,75 @@ func TestClient_ContinueTurn_NativeMode_HardLookupFailureStopsPollingImmediately
 	}
 }
 
+// TestClient_ContinueTurn_NativeMode_CompletionsPOSTUsesToolTurnTimeout
+// covers Issue #126: a real-instance capture found the initiating
+// completions POST for a native (tool-carrying) turn blocks until Open
+// WebUI's native tool-calling loop fully finishes, not the "returns
+// immediately" behavior ADR-0005 D27 assumed. Config.Timeout (5s from
+// newTestClient) is deliberately shorter than how long the completions
+// handler below sleeps, so this fails unless runTurn's native branch
+// bounds that one call by ToolTurnTimeout instead.
+func TestClient_ContinueTurn_NativeMode_CompletionsPOSTUsesToolTurnTimeout(t *testing.T) {
+	const assistantID = "assistant-1"
+	done := chatGetBody(t, assistantID, map[string]any{"done": true, "content": "the answer"}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			time.Sleep(300 * time.Millisecond)
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, done, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.Timeout = 50 * time.Millisecond
+		cfg.ToolTurnTimeout = 4 * time.Second
+	})
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	req.ToolIDs = []string{"calculator"}
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v (want the completions POST to survive the 300ms handler delay under ToolTurnTimeout, not fail against the 50ms Timeout)", err)
+	}
+	if result.Content != "the answer" {
+		t.Errorf("Content = %q, want %q", result.Content, "the answer")
+	}
+}
+
+// TestClient_ContinueTurn_PlainMode_CompletionsPOSTStillUsesShortTimeout
+// is the regression guard for Issue #126's fix: a plain turn (neither
+// tool_ids nor web_search resolved) must keep using the ordinary,
+// shorter Config.Timeout for its completions POST — the fix is confined
+// to runTurn's native branch, not every call through c.post.
+func TestClient_ContinueTurn_PlainMode_CompletionsPOSTStillUsesShortTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			time.Sleep(150 * time.Millisecond)
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			done := chatGetBody(t, "assistant-1", map[string]any{"done": true, "content": "ok"}, "assistant-1")
+			writeJSON(t, w, done, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.Timeout = 30 * time.Millisecond
+		cfg.ToolTurnTimeout = 4 * time.Second
+	})
+
+	req := minimalContinueTurnReq("chat-1")
+	_, err := client.ContinueTurn(t.Context(), req)
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryTimeout {
+		t.Errorf("Category = %q, want %q (a plain turn's completions POST must still be bounded by the short Timeout, not ToolTurnTimeout)", pe.Category, openwebui.CategoryTimeout)
+	}
+}
+
 // --- Issues #81/#84: citation sources and chat title ---
 //
 // UNVERIFIED ASSUMPTION (2026-09-08, no real-instance access — ADR-0005
