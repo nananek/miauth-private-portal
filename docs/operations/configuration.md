@@ -152,7 +152,7 @@ catch that class of mistake during local development.
 | `DRIVE_S3_ACCESS_KEY_ID` / `DRIVE_S3_SECRET_ACCESS_KEY` | required if `DRIVE_BACKEND=s3compat` | `""` | S3 credentials. Never logged or returned to a client; `Config.Redacted()` shows only whether each is set. Unlike `OPENWEBUI_API_KEY`, these are not stored via the `secret_ref` indirection (`internal/openwebui/registry.go`'s pattern of persisting only a configuration key's *name* to a database row) — this PR persists no Drive configuration to any database row for a `secret_ref` to name. A future PR that does add one should reuse that same indirection rather than storing a raw credential a second time. |
 | `DRIVE_S3_USE_SSL` | no | `true` | Selects `https` (default) or `http` against `DRIVE_S3_ENDPOINT`. |
 | `DRIVE_S3_REGION` | no | `""` | Passed to the S3 client when non-empty; most S3-compatible servers (MinIO included) do not require it. |
-| `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. |
+| `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. Issue #77 PR5: also bounds an RSS source's favicon fetch (`internal/ingest/favicon.Fetch`'s `maxBytes`) — no separate favicon-specific size configuration key exists. |
 | `DRIVE_MAX_IMAGE_WIDTH` / `DRIVE_MAX_IMAGE_HEIGHT` | no | `8000` | Bounds a raster image's decoded pixel dimensions (`internal/drive.ValidateImage`), independent of `DRIVE_MAX_FILE_BYTES` — a small but pathologically large-dimension image ("decompression bomb") is rejected by this check even when it fits comfortably under the byte-size bound. 1-100000. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
@@ -910,7 +910,20 @@ order:
    or an actor without its source. A `(kind, uri)` pair already
    registered is left untouched (including its `display_name`,
    `cursor`, failure-tracking fields, and `actor_id`/`username`/`host`),
-   never modified or re-seeded.
+   never modified or re-seeded. Immediately after — outside that
+   transaction, and never able to fail it — Issue #77 PR5's
+   `fetchAndSetSourceFavicon` best-effort fetches the new source's own
+   `https://<host>/favicon.ico`, extracts its largest embedded PNG image
+   (`internal/ingest/favicon.Fetch`/`ExtractPNGFromICO`; a legacy
+   BMP-in-ICO favicon is not supported and is skipped like any other
+   failure), stores it via `drive.Service.CreateSystemFile`
+   (`source_favicon` purpose, no owner), and sets the actor's
+   `avatar_file_id` to it. This fetch always uses `https`, bounded by
+   `DRIVE_MAX_FILE_BYTES`, regardless of `RSS_ALLOW_INSECURE_HTTP`
+   (which governs only the feed fetch itself); a missing, oversized, or
+   undecodable favicon is logged and otherwise silently skipped — the
+   source is registered either way, and its actor simply keeps no
+   avatar.
 2. `ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a,
    replacing the old create-only `EnsureFromConfig` for RSS) then
    reactivates a previously-deactivated source whose URL is back in
@@ -923,12 +936,12 @@ The scheduler repeats step 2 on every subsequent tick, so — since
 removing a feed URL via `miauthctl config set/unset RSS_FEED_URLS`
 takes effect on the scheduler's next tick, no restart required** — see
 [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
-above. A **genuinely new** URL's `ActorExternalSource`/`username`/`host`
-are only ever created by step 1 at startup, though, so adding a brand
-new feed (as opposed to re-adding a previously-removed one) still needs
-a restart to seed its actor before the scheduler can poll it — editing
-`.env`/the environment directly and restarting always works too, exactly
-as before this issue.
+above. A **genuinely new** URL's `ActorExternalSource`/`username`/`host`/
+favicon are only ever created by step 1 at startup, though, so adding a
+brand new feed (as opposed to re-adding a previously-removed one) still
+needs a restart to seed its actor before the scheduler can poll it —
+editing `.env`/the environment directly and restarting always works
+too, exactly as before this issue.
 
 ### Untrusted external content
 

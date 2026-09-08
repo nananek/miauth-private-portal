@@ -113,7 +113,7 @@ redacted.
 | `POST /api/drive/files/find-by-hash` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/drive/folders/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/notes/create` (`fileIds` field) | **必要** for Issue #77 (PR6, not yet implemented) | Post composer's attachment picker (new local upload or existing drive file) | Already-granted `write:notes` — no new scope |
-| `POST /api/i/update` (`avatarId` field) | **必要** for Issue #77 (PR5, not yet implemented) | Profile avatar upload/removal flow | `write:account` (already granted). **Currently rejected as `UNSUPPORTED_FEATURE`** along with every other non-`name` `IUpdateRequest` field per the Issue #23 scope decision above; PR5 must add this one field explicitly rather than opening up the rest |
+| `POST /api/i/update` (`avatarId` field) | **必要** for Issue #77 (implemented — PR5) | Profile avatar upload/removal flow | `write:account` (already granted). Every other non-`name`/`avatarId` `IUpdateRequest` field stays rejected as `UNSUPPORTED_FEATURE`, per the Issue #23 scope decision above |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -1037,11 +1037,12 @@ polymorphic `User`/`UserDetailed` discriminator).
 
 ### Drive API and note attachments (Issue #77 investigation — PR0)
 
-**This section documents a contract for functionality this service does not
-implement yet.** Issue #77 (PR3/PR5/PR6) will implement Drive, profile
-avatars, and post attachments; this PR0 records what the pinned Aria
-snapshot and its pinned `misskey_dart` dependency actually do, so those
-later PRs implement an observed protocol rather than a remembered one
+**This section originally documented a contract for functionality this
+service did not implement yet; Drive (PR3) and profile avatars (PR5) are
+now implemented, post attachments (PR6) are not yet.** This PR0 records
+what the pinned Aria snapshot and its pinned `misskey_dart` dependency
+actually do, so those later PRs implement an observed protocol rather
+than a remembered one
 (AGENTS.md: "Do not silently invent a protocol"), matching the method
 Issue #72 used for Open WebUI tool-call feasibility. Traced from the
 pinned Aria commit
@@ -1156,8 +1157,8 @@ to `INotifier.setAvatarId`, which does
 `POST /api/i/update {"avatarId": "<fileId>"}`, and `avatarId: null` is sent
 explicitly (not omitted) to clear the avatar, which is why the call site
 opts out of this document's usual null-field-omission rule for this one
-field. PR5 must accept an explicit-null `avatarId` as "remove avatar," not
-reject it as a validation error.
+field. PR5 accepts an explicit-null `avatarId` as "remove avatar,"
+per this finding, rather than rejecting it as a validation error.
 
 **`POST /api/notes/timeline`'s `withFiles` flag is currently accepted and
 ignored** (`internal/httpserver/noteapi_handlers.go`'s `WithFiles *bool`

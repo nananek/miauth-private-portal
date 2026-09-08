@@ -161,11 +161,11 @@ func (s *Server) handleAPII(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, newMeDetailed(owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
+	writeJSON(w, http.StatusOK, newMeDetailed(s.localOrigin, owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
 }
 
-// handleAPIIUpdate handles POST /api/i/update (Issue #23 PR1). Only
-// display-name self-edit is implemented: docs/compat/aria-v1.5.11.md's
+// handleAPIIUpdate handles POST /api/i/update (Issue #23 PR1's name
+// field; Issue #77 PR5 adds avatarId). docs/compat/aria-v1.5.11.md's
 // "POST /api/i/update" section records that the pinned misskey_dart
 // IUpdateRequest model has no username field at all, and Aria's profile
 // screen has no username input either, so there is no observed wire
@@ -173,12 +173,19 @@ func (s *Server) handleAPII(w http.ResponseWriter, r *http.Request) {
 // a protocol beyond what a real client is shown to use).
 //
 // Unlike handleNotesCreate's enumerated per-field rejection,
-// IUpdateRequest has 40+ other fields (avatar, description, locked
-// status, mute lists, ...) this issue's Non-goals exclude; naming each
-// one here would risk silently missing one (and getting an exact
-// wire-key name wrong would itself be a guess). Decoding into a raw
-// key set and rejecting anything beyond "i"/"name" rejects all of them
-// correctly without needing to know their exact names.
+// IUpdateRequest has 40+ other fields (description, locked status, mute
+// lists, ...) this issue's Non-goals exclude; naming each one here would
+// risk silently missing one (and getting an exact wire-key name wrong
+// would itself be a guess). Decoding into a raw key set and rejecting
+// anything beyond "i"/"name"/"avatarId" rejects all of them correctly
+// without needing to know their exact names.
+//
+// name and avatarId are each independently optional now (PR5): PR0's
+// trace found Aria's avatar-only flow (INotifier.setAvatarId) sends
+// `{"avatarId": ...}` alone, with no "name" key at all — the opposite of
+// this handler's pre-PR5 "name is always required" shape, which would
+// have wrongly rejected that call. At least one of the two must be
+// present; whichever is present is applied, the other left untouched.
 func (s *Server) handleAPIIUpdate(w http.ResponseWriter, r *http.Request) {
 	raw := map[string]json.RawMessage{}
 	if r.Body != nil {
@@ -189,7 +196,7 @@ func (s *Server) handleAPIIUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	fields := make([]string, 0, len(raw))
 	for field := range raw {
-		if field == "i" || field == "name" {
+		if field == "i" || field == "name" || field == "avatarId" {
 			continue
 		}
 		fields = append(fields, field)
@@ -201,29 +208,86 @@ func (s *Server) handleAPIIUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var name *string
+	nameSet := false
 	if nameRaw, ok := raw["name"]; ok {
-		if err := json.Unmarshal(nameRaw, &name); err != nil {
+		nameSet = true
+		if err := json.Unmarshal(nameRaw, &name); err != nil || name == nil {
 			writeInvalidParam(w, "name must be a string")
 			return
 		}
 	}
-	if name == nil {
-		writeInvalidParam(w, "name is required")
+
+	// avatarId supports an explicit null (clear the avatar) — PR0's
+	// trace: Aria opts out of its usual null-omission convention
+	// specifically for this field to send "remove avatar" as
+	// `avatarId: null`, not by omitting the key.
+	var avatarID *string
+	avatarIDSet := false
+	if avatarRaw, ok := raw["avatarId"]; ok {
+		avatarIDSet = true
+		if err := json.Unmarshal(avatarRaw, &avatarID); err != nil {
+			writeInvalidParam(w, "avatarId must be a string or null")
+			return
+		}
+	}
+
+	if !nameSet && !avatarIDSet {
+		writeInvalidParam(w, "name or avatarId is required")
 		return
 	}
 
 	actorID := LocalActorIDFromContext(r.Context())
-	owner, err := s.miauth.UpdateOwnerDisplayName(r.Context(), actorID, *name)
+
+	if avatarIDSet && avatarID != nil {
+		// The referenced file must exist and be owned by the caller —
+		// internal/drive.Service.ShowFile already does exactly that
+		// ownership+existence check for the Drive API itself, so this
+		// reuses it rather than duplicating the rule.
+		if s.drive == nil {
+			s.logger.Error("avatarId update requested but drive is not configured", "request_id", logging.RequestIDFromContext(r.Context()))
+			writeInternalError(w)
+			return
+		}
+		if _, err := s.drive.ShowFile(r.Context(), actorID, *avatarID); err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				writeNoSuchFile(w)
+				return
+			}
+			s.logger.Error("validate avatarId ownership failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+	}
+
+	var owner miauth.OwnerProfile
+	var err error
+	if nameSet {
+		owner, err = s.miauth.UpdateOwnerDisplayName(r.Context(), actorID, *name)
+	} else {
+		owner, err = s.miauth.DescribeOwner(r.Context(), actorID)
+	}
 	if err != nil {
 		if errors.Is(err, miauth.ErrNotOwner) {
 			writeAuthenticationFailed(w)
 			return
 		}
-		s.logger.Error("update owner display name failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		s.logger.Error("update owner profile failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, newMeDetailed(owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
+	if avatarIDSet {
+		owner, err = s.miauth.UpdateOwnerAvatar(r.Context(), actorID, avatarID)
+		if err != nil {
+			if errors.Is(err, miauth.ErrNotOwner) {
+				writeAuthenticationFailed(w)
+				return
+			}
+			s.logger.Error("update owner avatar failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, newMeDetailed(s.localOrigin, owner, s.notesCountForOwner(r.Context(), owner.ActorID)))
 }
 
 // notesCreateRequest is the subset of Aria's create/reply request this
@@ -334,7 +398,7 @@ func (s *Server) handleNotesCreate(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	createdNote, err := s.projectNote(r.Context(), entry, newUserLiteFromOwner(owner), owner.ActorID)
+	createdNote, err := s.projectNote(r.Context(), entry, newUserLiteFromOwner(s.localOrigin, owner), owner.ActorID)
 	if err != nil {
 		s.logger.Error("project created note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeInternalError(w)

@@ -56,6 +56,16 @@ type Actor struct {
 	// this is deliberately narrower than Misskey's real profile-edit
 	// surface, not an oversight.
 	DisplayName *string
+	// AvatarFileID names a files row (nullable) whose bytes this actor's
+	// UserLite/UserDetailedNotMe.avatarUrl points at (Issue #77 PR5):
+	// GET /files/{id}, never a bare avatarId key on the wire — see
+	// userDetailedNotMe's own doc comment for that guardrail. Set via
+	// POST /api/i/update's avatarId field for the owner
+	// (internal/miauth.Service.UpdateOwnerAvatar), or by
+	// cmd/server's favicon fetch for an ActorExternalSource (PR4/
+	// ADR-0008) — nothing yet sets it for assistant/system/
+	// ActorOpenWebUIModel, though the column supports any actor type.
+	AvatarFileID *string
 }
 
 // IsLoginable reports whether this actor can be bound to a local MiAuth
@@ -123,4 +133,12 @@ type ActorRepository interface {
 	// Owner actor (internal/miauth.Service.UpdateOwnerDisplayName does):
 	// this method itself applies to whatever actorID it is given.
 	SetDisplayName(ctx context.Context, actorID string, displayName string) error
+	// SetAvatarFileID sets or clears (fileID == nil) actorID's
+	// AvatarFileID. It returns ErrNotFound if actorID does not exist. It
+	// does not check that fileID names an existing files row — callers
+	// validate that themselves against whatever rule applies to them
+	// (internal/miauth.Service.UpdateOwnerAvatar checks Drive ownership
+	// for the owner; cmd/server's favicon fetch creates the files row
+	// itself before ever calling this).
+	SetAvatarFileID(ctx context.Context, actorID string, fileID *string) error
 }

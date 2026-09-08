@@ -20,6 +20,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/httpserver"
 	"github.com/nananek/miauth-private-portal/internal/ingest"
+	"github.com/nananek/miauth-private-portal/internal/ingest/favicon"
 	"github.com/nananek/miauth-private-portal/internal/ingest/imap"
 	"github.com/nananek/miauth-private-portal/internal/ingest/rss"
 	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
@@ -474,7 +475,13 @@ func run() error {
 		// active by default, so ReconcileFromConfig's create-if-missing
 		// branch is a no-op for those.
 		seedNow := time.Now().UTC()
-		if err := ensureRSSSourcesWithActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow); err != nil {
+		// A separate, fixed-policy client from rssAdapter's own
+		// (cfg.RSS.AllowInsecureHTTP-controlled) one above: favicon fetch
+		// always requires https, matching driveSvc's upload-from-url
+		// client's reasoning — see internal/ingest/favicon.Fetch's doc
+		// comment.
+		faviconClient := safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: false})
+		if err := ensureRSSSourcesWithActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow, driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger); err != nil {
 			return fmt.Errorf("seed rss sources: %w", err)
 		}
 		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, seedNow); err != nil {
@@ -642,7 +649,18 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 // create (not itself wrapped in a further outer transaction) because it
 // only ever runs once, single-threaded, during this process's own
 // startup — there is no concurrent caller to race against.
-func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []string, feedUsernames []*string, now time.Time) error {
+//
+// After each new source's actor+source pair commits, its host's
+// favicon.ico is fetched, validated, and stored as that actor's avatar
+// (Issue #77 PR5, folded in per plan-77 requirement 2: RSS icon fetch and
+// the profile-image (avatar_file_id) infrastructure share the same
+// Drive-backed storage path, so plan-77's owner decided to land them
+// together). This step is strictly best-effort — see
+// fetchAndSetSourceFavicon's doc comment — and runs outside the actor/
+// source transaction: a network fetch has no business holding a database
+// write lock, and a favicon failure must never unwind an otherwise
+// successful source registration.
+func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []string, feedUsernames []*string, now time.Time, driveSvc *drive.Service, faviconClient *safehttp.Client, faviconMaxBytes int64, logger *slog.Logger) error {
 	for i, feedURL := range feedURLs {
 		if _, err := db.ExternalSources.GetByURI(ctx, rss.Kind, feedURL); err == nil {
 			continue // already registered; username/host are never recomputed
@@ -687,8 +705,36 @@ func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []s
 		if err != nil {
 			return fmt.Errorf("register rss source %q: %w", feedURL, err)
 		}
+
+		fetchAndSetSourceFavicon(ctx, db, driveSvc, faviconClient, faviconMaxBytes, actorID, host, username, logger)
 	}
 	return nil
+}
+
+// fetchAndSetSourceFavicon best-effort fetches host's favicon.ico,
+// stores it as an owner-less Drive file (domain.FilePurposeSourceFavicon),
+// and points actorID's avatar_file_id at it. Every failure — no
+// favicon.ico, an unsupported legacy BMP-in-ICO, a favicon exceeding
+// faviconMaxBytes, or a Drive validation/storage error — is logged and
+// swallowed: this is a cosmetic enhancement to a source actor a caller
+// has already committed to the database, not a precondition for it, so
+// none of these failures may propagate to ensureRSSSourcesWithActors'
+// caller (which would otherwise fail this process's entire startup over
+// a third party's missing icon).
+func fetchAndSetSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, client *safehttp.Client, maxBytes int64, actorID, host, username string, logger *slog.Logger) {
+	pngData, err := favicon.Fetch(ctx, client, host, maxBytes)
+	if err != nil {
+		logger.Info("rss source favicon fetch skipped", "host", host, "username", username, "error", err)
+		return
+	}
+	file, err := driveSvc.CreateSystemFile(ctx, domain.FilePurposeSourceFavicon, host+"-favicon.png", pngData)
+	if err != nil {
+		logger.Warn("rss source favicon store failed", "host", host, "username", username, "error", err)
+		return
+	}
+	if err := db.Actors.SetAvatarFileID(ctx, actorID, &file.ID); err != nil {
+		logger.Warn("rss source favicon avatar assignment failed", "host", host, "username", username, "error", err)
+	}
 }
 
 // driveCapacityBytes is POST /api/drive's advertised capacity — cosmetic

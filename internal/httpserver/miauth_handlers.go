@@ -92,13 +92,15 @@ func (s *Server) handleMiAuthCheck(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(checkFailureResponse{OK: false})
 		return
 	}
+	user := newUserDetailedNotMe(
+		result.OwnerActorID, result.OwnerUsername, result.OwnerDisplayName, result.OwnerCreatedAt,
+		s.notesCountForOwner(r.Context(), result.OwnerActorID),
+	)
+	user.AvatarURL = avatarURLFromFileID(s.localOrigin, result.OwnerAvatarFileID)
 	_ = json.NewEncoder(w).Encode(checkSuccessResponse{
 		OK:    true,
 		Token: result.Token,
-		User: newUserDetailedNotMe(
-			result.OwnerActorID, result.OwnerUsername, result.OwnerDisplayName, result.OwnerCreatedAt,
-			s.notesCountForOwner(r.Context(), result.OwnerActorID),
-		),
+		User:  user,
 	})
 }
 

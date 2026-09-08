@@ -182,6 +182,9 @@ type CheckResult struct {
 	OwnerCreatedAt   time.Time
 	OwnerUsername    string
 	OwnerDisplayName string
+	// OwnerAvatarFileID mirrors OwnerProfile's own field (Issue #77
+	// PR5) — see that type's doc comment.
+	OwnerAvatarFileID *string
 }
 
 func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult, error) {
@@ -217,6 +220,7 @@ func (s *Service) Check(ctx context.Context, routeSessionID string) (CheckResult
 		result = CheckResult{
 			Token: raw, OwnerActorID: owner.ID, OwnerCreatedAt: owner.CreatedAt,
 			OwnerUsername: s.cfg.OwnerUsername, OwnerDisplayName: displayNameOrEmpty(owner.DisplayName),
+			OwnerAvatarFileID: owner.AvatarFileID,
 		}
 		return nil
 	})
@@ -253,6 +257,11 @@ type OwnerProfile struct {
 	Username    string
 	DisplayName string
 	CreatedAt   time.Time
+	// AvatarFileID names a files row (Issue #77 PR5), or nil if the
+	// owner has never set one. internal/httpserver resolves it to an
+	// absolute GET /files/{id} URL for the wire's avatarUrl field —
+	// never a bare avatarId key (userDetailedNotMe's own guardrail).
+	AvatarFileID *string
 }
 
 // DescribeOwner returns the owner's profile for actorID, the local actor
@@ -272,10 +281,11 @@ func (s *Service) DescribeOwner(ctx context.Context, actorID string) (OwnerProfi
 		return OwnerProfile{}, err
 	}
 	return OwnerProfile{
-		ActorID:     actor.ID,
-		Username:    s.cfg.OwnerUsername,
-		DisplayName: displayNameOrEmpty(actor.DisplayName),
-		CreatedAt:   actor.CreatedAt,
+		ActorID:      actor.ID,
+		Username:     s.cfg.OwnerUsername,
+		DisplayName:  displayNameOrEmpty(actor.DisplayName),
+		CreatedAt:    actor.CreatedAt,
+		AvatarFileID: actor.AvatarFileID,
 	}, nil
 }
 
@@ -301,10 +311,42 @@ func (s *Service) UpdateOwnerDisplayName(ctx context.Context, actorID, displayNa
 		return OwnerProfile{}, err
 	}
 	return OwnerProfile{
-		ActorID:     actor.ID,
-		Username:    s.cfg.OwnerUsername,
-		DisplayName: displayName,
-		CreatedAt:   actor.CreatedAt,
+		ActorID:      actor.ID,
+		Username:     s.cfg.OwnerUsername,
+		DisplayName:  displayName,
+		CreatedAt:    actor.CreatedAt,
+		AvatarFileID: actor.AvatarFileID,
+	}, nil
+}
+
+// UpdateOwnerAvatar is POST /api/i/update's avatarId field (Issue #77
+// PR5). fileID is applied verbatim, including nil to clear it — PR0's
+// trace of Aria's INotifier.setAvatarId found it sends an explicit
+// `avatarId: null` to remove the avatar (opting out of the client's
+// usual null-omission convention specifically for this field), so nil
+// here must clear rather than be rejected as invalid. Unlike
+// UpdateOwnerDisplayName, this package does not validate that fileID
+// names a files row the owner actually owns — internal/httpserver does,
+// through internal/drive.Service.ShowFile, before ever calling this
+// (this package has no internal/drive dependency, and none of Drive's
+// ownership/existence semantics belong in a bare actor-column setter).
+func (s *Service) UpdateOwnerAvatar(ctx context.Context, actorID string, fileID *string) (OwnerProfile, error) {
+	actor, err := s.repos.Actors.Get(ctx, actorID)
+	if err != nil {
+		return OwnerProfile{}, err
+	}
+	if actor.Type != domain.ActorOwner {
+		return OwnerProfile{}, ErrNotOwner
+	}
+	if err := s.repos.Actors.SetAvatarFileID(ctx, actorID, fileID); err != nil {
+		return OwnerProfile{}, err
+	}
+	return OwnerProfile{
+		ActorID:      actor.ID,
+		Username:     s.cfg.OwnerUsername,
+		DisplayName:  displayNameOrEmpty(actor.DisplayName),
+		CreatedAt:    actor.CreatedAt,
+		AvatarFileID: fileID,
 	}, nil
 }
 

@@ -1,10 +1,13 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
 - Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
-  icons), and PR3 (Misskey-compatible Drive API) complete. PR4
-  (RSS/external-source icons and attribution) partially complete — its
-  identity/host mechanism (ADR-0007) is done; favicon fetching/storage
-  is not. PR5–PR7 not started.
+  icons), PR3 (Misskey-compatible Drive API), and PR5 (profile images +
+  favicon fetching) complete. PR4 (RSS/external-source icons and
+  attribution)'s identity/host mechanism (ADR-0008) was done in its own
+  commit; favicon fetching/storage — left open at the end of PR4 as an
+  explicit owner decision — was folded into PR5 rather than a PR4
+  follow-up, since both need the same Drive-backed image storage
+  infrastructure (owner decision, 2026-09-08). PR6–PR7 not started.
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -274,10 +277,13 @@ implementation order but has no dependency on it.
 
 ## PR4: RSS/external-source icons and attribution
 
-**Status: partially complete.** Depended on PR1. The identity/
-attribution half of this PR (plan-77 §2.4, ADR-0008's design-A decision)
-is done; **favicon fetching/storage is not yet implemented** — see
-"Not yet done" below.
+**Status: complete.** Depended on PR1. The identity/attribution half of
+this PR (plan-77 §2.4, ADR-0008's design-A decision) landed in PR4's own
+commit; favicon fetching/storage — left open at the end of PR4, see
+"Deferred to PR5" below — landed as part of PR5 instead (owner decision,
+2026-09-08: favicon fetch and `actors.avatar_file_id` share the same
+Drive-backed image storage infrastructure, so bundling them was judged
+more coherent than a separate PR4-follow-up commit).
 
 Done:
 
@@ -315,31 +321,85 @@ Done:
   IMAP-kind sources keep projecting as the shared `system` actor,
   unchanged.
 
-Not yet done (open follow-up, not covered by this PR's commit):
+Deferred to PR5 (see PR5's own entry for what actually shipped):
 
 - **Favicon fetching/storage.** plan-77 §3's one-line PR4 summary lists
   "favicon解決" (an `internal/ingest/favicon` package, SSRF-safe via
   `internal/ingest/safehttp`, storing the result through PR1's Drive
   foundation as a `source_favicon`-purpose `files` row, and projecting
   it as the source actor's avatar). Plan-77's detailed §2.4 rewrite
-  (workerA, 2026-09-08) focuses entirely on the host/username design
-  question above and does not re-specify favicon mechanics; whether to
-  implement it as a PR4 follow-up commit, fold it into PR5 (which
-  already owns `actors.avatar_file_id`, the column favicon storage would
-  reuse per plan-77 §2.5), or track it as its own PR is an open decision
-  for the tracker, not resolved by this entry.
+  (workerA, 2026-09-08) focused entirely on the host/username design
+  question above and did not re-specify favicon mechanics; the owner
+  resolved the open "PR4 follow-up vs. fold into PR5 vs. own PR" question
+  by choosing the fold-into-PR5 option this entry originally flagged.
 
-## PR5: Profile images
+## PR5: Profile images + favicon fetching
 
-**Status: not started.** Depends on PR1 and PR3. Adds
-`actors.avatar_file_id` (nullable FK), projects `avatarUrl` (never
-`avatarId` — see this document's PR0 notes and
-`docs/compat/aria-v1.5.11.md`'s existing `User`/`avatarId` discriminator
-guardrail) onto `userLite`/`userDetailedNotMe`, and implements the
-`i/update {avatarId}` field PR0 confirmed Aria sends. VirtualActor
-(Open WebUI model) avatars reuse the same `avatar_file_id` column, set via
-an `openwebuictl` command rather than the Drive API (a model is never a
-login-capable Aria user).
+**Status: complete.** Depended on PR1 and PR3. Scope grew from the
+original plan-77 outline (profile images only) to include PR4's deferred
+favicon fetching (see PR4's "Deferred to PR5" note above), on the owner's
+explicit reasoning that both need the same Drive-backed image storage
+infrastructure.
+
+Profile images:
+
+- `actors.avatar_file_id` (nullable FK to `files`, migration
+  `0030_actors_avatar_file_id.sql`), plumbed through
+  `ActorRepository.SetAvatarFileID` / `domain.Actor.AvatarFileID` /
+  `miauth.Service.UpdateOwnerAvatar` (owner-only; `ErrNotOwner` otherwise)
+  and `OwnerProfile.AvatarFileID`.
+- `avatarUrl` (never `avatarId` — see this document's PR0 notes and
+  `docs/compat/aria-v1.5.11.md`'s existing `User`/`avatarId` discriminator
+  guardrail) on `userLite` and `userDetailedNotMe`, resolved by the shared
+  `avatarURLFromFileID` helper to an absolute `GET /files/{id}` URL.
+  **Design decision:** when `AvatarFileID` is nil, `avatarURLFromFileID`
+  returns `nil` and `avatarUrl` is simply `null` on the wire — this
+  service never generates an initials/placeholder image server-side.
+  This matches real Misskey servers, which likewise send `avatarUrl:
+  null` for an unset avatar and leave rendering a fallback (an initial,
+  a gray silhouette, ...) entirely to the client. Issue #77's acceptance
+  criterion "新規インストール直後でもデフォルトアバターが表示される" is
+  therefore satisfied by Aria's own existing null-avatar fallback
+  rendering, not by anything new here.
+- `POST /api/i/update` accepts an optional `avatarId` field alongside the
+  pre-existing `name` field — **`name` changed from always-required to
+  optional**, a genuine bug fix: PR0's Aria trace found
+  `INotifier.setAvatarId` sends `{"avatarId": ...}` alone with no `name`
+  key, which the pre-PR5 "name is required" shape would have wrongly
+  rejected. An explicit `avatarId: null` clears the avatar (plan-77's
+  confirmed upload sequence); a non-null `avatarId` is validated as a
+  `files` row the requesting owner actually owns
+  (`drive.Service.ShowFile`) before being written.
+- VirtualActor (Open WebUI model) avatars are **not** wired in this PR —
+  `avatar_file_id` is generic to any actor, but no `openwebuictl` command
+  or other write path sets it for a model actor yet; left for a future
+  PR if ever needed.
+
+Favicon fetching:
+
+- `internal/ingest/favicon` (new package): `Fetch` GETs `https://<host>/
+  favicon.ico` over a dedicated `internal/ingest/safehttp.Client`
+  (fixed `AllowInsecureHTTP: false` policy, independent of
+  `RSS_ALLOW_INSECURE_HTTP` — a deliberate simplification, since every
+  failure here is meant to be swallowed as best-effort rather than
+  surfaced); `ExtractPNGFromICO` parses the ICO container and returns the
+  largest embedded "PNG-in-ICO" image, rejecting the legacy BMP-in-ICO
+  shape as an accepted, documented limitation.
+- `drive.Service.CreateSystemFile` (new, alongside a refactored-but-
+  behavior-unchanged `CreateFile`): stores an owner-less file — used only
+  for `source_favicon`-purpose files, since a favicon belongs to no Drive
+  user.
+- `cmd/server.ensureRSSSourcesWithActors` calls the new
+  `fetchAndSetSourceFavicon` after each newly-registered RSS source's
+  actor+source pair commits: fetch → validate/store via
+  `CreateSystemFile` → `ActorRepository.SetAvatarFileID`, entirely
+  best-effort (every failure is logged at `info`/`warn` and swallowed,
+  never blocking source registration) and outside the actor/source
+  database transaction.
+- `resolveUserLite`'s existing `ActorExternalSource` case
+  (`internal/httpserver/noteapi_wire.go`) now also projects
+  `avatarUrl` from the resolved actor's `AvatarFileID`, reusing the same
+  `avatarURLFromFileID` helper profile images use.
 
 ## PR6: Post attachments
 
@@ -367,9 +427,10 @@ login-capable Aria user).
   documented directory-level backup; S3 backend backup is documented as
   "delegate to the object store's own versioning/replication," not
   reimplemented in this repository.
-- Storage-failure-path tests, SSRF/oversized-response tests for favicon
-  fetching (PR4), and dedicated image-validation tests (SVG rejection
-  included).
+- Storage-failure-path tests and dedicated image-validation tests (SVG
+  rejection included). SSRF/oversized-response tests for favicon
+  fetching landed already, in PR5 (`internal/ingest/favicon`'s own test
+  file).
 
 ## Documentation follow-ups tracked across this feature
 
@@ -379,9 +440,8 @@ login-capable Aria user).
 - `docs/compat/aria-v1.5.11.md`: PR0 added the Drive/attachment contract
   section and allowlist rows (done). PR3 promotes them from "planned" to
   "implemented" (done). PR4 updated the existing provenance-is-a-fixed-
-  actor framing in "Note.text provenance markers" (done). PR5 must
-  update the `i/update` avatar non-goal note (PR0 already flagged the
-  exact sentence).
+  actor framing in "Note.text provenance markers" (done). PR5 updated the
+  `i/update` avatar non-goal note PR0 had flagged (done).
 - New `docs/decisions/000X-drive-storage-boundary.md` ADR (PR1).
 - `docs/operations/configuration.md`: new Drive-related configuration keys
   (PR1).
@@ -401,5 +461,5 @@ login-capable Aria user).
   roadmap document this one follows the structure of
 - `internal/openwebui/registry.go`'s `SecretRefAPIKey` — the credential
   pattern PR1's S3 secrets reuse
-- `internal/ingest/safehttp` — the SSRF-safe HTTP client PR4's favicon
-  fetcher reuses
+- `internal/ingest/safehttp` — the SSRF-safe HTTP client PR5's
+  `internal/ingest/favicon` fetcher reuses

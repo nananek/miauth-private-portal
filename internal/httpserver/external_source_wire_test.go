@@ -73,6 +73,52 @@ func TestResolveUserLite_ProjectsExternalSourceRealHost(t *testing.T) {
 	}
 }
 
+// TestResolveUserLite_ProjectsExternalSourceAvatar is Issue #77 PR5's
+// favicon-as-avatar contract test: once an ActorExternalSource actor's
+// avatar_file_id is set (fetchAndSetSourceFavicon's job at startup — this
+// test sets it directly, exercising only the wire projection), an entry
+// it authored must carry that file's absolute /files/{id} URL as
+// note.user.avatarUrl, exactly like the owner's own avatar
+// (avatarURLFromFileID).
+func TestResolveUserLite_ProjectsExternalSourceAvatar(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	actor := mustCreateExternalSourceActorForTest(t, ts, "note.example.com", "myfeed")
+
+	writeToken, _ := mustIssueToken(t, ts.Server, "avatar-upload", "write:drive")
+	fileID := uploadTestDriveFile(t, ts, writeToken)
+	if err := ts.db.Actors.SetAvatarFileID(t.Context(), actor.ID, &fileID); err != nil {
+		t.Fatalf("set avatar file id: %v", err)
+	}
+
+	id := domain.NewID()
+	entry := domain.Entry{
+		ID: id, ThreadID: id, Kind: domain.EntryNews,
+		AuthorActorID: actor.ID, Body: "[news] headline\n\nbody", ProcessingStatus: domain.ProcessingNone,
+		CreatedAt: ts.clock.Now(), UpdatedAt: ts.clock.Now(),
+	}
+	if err := ts.db.Threads.Create(t.Context(), domain.Thread{ID: entry.ThreadID, CreatedAt: ts.clock.Now(), UpdatedAt: ts.clock.Now()}); err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := ts.db.Entries.Create(t.Context(), entry); err != nil {
+		t.Fatalf("create entry: %v", err)
+	}
+
+	rec := ts.post(t, "/api/notes/show", map[string]any{"noteId": entry.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %q, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+	var got map[string]any
+	mustDecode(t, rec, &got)
+	user, ok := got["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("user is not an object: %v", got["user"])
+	}
+	want := ts.localOrigin + "/files/" + fileID
+	if user["avatarUrl"] != want {
+		t.Errorf("user.avatarUrl = %v, want %q", user["avatarUrl"], want)
+	}
+}
+
 // TestResolveUserLite_ExternalSourceFallsBackWhenNotResolvable mirrors
 // TestResolveUserLite_VirtualActorFallsBackWhenNotResolvable: an
 // ActorExternalSource actor whose owning ExternalSource has since been

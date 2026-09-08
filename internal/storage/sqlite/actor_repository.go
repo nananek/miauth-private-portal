@@ -35,20 +35,20 @@ func (r *actorRepository) EnsureReservedActors(ctx context.Context) error {
 // outside that index and may be created repeatedly, one per model.
 func (r *actorRepository) Create(ctx context.Context, a domain.Actor) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO actors (id, actor_type, created_at, display_name) VALUES (?, ?, ?, ?)`,
-		a.ID, string(a.Type), formatTime(a.CreatedAt), nullableString(a.DisplayName),
+		`INSERT INTO actors (id, actor_type, created_at, display_name, avatar_file_id) VALUES (?, ?, ?, ?, ?)`,
+		a.ID, string(a.Type), formatTime(a.CreatedAt), nullableString(a.DisplayName), nullableString(a.AvatarFileID),
 	)
 	return mapWriteError(err)
 }
 
 func (r *actorRepository) Get(ctx context.Context, id string) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
-		`SELECT id, actor_type, created_at, display_name FROM actors WHERE id = ?`, id))
+		`SELECT id, actor_type, created_at, display_name, avatar_file_id FROM actors WHERE id = ?`, id))
 }
 
 func (r *actorRepository) GetByType(ctx context.Context, actorType domain.ActorType) (domain.Actor, error) {
 	return scanActor(r.q.QueryRowContext(ctx,
-		`SELECT id, actor_type, created_at, display_name FROM actors WHERE actor_type = ?`, string(actorType)))
+		`SELECT id, actor_type, created_at, display_name, avatar_file_id FROM actors WHERE actor_type = ?`, string(actorType)))
 }
 
 // ListByType returns every actor of one type, ordered by (created_at,
@@ -57,7 +57,7 @@ func (r *actorRepository) GetByType(ctx context.Context, actorType domain.ActorT
 // text).
 func (r *actorRepository) ListByType(ctx context.Context, actorType domain.ActorType) ([]domain.Actor, error) {
 	rows, err := r.q.QueryContext(ctx,
-		`SELECT id, actor_type, created_at, display_name FROM actors
+		`SELECT id, actor_type, created_at, display_name, avatar_file_id FROM actors
 		 WHERE actor_type = ? ORDER BY created_at, id`, string(actorType))
 	if err != nil {
 		return nil, err
@@ -88,15 +88,30 @@ func (r *actorRepository) SetDisplayName(ctx context.Context, actorID string, di
 	return requireRowAffected(res)
 }
 
+// SetAvatarFileID sets or clears (fileID == nil) actorID's avatar. It
+// does not check that fileID actually names an existing files row —
+// callers (internal/miauth.Service.UpdateOwnerAvatar,
+// cmd/server's favicon fetch) validate that themselves before calling,
+// each against the specific rules that apply to them (owner-uploaded
+// via Drive vs. a fetched favicon with no owning actor).
+func (r *actorRepository) SetAvatarFileID(ctx context.Context, actorID string, fileID *string) error {
+	res, err := r.q.ExecContext(ctx, `UPDATE actors SET avatar_file_id = ? WHERE id = ?`, nullableString(fileID), actorID)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
 func scanActor(row rowScanner) (domain.Actor, error) {
 	var a domain.Actor
 	var actorType, createdAt string
-	var displayName sql.NullString
-	if err := row.Scan(&a.ID, &actorType, &createdAt, &displayName); err != nil {
+	var displayName, avatarFileID sql.NullString
+	if err := row.Scan(&a.ID, &actorType, &createdAt, &displayName, &avatarFileID); err != nil {
 		return domain.Actor{}, mapReadError(err)
 	}
 	a.Type = domain.ActorType(actorType)
 	a.DisplayName = stringPtr(displayName)
+	a.AvatarFileID = stringPtr(avatarFileID)
 	t, err := parseTime(createdAt)
 	if err != nil {
 		return domain.Actor{}, err
