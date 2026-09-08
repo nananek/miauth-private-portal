@@ -209,6 +209,11 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 			s.Handle("POST /api/users/lists/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsDelete)))
 			s.Handle("POST /api/users/lists/push", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsPush)))
 			s.Handle("POST /api/users/lists/pull", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsPull)))
+			// Issue #115 PR3: the list's own filtered timeline. Scoped
+			// read:notes, matching notes/timeline's own scope (plan-115
+			// §2.1) rather than read:account like the CRUD routes above —
+			// it reads notes, not list metadata.
+			s.Handle("POST /api/notes/user-list-timeline", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesUserListTimeline)))
 		}
 	}
 

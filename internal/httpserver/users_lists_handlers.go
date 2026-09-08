@@ -9,17 +9,15 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/logging"
 )
 
-// users/lists/* and notes/user-list-timeline error IDs below follow the
-// same invented-but-Misskey-flavored convention writeNoSuchNote/
-// writeNoSuchFile already establish (noteapi_errors.go's wireError doc
-// comment) — not literal real-Misskey error IDs.
+// writeNoSuchList follows the same invented-but-Misskey-flavored
+// convention writeNoSuchNote/writeNoSuchFile/writeNoSuchUser already
+// establish (noteapi_errors.go's wireError doc comment) — not a literal
+// real-Misskey error ID. writeNoSuchUser itself (used by
+// handleUsersListsPush below) is defined once, in noteapi_errors.go —
+// Issue #114's users/show and users/notes needed the same denial first.
 
 func writeNoSuchList(w http.ResponseWriter) {
 	writeWireError(w, http.StatusBadRequest, "no-such-list", "NO_SUCH_LIST", "No such list.", "client", nil)
-}
-
-func writeNoSuchUser(w http.ResponseWriter) {
-	writeWireError(w, http.StatusBadRequest, "no-such-user", "NO_SUCH_USER", "No such user.", "client", nil)
 }
 
 // writeUserListError maps an internal/userlist.Service error to a wire
