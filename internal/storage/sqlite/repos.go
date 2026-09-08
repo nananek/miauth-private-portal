@@ -46,5 +46,7 @@ func newRepos(q querier) domain.Repos {
 
 		Config:      &configRepository{q: q},
 		ConfigAudit: &configAuditRepository{q: q},
+
+		UserLists: &userListRepository{q: q},
 	}
 }

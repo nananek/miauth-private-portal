@@ -116,6 +116,10 @@ redacted.
 | `POST /api/drive/folders/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/notes/create` (`fileIds` field) | **必要** for Issue #77 (implemented — PR6) | Post composer's attachment picker (new local upload or existing drive file) | Already-granted `write:notes` — no new scope |
 | `POST /api/i/update` (`avatarId` field) | **必要** for Issue #77 (implemented — PR5) | Profile avatar upload/removal flow | `write:account` (already granted). Every other non-`name`/`avatarId` `IUpdateRequest` field stays rejected as `UNSUPPORTED_FEATURE`, per the Issue #23 scope decision above |
+| `POST /api/users/lists/create`, `/show`, `/list`, `/update`, `/delete` | **必要** for Issue #115 (implemented) | List management screen: create, view, rename/toggle-public, delete | `i` token; `read:account` for `show`/`list`, `write:account` for `create`/`update`/`delete` (both already granted — no new scope) |
+| `POST /api/users/lists/push`, `/pull` | **必要** for Issue #115 (implemented) | Member add/remove UI (`list_users.dart`) | `i` token; `write:account`. `push` of an actor outside the known-actor set fails explicitly (`NO_SUCH_USER`) |
+| `POST /api/notes/user-list-timeline` | **必要** for Issue #115 (implemented) | A list's own filtered timeline tab (`list_page.dart`) | `i` token; `read:notes` (already granted — no new scope) |
+| `POST /api/users/lists/create-from-public`, `/favorite`, `/unfavorite` | **不要** | Import/favorite **another instance's** public list — federation-facing; this deployment has no federation or other users (Issue #115 Non-goals) | N/A — never implement without federation |
 
 `/api/endpoints` is deliberately **要実機確認** rather than part of the
 minimal release gate: the call is present in Aria's edit capability probe,
@@ -1096,6 +1100,112 @@ stops paging on an empty result either way.
 `EntryRepository.ListByAuthorsDesc` (`internal/storage/sqlite/
 entry_repository.go`) — `ListTimelineDesc`'s own `(created_at, id)`
 cursor query, scoped to a fixed set of authors — for `users/notes`.
+
+### `POST /api/users/lists/*` and `POST /api/notes/user-list-timeline` (Issue #115, implemented)
+
+Traced from the pinned `misskey_dart` commit's `lib/src/misskey_users.dart`
+(`MisskeyUsersLists` class), `lib/src/data/users/lists/*.dart` (each
+request's field shape), and
+`lib/src/data/notes/user_list_timeline_request.dart`; and from the pinned
+Aria commit's `lib/view/page/list/lists_page.dart` (list-of-lists view),
+`list_page.dart` (a single list's own filtered timeline tab),
+`list_users.dart` (member add/remove), and
+`lib/repository/miauth_repository.dart` (Aria's fixed MiAuth permission
+list, checked for a list-specific scope string).
+
+The owner's original request was misread during investigation as "group my
+followed users"; the owner corrected this — real Misskey's "list" groups
+**any** known user regardless of follow state, and this deployment has no
+follow concept at all (Issue #34) precisely because grouping does not need
+one. The groupable set is therefore this deployment's already-small known
+local-actor set (owner/assistant/system/Open WebUI model actors — the same
+set `users/search`, Issue #65, already enumerates via `searchCandidates`),
+not real Misskey's "your followed users." An owner-suggested example (RSS
+sources as list members) does not fit this deployment's actor model either:
+`internal/domain.ActorType` has no per-RSS-source actor — every RSS/mail
+item is authored by the single reserved `system` actor (or, since Issue #77
+PR4, a source's own `ActorExternalSource` actor when it has one) — so a
+list groups by actor identity exactly as `users/search` already does, not
+by external source.
+
+`MisskeyUsersLists` defines ten methods; three (`createFromPublic`,
+`favorite`, `unfavorite`) import or favorite **another instance's public**
+list and are **不要**: this deployment has no federation and no other users
+to own a separate public list (Issue #115 Non-goals). The remaining seven,
+plus the separate `notes/user-list-timeline` namespace, are all implemented:
+
+```json
+// POST /api/users/lists/create
+{"name": "AI"}
+// POST /api/users/lists/show, /delete
+{"listId": "..."}
+// POST /api/users/lists/update
+{"listId": "...", "name": "AI models", "isPublic": true}
+// POST /api/users/lists/push, /pull
+{"listId": "...", "userId": "..."}
+// POST /api/users/lists/list
+{}
+// POST /api/notes/user-list-timeline
+{"listId": "...", "limit": 30, "untilId": "..."}
+```
+
+`create`/`show`/`update`/`list` all resolve to the same response shape
+(`misskey_dart` reuses one `UsersList` type across every one of them):
+
+```json
+{"id": "...", "createdAt": "...", "name": "...", "userIds": ["...", "..."], "isPublic": false, "likedCount": 0, "isLiked": false}
+```
+
+`isPublic`/`likedCount`/`isLiked` are Misskey 13.13.0-era additions the
+pinned `misskey_dart` marks nullable; `likedCount`/`isLiked` are fixed at
+`0`/`false` here (list-favoriting is federation-facing, Non-goals) and
+`isPublic` is persisted (so a caller reading its own `update` back sees
+the value it set) but drives no other behavior — there is no public list
+page to gate.
+
+`push`/`pull`/`delete` return `204 No Content` with no body, matching every
+other Misskey mutation-only endpoint this document has already implemented
+(e.g. `notes/reactions/delete`). `push` against an actor ID outside the
+known-actor set fails explicitly (`NO_SUCH_USER`, mirroring
+`writeNoSuchNote`'s existing "explicit failure, never fabricated success"
+convention — AGENTS.md) rather than silently succeeding or accepting an
+arbitrary string. `pull` of a non-member, and a repeated `push` of an
+already-added member, are both treated as idempotent no-ops rather than
+errors: no traced Aria call site distinguishes those responses from
+ordinary success, and Misskey compatibility contract-tests only assert on
+the resulting member set, not on a specific error for either case.
+
+`notes/user-list-timeline` reuses `notes/timeline`'s own contract exactly
+(newest-first, `untilId`-paginated, `sinceId`/`sinceDate`/`untilDate`/
+`withRenotes`/`withFiles`/`allowPartial` accepted and ignored — no traced
+Aria call site sends the latter three either), restricted to entries
+authored by `listId`'s current members. A list with zero members returns
+an empty page, never every entry: `notes/user-list-timeline` is a
+narrowing filter, not a fallback view.
+
+**Implemented as** `Server.handleUsersLists{Create,List,Show,Update,Delete,
+Push,Pull}` (`internal/httpserver/users_lists_handlers.go`/
+`users_lists_wire.go`) and `Server.handleNotesUserListTimeline`
+(`internal/httpserver/notes_user_list_timeline.go`), backed by the new
+`internal/userlist.Service` / `internal/domain.UserListRepository`
+(migration `0033_user_lists.sql`: `user_lists` + `user_list_members`).
+Scopes: `read:account` for `list`/`show`, `write:account` for
+`create`/`update`/`delete`/`push`/`pull` (Aria's fixed MiAuth permission
+list, per `miauth_repository.dart`, has no list-specific permission
+string — only the pre-existing `read:account`/`write:account` apply, the
+same "no new scope" conclusion Issue #65's `users/search` trace already
+reached), and `read:notes` for `user-list-timeline` (matching
+`notes/timeline`'s own scope, since it reads notes, not list metadata).
+`EntryRepository.ListByAuthorsDesc` — `ListTimelineDesc` generalized to a
+set of authors — backs the timeline query. Issue #115 branched before
+Issue #114 merged and defined its own copy of `ListByAuthorsDesc` (Issue
+#114 was not yet available to reuse when this shipped — see plan-115
+§0); the post-merge integration rebase reconciled the two into the one
+method Issue #114's own section above documents, with
+`timeline.Service.GetTimelineByAuthorsDesc` (this issue's multi-author
+wrapper) kept alongside `GetEntriesByAuthorDesc` (Issue #114's
+single-author wrapper) since `users/notes` and `notes/user-list-timeline`
+call it with a different-shaped argument each.
 
 ### Drive API and note attachments (Issue #77 investigation — PR0)
 

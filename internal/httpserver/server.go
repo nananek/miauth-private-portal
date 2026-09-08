@@ -31,6 +31,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
+	"github.com/nananek/miauth-private-portal/internal/userlist"
 )
 
 // Server wraps an http.ServeMux, applying access-log middleware to every
@@ -41,6 +42,7 @@ type Server struct {
 
 	miauth                   *miauth.Service
 	timeline                 *timeline.Service
+	userLists                *userlist.Service
 	localOrigin              string
 	llmEnabled               bool
 	llmClassificationEnabled bool
@@ -121,6 +123,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		logger:                   logger,
 		miauth:                   opts.MiAuthService,
 		timeline:                 opts.TimelineService,
+		userLists:                opts.UserListService,
 		localOrigin:              opts.LocalOrigin,
 		llmEnabled:               opts.LLMEnabled,
 		llmClassificationEnabled: opts.LLMClassificationEnabled,
@@ -188,6 +191,30 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		// endpoint in this group).
 		s.Handle("POST /api/users/show", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersShow)))
 		s.Handle("POST /api/users/notes", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleUsersNotes)))
+
+		// Issue #115 PR2: users/lists/* CRUD and membership push/pull.
+		// Nested inside the TimelineService-gated group (rather than its
+		// own opts.MiAuthService-only group, the way Drive's routes below
+		// are independent of it) because handleUsersListsPush validates
+		// its userId against searchCandidates, which itself calls
+		// s.timeline.GetActorByType/ListActorsByType — see
+		// isKnownActor's doc comment. cmd/server always wires
+		// TimelineService and UserListService together, so this
+		// additional nil check only matters to httpserver's own tests.
+		if opts.UserListService != nil {
+			s.Handle("POST /api/users/lists/create", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsCreate)))
+			s.Handle("POST /api/users/lists/list", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersListsList)))
+			s.Handle("POST /api/users/lists/show", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersListsShow)))
+			s.Handle("POST /api/users/lists/update", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsUpdate)))
+			s.Handle("POST /api/users/lists/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsDelete)))
+			s.Handle("POST /api/users/lists/push", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsPush)))
+			s.Handle("POST /api/users/lists/pull", RequireScope(logger, s.miauth, miauth.ScopeWriteAccount)(http.HandlerFunc(s.handleUsersListsPull)))
+			// Issue #115 PR3: the list's own filtered timeline. Scoped
+			// read:notes, matching notes/timeline's own scope (plan-115
+			// §2.1) rather than read:account like the CRUD routes above —
+			// it reads notes, not list metadata.
+			s.Handle("POST /api/notes/user-list-timeline", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleNotesUserListTimeline)))
+		}
 	}
 
 	// Issue #77 PR3: the Misskey-compatible Drive API. Independent of

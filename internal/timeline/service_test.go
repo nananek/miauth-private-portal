@@ -1155,6 +1155,64 @@ func TestGetTimeline_StableCursorUsesCreatedAtAndID(t *testing.T) {
 	}
 }
 
+// TestGetTimelineByAuthorsDesc_FiltersToGivenAuthors is Issue #115's
+// notes/user-list-timeline's own core contract, exercised at the service
+// layer: only entries authored by an ID in the given set are returned,
+// newest-first, and a broader author set widens the result rather than
+// requiring exact membership.
+func TestGetTimelineByAuthorsDesc_FiltersToGivenAuthors(t *testing.T) {
+	ts := newTestService(t)
+	system, err := ts.db.Actors.GetByType(t.Context(), domain.ActorSystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerEntry, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "owner post", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.clock.Advance(time.Minute)
+	systemEntry, err := ts.CreateRoot(t.Context(), domain.EntrySystem, "system post", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerOnly, err := ts.GetTimelineByAuthorsDesc(t.Context(), []string{ts.owner.ID}, nil, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ownerOnly) != 1 || ownerOnly[0].ID != ownerEntry.ID {
+		t.Fatalf("ownerOnly = %v, want only %s", ownerOnly, ownerEntry.ID)
+	}
+
+	both, err := ts.GetTimelineByAuthorsDesc(t.Context(), []string{ts.owner.ID, system.ID}, nil, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(both) != 2 || both[0].ID != systemEntry.ID || both[1].ID != ownerEntry.ID {
+		t.Fatalf("both = %v, want newest-first [%s, %s]", both, systemEntry.ID, ownerEntry.ID)
+	}
+}
+
+// TestGetTimelineByAuthorsDesc_EmptyAuthorsReturnsEmpty pins the "zero
+// members means zero entries, never the whole timeline" contract a fresh
+// user list must have (Issue #115): an empty authorActorIDs must not
+// silently fall back to every author.
+func TestGetTimelineByAuthorsDesc_EmptyAuthorsReturnsEmpty(t *testing.T) {
+	ts := newTestService(t)
+	if _, err := ts.CreateRoot(t.Context(), domain.EntryUserPost, "post", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ts.GetTimelineByAuthorsDesc(t.Context(), nil, nil, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got = %v, want empty for an empty author set", got)
+	}
+}
+
 func TestGetTimelineDesc_NewestFirstThenOlder(t *testing.T) {
 	ts := newTestService(t)
 	var ids []string

@@ -203,7 +203,12 @@ work:
   "POST /api/users/show and POST /api/users/notes" section. Starting an
   actual Open WebUI/Misskey "Chat" conversation from a viewed profile
   still ends at the same `/api/chat/*` non-goal — Issue #114 makes the
-  profile and its notes viewable, not Chat itself.)
+  profile and its notes viewable, not Chat itself. User lists shipped in
+  Issue #115 — see that document's `POST /api/users/lists/*` section —
+  but group only this deployment's own small known-actor set, since
+  there is no follow concept (Issue #34) or other users/federation to
+  group instead; importing or favoriting another instance's public list
+  (`create-from-public`/`favorite`/`unfavorite`) is not implemented.)
 - **No note editing**: `notes/update` is not implemented.
 - **Single-process, single-writer SQLite only**: there is no horizontal
   scaling and no PostgreSQL backend; this is a single-owner deployment

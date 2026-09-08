@@ -375,6 +375,43 @@ func TestEntryRepository_ListByAuthorsDesc_NewestFirstWithPaging(t *testing.T) {
 	}
 }
 
+// TestEntryRepository_ListByAuthorsDesc_FiltersToGivenAuthorsWithPaging is
+// Issue #115's core assertion for the multi-author case the two tests
+// above never exercise: the author_actor_id IN (...) filter must scope
+// to *every* given author at once, still excluding a non-member, and
+// still paging with the shared (created_at, id) cursor across authors.
+func TestEntryRepository_ListByAuthorsDesc_FiltersToGivenAuthorsWithPaging(t *testing.T) {
+	db := newTestDB(t)
+	member1 := mustCreateActor(t, db)
+	member2 := mustCreateDistinctActor(t, db)
+	nonMember := mustCreateDistinctActor(t, db)
+	now := time.Now()
+
+	oldest := mustCreateThreadAndRoot(t, db, member1, now)
+	middle := mustCreateThreadAndRoot(t, db, member2, now.Add(time.Minute))
+	mustCreateThreadAndRoot(t, db, nonMember, now.Add(2*time.Minute))
+	newest := mustCreateThreadAndRoot(t, db, member1, now.Add(3*time.Minute))
+
+	authors := []string{member1, member2}
+
+	first, err := db.Entries.ListByAuthorsDesc(t.Context(), authors, nil, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].ID != newest.ID || first[1].ID != middle.ID {
+		t.Fatalf("first page = %v, want [%s, %s] (non-member entry excluded)", entryIDs(first), newest.ID, middle.ID)
+	}
+
+	cursor := &domain.Cursor{CreatedAt: first[len(first)-1].CreatedAt, ID: first[len(first)-1].ID}
+	second, err := db.Entries.ListByAuthorsDesc(t.Context(), authors, cursor, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].ID != oldest.ID {
+		t.Fatalf("second page = %v, want [%s]", entryIDs(second), oldest.ID)
+	}
+}
+
 // TestEntryRepository_ListByAuthorsDesc_ExcludesArchivedAndHiddenByDefault
 // mirrors ListTimelineDesc's own visibility default.
 func TestEntryRepository_ListByAuthorsDesc_ExcludesArchivedAndHiddenByDefault(t *testing.T) {
@@ -397,12 +434,12 @@ func TestEntryRepository_ListByAuthorsDesc_ExcludesArchivedAndHiddenByDefault(t 
 	}
 }
 
-// TestEntryRepository_ListByAuthorsDesc_EmptyAuthorsReturnsEmpty pins
-// the documented "empty authorActorIDs never falls back to every entry"
-// contract: a bug that dropped the IN(...) filter for an empty slice
-// would instead behave like ListTimelineDesc, silently returning every
-// actor's entries.
-func TestEntryRepository_ListByAuthorsDesc_EmptyAuthorsReturnsEmpty(t *testing.T) {
+// TestEntryRepository_ListByAuthorsDesc_EmptyAuthorsReturnsEmptyNotEveryEntry
+// pins the documented "empty authorActorIDs never falls back to every
+// entry" contract: a bug that dropped the IN(...) filter for an empty
+// slice would instead behave like ListTimelineDesc, silently returning
+// every actor's entries.
+func TestEntryRepository_ListByAuthorsDesc_EmptyAuthorsReturnsEmptyNotEveryEntry(t *testing.T) {
 	db := newTestDB(t)
 	actorID := mustCreateActor(t, db)
 	mustCreateThreadAndRoot(t, db, actorID, time.Now())
@@ -412,7 +449,7 @@ func TestEntryRepository_ListByAuthorsDesc_EmptyAuthorsReturnsEmpty(t *testing.T
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Errorf("ListByAuthorsDesc(nil authors) = %v, want empty", entryIDs(got))
+		t.Errorf("ListByAuthorsDesc(empty authors) = %v, want empty (not every entry)", entryIDs(got))
 	}
 }
 
