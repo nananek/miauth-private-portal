@@ -19,8 +19,14 @@ vet:
 test:
 	go test ./...
 
+# -p 2 caps how many packages' -race binaries run concurrently (Issue
+# #122): the default (GOMAXPROCS, 4 on ubuntu-latest's standard runner)
+# let internal/storage/sqlite, internal/httpserver, internal/openwebui,
+# and internal/timeline -- each already 130-300s under -race -- land in
+# the same batch and starve internal/httpserver's real-time-bounded
+# tests of scheduling, flaking main's CI.
 test-race:
-	go test -race ./...
+	go test -race -p 2 ./...
 
 build:
 	go build -o bin/server ./cmd/server
