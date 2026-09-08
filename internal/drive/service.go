@@ -63,6 +63,14 @@ var (
 	// rejection (errors.Is(err, safehttp.ErrPolicyViolation)), or a body
 	// exceeding Config.MaxFileBytes.
 	ErrUploadFromURLFailed = errors.New("drive: upload from URL failed")
+	// ErrFileAttached reports that DeleteFile was asked to remove a file
+	// still referenced by one or more entry_files rows (Issue #77 PR6).
+	// Like ErrFolderNotEmpty, this service rejects the delete explicitly
+	// rather than cascading it (which would silently detach a file from
+	// an existing post's fileIds) or letting SQLite's own foreign-key
+	// enforcement surface as an unhandled constraint-violation error
+	// (AGENTS.md: unsupported/unsafe operations must fail explicitly).
+	ErrFileAttached = errors.New("drive: file is attached to one or more notes")
 )
 
 // Service implements Issue #77 PR3's Drive business rules — ownership,
@@ -413,10 +421,37 @@ func (s *Service) DeleteFile(ctx context.Context, ownerActorID, fileID string) e
 	if err != nil {
 		return err
 	}
+	attached, err := s.repos.EntryFiles.CountByFile(ctx, f.ID)
+	if err != nil {
+		return err
+	}
+	if attached > 0 {
+		return ErrFileAttached
+	}
 	if err := s.repos.Files.Delete(ctx, f.ID); err != nil {
 		return err
 	}
 	_ = s.storage.Delete(ctx, f.StorageKey)
+	return nil
+}
+
+// ValidateAttachmentFiles reports domain.ErrNotFound if any of fileIDs
+// does not exist, is not owned by ownerActorID, or is not
+// domain.FilePurposeAttachment — never distinguishing which of the
+// three, the same generic-denial stance getOwnedFile already takes.
+// internal/httpserver calls this before creating a note with fileIds, so
+// a bad ID fails the request before any entries/entry_files row is ever
+// written (Issue #77 PR6).
+func (s *Service) ValidateAttachmentFiles(ctx context.Context, ownerActorID string, fileIDs []string) error {
+	for _, id := range fileIDs {
+		f, err := s.getOwnedFile(ctx, ownerActorID, id)
+		if err != nil {
+			return err
+		}
+		if f.Purpose != domain.FilePurposeAttachment {
+			return domain.ErrNotFound
+		}
+	}
 	return nil
 }
 

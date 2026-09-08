@@ -821,6 +821,21 @@ func (s *Service) GetReaction(ctx context.Context, id string) (domain.Reaction, 
 	return s.repos.Reactions.Get(ctx, id)
 }
 
+// AttachedFiles returns entryID's attached files, in attachment order
+// (Issue #77 PR6), backing Note.fileIds/Note.files.
+func (s *Service) AttachedFiles(ctx context.Context, entryID string) ([]domain.File, error) {
+	return s.repos.EntryFiles.ListFilesByEntry(ctx, entryID)
+}
+
+// AttachedEntries returns every entry fileID is attached to (Issue #77
+// PR6), backing POST /api/drive/files/attached-notes. Filtering out a
+// hidden/archived one is internal/httpserver's job (entryVisible), the
+// same split GetTimelineDesc/GetEntry already leave to their own
+// callers.
+func (s *Service) AttachedEntries(ctx context.Context, fileID string) ([]domain.Entry, error) {
+	return s.repos.EntryFiles.ListEntriesByFile(ctx, fileID)
+}
+
 // ListMentions returns actorID's newest-first, archived/hidden-excluded
 // self-mentions (Issue #23 PR5's POST /api/notes/mentions) — the same
 // paging contract as GetTimelineDesc: before nil returns the most

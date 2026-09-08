@@ -164,9 +164,11 @@ type driveFilesUploadFromUrlRequest struct {
 
 // driveFilesAttachedNotesRequest mirrors misskey_dart's
 // DriveFilesAttachedNotesRequest. Limit/SinceID/UntilID/SinceDate/
-// UntilDate are decoded but unused: handleDriveFilesAttachedNotes always
-// returns an empty list until Issue #77 PR6 adds entry_files, so there
-// is nothing yet to filter or paginate.
+// UntilDate are decoded but unused: no traced Aria call site
+// (DriveFileNotifier's attached-notes view) ever sets them, and Issue
+// #77 PR6's handleDriveFilesAttachedNotes returns every attached note in
+// a single unpaginated page rather than guessing at filter/sort
+// semantics no observed caller exercises.
 type driveFilesAttachedNotesRequest struct {
 	FileID string `json:"fileId"`
 }

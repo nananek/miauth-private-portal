@@ -411,6 +411,60 @@ func TestService_DeleteFile_NotOwnedIsNotFoundAndLeavesFileIntact(t *testing.T) 
 	}
 }
 
+func TestService_ValidateAttachmentFiles_Success(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	a, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	b, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: owner, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	if err := ts.ValidateAttachmentFiles(t.Context(), owner, []string{a.ID, b.ID}); err != nil {
+		t.Errorf("ValidateAttachmentFiles: %v", err)
+	}
+}
+
+func TestService_ValidateAttachmentFiles_RejectsNotOwned(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	other := mustCreateTestActor(t, ts.db)
+	f, err := ts.CreateFile(t.Context(), CreateFileInput{OwnerActorID: other, Data: encodePNG(t, 4, 4)})
+	if err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	if err := ts.ValidateAttachmentFiles(t.Context(), owner, []string{f.ID}); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestService_ValidateAttachmentFiles_RejectsWrongPurpose covers an
+// owned, non-attachment-purpose file — a shape no current public
+// creation path (CreateFile always sets FilePurposeAttachment;
+// CreateSystemFile always sets a nil owner) can produce, so this test
+// writes the files row directly through the repository to exercise
+// ValidateAttachmentFiles' own purpose check in isolation from
+// getOwnedFile's ownership check (which alone would already reject a
+// nil-owner CreateSystemFile file, without ever reaching the purpose
+// branch this test targets).
+func TestService_ValidateAttachmentFiles_RejectsWrongPurpose(t *testing.T) {
+	ts := newTestDriveService(t, Config{})
+	owner := mustCreateTestActor(t, ts.db)
+	f := domain.File{
+		ID: domain.NewID(), OwnerActorID: &owner, Purpose: domain.FilePurposeAvatar,
+		MIME: "image/png", ByteSize: 4, SHA256: "sha", MD5: "md5", StorageKey: domain.NewID(),
+		Name: "avatar.png", CreatedAt: time.Now(),
+	}
+	if err := ts.db.Files.Create(t.Context(), f); err != nil {
+		t.Fatalf("create test file: %v", err)
+	}
+	if err := ts.ValidateAttachmentFiles(t.Context(), owner, []string{f.ID}); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound (a non-attachment-purpose file must be rejected the same way an unowned one is)", err)
+	}
+}
+
 func TestService_OpenFile_NoOwnershipCheck(t *testing.T) {
 	ts := newTestDriveService(t, Config{})
 	owner := mustCreateTestActor(t, ts.db)

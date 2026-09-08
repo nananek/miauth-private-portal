@@ -371,7 +371,6 @@ func TestHandleNotesCreate_UnsupportedFieldsFailExplicitly(t *testing.T) {
 		{"channelId", map[string]any{"text": "x", "channelId": "some-channel"}},
 		{"poll", map[string]any{"text": "x", "poll": map[string]any{"choices": []string{"a", "b"}}}},
 		{"scheduledAt", map[string]any{"text": "x", "scheduledAt": 1893456000000}},
-		{"fileIds", map[string]any{"text": "x", "fileIds": []string{"file-1"}}},
 		{"visibility", map[string]any{"text": "x", "visibility": "followers"}},
 	}
 	for _, c := range cases {

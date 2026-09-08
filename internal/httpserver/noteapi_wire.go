@@ -100,18 +100,25 @@ type note struct {
 	// Note contract lists "url" as nullable) — the original article's
 	// URL, straight from e.ProvenanceURL. Never set for user_post/
 	// llm_reply/llm_follow_up/mail (mail has no natural article URL).
-	URL            *string           `json:"url"`
-	Visibility     string            `json:"visibility"`
-	LocalOnly      bool              `json:"localOnly"`
-	RenoteCount    int               `json:"renoteCount"`
-	RepliesCount   int               `json:"repliesCount"`
-	Reactions      map[string]int    `json:"reactions"`
-	MyReaction     *string           `json:"myReaction"`
-	Emojis         map[string]string `json:"emojis"`
-	FileIDs        []string          `json:"fileIds"`
-	Files          []any             `json:"files"`
-	VisibleUserIDs []string          `json:"visibleUserIds"`
-	Mentions       []string          `json:"mentions"`
+	URL          *string           `json:"url"`
+	Visibility   string            `json:"visibility"`
+	LocalOnly    bool              `json:"localOnly"`
+	RenoteCount  int               `json:"renoteCount"`
+	RepliesCount int               `json:"repliesCount"`
+	Reactions    map[string]int    `json:"reactions"`
+	MyReaction   *string           `json:"myReaction"`
+	Emojis       map[string]string `json:"emojis"`
+	// FileIDs/Files default to an explicit empty array (never omitted —
+	// docs/compat/aria-v1.5.11.md's PR0 finding that misskey_dart's
+	// @Default([]) makes an absent key safe either way, but this
+	// service's own convention is to always include the key) and are
+	// populated with real data by (*Server).projectNote once Issue #77
+	// PR6's entry_files has anything to report; newNote itself never has
+	// database access to look them up.
+	FileIDs        []string    `json:"fileIds"`
+	Files          []driveFile `json:"files"`
+	VisibleUserIDs []string    `json:"visibleUserIds"`
+	Mentions       []string    `json:"mentions"`
 }
 
 // newNote projects e onto the wire Note type. user is the already-resolved
@@ -139,7 +146,7 @@ func newNote(e domain.Entry, user userLite) note {
 		MyReaction:     nil,
 		Emojis:         map[string]string{},
 		FileIDs:        []string{},
-		Files:          []any{},
+		Files:          []driveFile{},
 		VisibleUserIDs: []string{},
 		Mentions:       []string{},
 	}
@@ -165,6 +172,21 @@ func (s *Server) projectNote(ctx context.Context, e domain.Entry, user userLite,
 		return note{}, err
 	}
 	n.MyReaction = my
+
+	files, err := s.timeline.AttachedFiles(ctx, e.ID)
+	if err != nil {
+		return note{}, err
+	}
+	if len(files) > 0 {
+		fileIDs := make([]string, len(files))
+		driveFiles := make([]driveFile, len(files))
+		for i, f := range files {
+			fileIDs[i] = f.ID
+			driveFiles[i] = s.projectDriveFile(f)
+		}
+		n.FileIDs = fileIDs
+		n.Files = driveFiles
+	}
 
 	// Issues #81 (citation footnotes) + #84 (chat title, viewer link)
 	// enrichment: only an Open WebUI-generated reply can have a turn to
