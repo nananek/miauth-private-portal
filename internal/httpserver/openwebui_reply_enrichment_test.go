@@ -56,8 +56,9 @@ func showNoteText(t *testing.T, ts *noteAPITestServer, noteID string) string {
 // Source, and (via OnChatCreated) a remote chat id, with
 // OPENWEBUI_VIEWER_BASE_URL configured — and checks all three
 // enrichments land in the projected note text together: the title
-// replaces the "[reply]" marker, footnotes follow the body, and the
-// viewer link is last.
+// replaces the "[reply]" marker, the viewer link sits on its own line
+// directly under that title line (2026-09-08 owner request), and
+// footnotes follow the body.
 func TestOpenWebUIReplyEnrichment_TitleSourcesAndViewerLink(t *testing.T) {
 	ts := newNoteAPITestServerOpenWebUIEnabled(t)
 	// Options.OpenWebUIViewerBaseURL has no test-server constructor
@@ -106,9 +107,10 @@ func TestOpenWebUIReplyEnrichment_TitleSourcesAndViewerLink(t *testing.T) {
 		t.Fatal("reply.Text = nil")
 	}
 	text := *reply.Text
-	const want = "[reply] Weekend trip planning\n\nthe model's reply" +
-		"\n\n[1] web_search (https://go.dev/doc/go1.24)" +
-		"\n\nhttps://viewer.example.net/c/remote-chat-1"
+	const want = "[reply] Weekend trip planning" +
+		"\nhttps://viewer.example.net/c/remote-chat-1" +
+		"\n\nthe model's reply" +
+		"\n\n[1] web_search (https://go.dev/doc/go1.24)"
 	if text != want {
 		t.Errorf("reply.Text = %q, want %q", text, want)
 	}

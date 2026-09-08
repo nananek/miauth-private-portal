@@ -136,11 +136,14 @@ type Options struct {
 	// dependency" rule (see the package doc comment) is unaffected.
 	OpenWebUITurnLinks domain.OpenWebUITurnLinkRepository
 	// OpenWebUIViewerBaseURL mirrors OPENWEBUI_VIEWER_BASE_URL (Issue
-	// #84, ADR-0005 D23): when non-empty, projectNote appends
-	// "<OpenWebUIViewerBaseURL>/c/<remote_chat_id>" to a generated
-	// reply's text whenever its turn has a known remote chat id. Empty
-	// (the default, unset) never appends anything — D23's "leaving it
-	// unset reproduces today's behavior exactly" guarantee.
+	// #84, ADR-0005 D23): when non-empty, projectNote inserts
+	// "<OpenWebUIViewerBaseURL>/c/<remote_chat_id>" on its own line
+	// directly under the title/marker line of a generated reply's text,
+	// whenever its turn has a known remote chat id (2026-09-08: moved
+	// there from the text's end, for visibility without scrolling past
+	// the body). Empty (the default, unset) never inserts anything —
+	// D23's "leaving it unset reproduces today's behavior exactly"
+	// guarantee.
 	OpenWebUIViewerBaseURL string
 
 	// Drive backs Issue #77 PR3's Misskey-compatible Drive API and the

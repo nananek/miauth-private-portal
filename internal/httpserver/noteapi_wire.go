@@ -218,6 +218,12 @@ func (s *Server) projectNote(ctx context.Context, e domain.Entry, user userLite,
 // degrades gracefully on its own: a turn with a title but no sources, or
 // neither, still enriches whatever it has.
 //
+// The viewer link, when present, sits on its own line directly under the
+// title/marker line — not at the end of the text, its original position
+// — a 2026-09-08 owner request to make the link easy to find without
+// scrolling past a long reply body first. Everything else is unaffected:
+// citation footnotes still follow the body, since they annotate it.
+//
 // Returns domain.ErrNotFound unchanged when e has no Open WebUI turn at
 // all (an Issue #9 plain LLM reply) — the caller's job to fall back to
 // wireText(e) for.
@@ -226,15 +232,16 @@ func (s *Server) enrichOpenWebUIReplyText(ctx context.Context, e domain.Entry) (
 	if err != nil {
 		return "", err
 	}
-	text := wireText(e)
+	header := "[reply]"
 	if turn.RemoteChatTitle != nil && *turn.RemoteChatTitle != "" {
-		text = "[reply] " + *turn.RemoteChatTitle + "\n\n" + e.Body
-	}
-	if len(turn.Sources) > 0 {
-		text += "\n\n" + renderSourceFootnotes(turn.Sources)
+		header = "[reply] " + *turn.RemoteChatTitle
 	}
 	if s.openWebUIViewerBaseURL != "" && turn.RemoteChatID != nil {
-		text += "\n\n" + s.openWebUIViewerBaseURL + "/c/" + *turn.RemoteChatID
+		header += "\n" + s.openWebUIViewerBaseURL + "/c/" + *turn.RemoteChatID
+	}
+	text := header + "\n\n" + e.Body
+	if len(turn.Sources) > 0 {
+		text += "\n\n" + renderSourceFootnotes(turn.Sources)
 	}
 	return text, nil
 }
