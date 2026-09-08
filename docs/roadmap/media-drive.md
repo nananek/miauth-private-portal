@@ -414,7 +414,7 @@ Favicon fetching:
   written. An omitted `fileIds` key (PR0's trace: the common,
   attachment-less case) is unaffected.
 - New `entry_files` table (`entry_id`, `file_id`, `position`; migration
-  `0029_entry_files.sql`) as a genuine many-to-many join — see PR0's
+  `0031_entry_files.sql`) as a genuine many-to-many join — see PR0's
   finding above on why a 1:1 design is insufficient. The attachment link
   is written inside the same transaction that creates the entry, via
   `internal/timeline.Service`'s existing `EntryHook` mechanism
