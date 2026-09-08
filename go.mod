@@ -7,7 +7,6 @@ require (
 	github.com/emersion/go-message v0.18.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/minio/minio-go/v7 v7.3.0
-	github.com/tmaxmax/go-sse v0.11.0
 	golang.org/x/image v0.45.0
 	modernc.org/sqlite v1.58.0
 )

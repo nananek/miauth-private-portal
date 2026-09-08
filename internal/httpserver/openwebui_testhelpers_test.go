@@ -26,16 +26,10 @@ type e2eFakeProvider struct {
 	startChatCalls    int
 	continueTurnCalls int
 	lookupCalls       int
-	streamTurnCalls   int
 
 	startChat     func(ctx context.Context, req openwebui.StartChatRequest) (openwebui.TurnResult, error)
 	continueTurn  func(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error)
 	lookupOutcome func(ctx context.Context, remoteChatID, assistantMessageID string) (openwebui.TurnOutcome, error)
-	// streamTurn is Issue #93's addition (ADR-0005 D24/D25): none of this
-	// package's e2e scenarios opt a turn into tool_ids/web_search, so no
-	// existing test scripts it — it exists only so e2eFakeProvider keeps
-	// satisfying openwebui.Provider.
-	streamTurn func(ctx context.Context, req openwebui.StreamTurnRequest) (openwebui.TurnResult, error)
 }
 
 func (p *e2eFakeProvider) StartChat(ctx context.Context, req openwebui.StartChatRequest) (openwebui.TurnResult, error) {
@@ -60,14 +54,6 @@ func (p *e2eFakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatID, a
 		return openwebui.TurnOutcome{}, errNotScripted
 	}
 	return p.lookupOutcome(ctx, remoteChatID, assistantMessageID)
-}
-
-func (p *e2eFakeProvider) StreamTurn(ctx context.Context, req openwebui.StreamTurnRequest) (openwebui.TurnResult, error) {
-	p.streamTurnCalls++
-	if p.streamTurn == nil {
-		return openwebui.TurnResult{}, errNotScripted
-	}
-	return p.streamTurn(ctx, req)
 }
 
 func strPtrForTest(s string) *string { return &s }

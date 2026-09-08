@@ -30,12 +30,9 @@ type fakeProvider struct {
 	inFlight    int32
 	maxInFlight int32
 
-	streamTurnCalls int
-
 	startChat     func(ctx context.Context, req StartChatRequest) (TurnResult, error)
 	continueTurn  func(ctx context.Context, req ContinueTurnRequest) (TurnResult, error)
 	lookupOutcome func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error)
-	streamTurn    func(ctx context.Context, req StreamTurnRequest) (TurnResult, error)
 }
 
 func newFakeProvider(t *testing.T) *fakeProvider { return &fakeProvider{t: t} }
@@ -87,28 +84,10 @@ func (f *fakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatID, assi
 	return f.lookupOutcome(ctx, remoteChatID, assistantMessageID)
 }
 
-func (f *fakeProvider) StreamTurn(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-	leave := f.enter()
-	defer leave()
-	f.mu.Lock()
-	f.streamTurnCalls++
-	f.mu.Unlock()
-	if f.streamTurn == nil {
-		f.t.Fatalf("fakeProvider: unexpected StreamTurn call")
-	}
-	return f.streamTurn(ctx, req)
-}
-
 func (f *fakeProvider) counts() (start, cont, lookup int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.startChatCalls, f.continueCalls, f.lookupCalls
-}
-
-func (f *fakeProvider) streamCalls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.streamTurnCalls
 }
 
 func ptrInt(v int) *int { return &v }
@@ -497,8 +476,8 @@ func TestTurnJob_StartChat_SendsResolvedToolIDs(t *testing.T) {
 	if !reflect.DeepEqual(sawToolIDs, []string{"web_search", "calculator"}) {
 		t.Errorf("StartChat ToolIDs = %v, want the cached resolution", sawToolIDs)
 	}
-	if _, cont, stream := provider.counts(); cont != 0 || stream != 0 {
-		t.Errorf("ContinueTurn/StreamTurn calls = %d/%d, want 0/0", cont, stream)
+	if _, cont, lookup := provider.counts(); cont != 0 || lookup != 0 {
+		t.Errorf("ContinueTurn/LookupTurnOutcome calls = %d/%d, want 0/0 (a branch's first turn is a single bundled StartChat call)", cont, lookup)
 	}
 }
 
@@ -1373,9 +1352,6 @@ func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.
 			}
 			if start, cont, lookup := provider.counts(); start != 0 || cont != 0 || lookup != 0 {
 				t.Errorf("provider calls = start:%d continue:%d lookup:%d, want none", start, cont, lookup)
-			}
-			if n := provider.streamCalls(); n != 0 {
-				t.Errorf("provider StreamTurn calls = %d, want 0", n)
 			}
 		})
 	}
