@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/nananek/miauth-private-portal/internal/domain"
 )
 
 // newTestDB opens a fresh, migrated database backed by a temp file. A real
@@ -36,6 +38,24 @@ func mustCreateActor(t *testing.T, db *DB) string {
 	a, err := db.Actors.GetByType(t.Context(), "system")
 	if err != nil {
 		t.Fatalf("get system actor: %v", err)
+	}
+	return a.ID
+}
+
+// mustCreateDistinctActor inserts and returns a fresh actor row, unlike
+// mustCreateActor: owner/assistant/system are singletons (only one row
+// of each type can ever exist), so a test that needs two genuinely
+// different actor IDs — for example, to prove a query correctly scopes
+// by owner rather than returning every row regardless — must not call
+// mustCreateActor twice and assume the results differ. ActorOpenWebUIModel
+// is this schema's only non-singleton type (domain/actor.go), so it is
+// what this helper uses; the type itself is otherwise irrelevant to
+// callers that only need a valid, distinct actors.id foreign key target.
+func mustCreateDistinctActor(t *testing.T, db *DB) string {
+	t.Helper()
+	a := domain.Actor{ID: domain.NewID(), Type: domain.ActorOpenWebUIModel, CreatedAt: time.Now()}
+	if err := db.Actors.Create(t.Context(), a); err != nil {
+		t.Fatalf("create distinct actor: %v", err)
 	}
 	return a.ID
 }

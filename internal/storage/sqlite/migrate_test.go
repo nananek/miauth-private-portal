@@ -15,7 +15,7 @@ var expectedTables = []string{
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
 	"external_sources", "external_items", "reactions", "mentions", "notifications",
 	"openwebui_workspaces", "openwebui_models", "openwebui_conversation_links", "openwebui_turn_links",
-	"files",
+	"files", "folders",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {
@@ -1081,6 +1081,79 @@ func TestMigrate_UpgradeAppliesFilesTable(t *testing.T) {
 		 VALUES ('f4', 'attachment', 'image/png', 1, 'x', 'avatars/f1.png', '2024-01-01T00:00:00Z')`,
 	); err == nil {
 		t.Error("expected the storage_key UNIQUE constraint to reject a duplicate key")
+	}
+}
+
+// TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata backs migrations
+// 0025 (folders table) and 0026 (files' Drive-API-specific columns),
+// both Issue #77 PR3. It opens at version 24 (right after 0024's plain
+// files table, before either of these) so it can also confirm a files
+// row that predates 0026 upgrades with the new columns' declared
+// defaults (” for name, 0 for is_sensitive, NULL for comment/
+// folder_id) rather than failing the upgrade or leaving them NULL where
+// a NOT NULL default was declared.
+func TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata(t *testing.T) {
+	sqlDB := openUpgradeDB(t, 24)
+	ctx := t.Context()
+
+	const ownerID = "pre-existing-owner"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO actors (id, actor_type, created_at) VALUES (?, 'owner', '2024-01-01T00:00:00Z')`, ownerID,
+	); err != nil {
+		t.Fatalf("seed owner actor: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, owner_actor_id, purpose, mime, byte_size, sha256, storage_key, width, height, created_at)
+		 VALUES ('pre-f1', ?, 'attachment', 'image/png', 1024, 'deadbeef', 'drive/pre-f1', 256, 256, '2024-01-01T00:00:00Z')`,
+		ownerID,
+	); err != nil {
+		t.Fatalf("seed pre-existing file: %v", err)
+	}
+
+	db := &DB{sqlDB: sqlDB}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var name, md5 string
+	var isSensitive int
+	var comment, folderID sql.NullString
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT name, md5, is_sensitive, comment, folder_id FROM files WHERE id = 'pre-f1'`,
+	).Scan(&name, &md5, &isSensitive, &comment, &folderID); err != nil {
+		t.Fatalf("select pre-existing file after upgrade: %v", err)
+	}
+	if name != "" || md5 != "" || isSensitive != 0 || comment.Valid || folderID.Valid {
+		t.Errorf("pre-existing file's new columns = name:%q md5:%q is_sensitive:%d comment:%v folder_id:%v, want all-default",
+			name, md5, isSensitive, comment, folderID)
+	}
+
+	// A root folder, a child folder, and a file inside the child folder
+	// must all be representable after the upgrade.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO folders (id, owner_actor_id, name, parent_id, created_at) VALUES ('folder-root', ?, 'Root', NULL, '2024-01-01T00:00:00Z')`,
+		ownerID,
+	); err != nil {
+		t.Fatalf("insert root folder: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO folders (id, owner_actor_id, name, parent_id, created_at) VALUES ('folder-child', ?, 'Child', 'folder-root', '2024-01-01T00:00:00Z')`,
+		ownerID,
+	); err != nil {
+		t.Fatalf("insert child folder: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO files (id, owner_actor_id, purpose, mime, byte_size, sha256, md5, storage_key, width, height, name, comment, is_sensitive, folder_id, created_at)
+		 VALUES ('new-f1', ?, 'attachment', 'image/png', 2048, 'feedface', 'facefeed', 'drive/new-f1', 64, 64, 'a.png', 'a comment', 1, 'folder-child', '2024-01-02T00:00:00Z')`,
+		ownerID,
+	); err != nil {
+		t.Fatalf("insert new-shape file after upgrade: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO folders (id, owner_actor_id, name, created_at) VALUES ('folder-orphan', 'no-such-actor', 'Orphan', '2024-01-01T00:00:00Z')`,
+	); err == nil {
+		t.Error("expected the owner_actor_id foreign key to reject an unknown actor")
 	}
 }
 

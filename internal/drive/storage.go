@@ -1,5 +1,5 @@
 // Package drive implements Issue #77's Drive-backed media storage
-// foundation (ADR-0006): a Storage abstraction over the object bytes
+// foundation (ADR-0007): a Storage abstraction over the object bytes
 // backing avatars, RSS/mail source favicons, app icons, and post
 // attachments, plus the raster-image validation every upload must pass
 // before it is stored.

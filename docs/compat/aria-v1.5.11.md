@@ -97,16 +97,16 @@ redacted.
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
 | `POST /api/users/search` | **必要** for Issue #65 (implemented) | User-selection dialog and mention/search autocomplete's query-based lookup | `i` token; `read:account` (already granted — no new scope) |
 | `POST /api/users/search-by-username-and-host` | **必要** for Issue #65 (implemented) | Same call sites' exact username(+host) lookup | `i` token; `read:account` (already granted — no new scope) |
-| `POST /api/drive` | **必要** for Issue #77 (not yet implemented — PR3) | Drive capacity/usage display (drive screen header, account settings) | `i` token; new `read:drive` scope |
-| `POST /api/drive/files` | **必要** for Issue #77 (PR3) | Drive screen's per-folder file listing, paginated with `untilId`/`limit` | `i` token; `read:drive` |
-| `POST /api/drive/files/create` | **必要** for Issue #77 (PR3) | Upload from local file (post composer, profile avatar picker, drive screen); both the multipart-file and raw-binary request forms are used | `i` token; new `write:drive` scope |
-| `POST /api/drive/files/show` | **必要** for Issue #77 (PR3) | Opening one drive file's detail page | `i` token; `read:drive` |
-| `POST /api/drive/files/update` | **必要** for Issue #77 (PR3) | Rename, toggle sensitive, edit comment, and move-to-folder — all four via the same endpoint as a partial-field POST | `i` token; `write:drive` |
-| `POST /api/drive/files/delete` | **必要** for Issue #77 (PR3) | Drive file delete action | `i` token; `write:drive` |
-| `POST /api/drive/files/upload-from-url` | **必要** for Issue #77 (PR3) | Drive screen's "upload from URL" action | `i` token; `write:drive` |
-| `POST /api/drive/files/attached-notes` | **必要** for Issue #77 (PR3/PR6) | Drive file detail page's "notes this file is attached to" list | `i` token; `read:drive` + `read:notes` |
+| `POST /api/drive` | **必要** for Issue #77 (implemented — PR3) | Drive capacity/usage display (drive screen header, account settings) | `i` token; new `read:drive` scope |
+| `POST /api/drive/files` | **必要** for Issue #77 (implemented — PR3) | Drive screen's per-folder file listing, paginated with `untilId`/`limit` | `i` token; `read:drive` |
+| `POST /api/drive/files/create` | **必要** for Issue #77 (implemented — PR3) | Upload from local file (post composer, profile avatar picker, drive screen); both the multipart-file and raw-binary request forms are used | `i` token; new `write:drive` scope |
+| `POST /api/drive/files/show` | **必要** for Issue #77 (implemented — PR3) | Opening one drive file's detail page | `i` token; `read:drive` |
+| `POST /api/drive/files/update` | **必要** for Issue #77 (implemented — PR3) | Rename, toggle sensitive, edit comment, and move-to-folder — all four via the same endpoint as a partial-field POST | `i` token; `write:drive` |
+| `POST /api/drive/files/delete` | **必要** for Issue #77 (implemented — PR3) | Drive file delete action | `i` token; `write:drive` |
+| `POST /api/drive/files/upload-from-url` | **必要** for Issue #77 (implemented — PR3) | Drive screen's "upload from URL" action | `i` token; `write:drive` |
+| `POST /api/drive/files/attached-notes` | **必要** for Issue #77 (implemented — PR3; always returns `[]` until PR6 adds `entry_files`) | Drive file detail page's "notes this file is attached to" list | `i` token; `read:drive` + `read:notes` |
 | `POST /api/drive/files/move-bulk` | **要実機確認**; optional | Drive multi-select bulk-move action — Aria probes `POST /api/endpoints` first and transparently falls back to per-file `drive/files/update` moves when the name is absent | Omitting this name from this service's `/api/endpoints` response is sufficient to make Aria always use the per-file fallback instead of implementing this endpoint |
-| `POST /api/drive/folders`, `/create`, `/delete`, `/update`, `/show` | **必要** for Issue #77 (PR3) | Drive screen's folder browsing, creation, rename, and move UI — used extensively, not an edge feature | `i` token; `read:drive`/`write:drive` |
+| `POST /api/drive/folders`, `/create`, `/delete`, `/update`, `/show` | **必要** for Issue #77 (implemented — PR3) | Drive screen's folder browsing, creation, rename, and move UI — used extensively, not an edge feature | `i` token; `read:drive`/`write:drive` |
 | `POST /api/drive/stream` | **不要** | No traced Aria source ever calls this (`MisskeyDrive.stream` has no Aria call site) | N/A — never implement without a new observed source |
 | `POST /api/drive/files/find` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
 | `POST /api/drive/files/check-existence` | **不要** | No traced Aria source ever calls this | N/A — never implement without a new observed source |
@@ -124,14 +124,15 @@ For this contract, the exact effective local API scope set is
 `read:account`, `read:notes`, `write:notes`, (since Issue #23 PR1)
 `write:account`, (since Issue #23 PR4) `read:reactions`/
 `write:reactions`, (since Issue #23 PR6) `read:notifications`, and
-(planned, Issue #77 PR3) `read:drive`/`write:drive`. Aria's MiAuth
-`permission` query already includes `read:drive,write:drive` today (it
-requests the union of every feature it supports, independent of what any
-given instance implements), so once PR3 adds these two names to
-`grantableScopes` an **existing** local API token issued before that
-change will not carry them — the same re-authorization-required situation
-this document already records for `read:notifications`/PR6 and for
-plan-issue-23's other newly-granted scopes. The broad `permission` query from Aria is recorded for
+(since Issue #77 PR3) `read:drive`/`write:drive`. Aria's MiAuth
+`permission` query already included `read:drive,write:drive` before PR3
+shipped (it requests the union of every feature it supports, independent
+of what any given instance implements), so an **existing** local API
+token issued before PR3 added these two names to `grantableScopes` does
+not carry them — the same re-authorization-required situation this
+document already records for `read:notifications`/PR6 and for
+plan-issue-23's other newly-granted scopes; re-approving through
+`miauthctl` is what adds them retroactively. The broad `permission` query from Aria is recorded for
 compatibility but does not grant any additional scope. `meta`, `endpoints`,
 the MiAuth page, and the MiAuth check use their documented browser or
 anonymous/session capability and do not consume a local API token. `/api/i`,
@@ -578,7 +579,7 @@ The pinned `StatsResponse` parser treats every field as optional:
 | `originalUsersCount` | int | Always `1`, for the same reason |
 | `reactionsCount` | int | Total reactions ever stored, across every entry (`ReactionRepository.CountAll`, added by Issue #23 PR4; a fixed `0` before that PR) |
 | `instances` | int | Always `0` — no federation |
-| `driveUsageLocal` / `driveUsageRemote` | int | Always `0` today — no drive. Once Issue #77 PR3 adds `files`, whether to sum `files.byte_size` here (and whether "remote" ever applies without federation) is that PR's decision, not this document's; this row is stale in intent but not in current behavior until PR3 ships |
+| `driveUsageLocal` / `driveUsageRemote` | int | Still always `0`, deliberately, even after Issue #77 PR3 added Drive: `POST /api/stats` is anonymous (no local API token — see this handler's own doc comment), and Drive usage is a per-owner figure now available through the authenticated `POST /api/drive` (`read:drive`) instead — summing `files.byte_size` into this anonymous, tokenless response would leak the owner's private storage usage to any caller. "remote" stays `0` regardless, same as before: no federation |
 
 ### `POST /api/notes/delete` (Issue #23 PR3, implemented)
 
@@ -1172,6 +1173,60 @@ in this document's "Minimum Note contract" section below via
 (this service's current behavior, `internal/httpserver/noteapi_wire.go`)
 is safe and remains the correct behavior for every note with no
 attachments after PR6 ships.
+
+#### PR3 implementation notes (Issue #77, `internal/drive.Service` + `internal/httpserver/drive_{handlers,wire}.go`)
+
+Every endpoint this section's allowlist table marks 必要 for PR3 is now
+implemented, with the following decisions this document's PR0 findings
+did not already settle:
+
+- **Raster-only, every upload.** Issue #77 v2's "SVG/ベクター画像は許容
+  しない" scope decision applies to every `drive/files/create`/
+  `upload-from-url` call, not only avatar uploads: every accepted file
+  passes `internal/drive.ValidateImage` (PR1). This service is not a
+  general-purpose file-storage Drive; it stores raster images only.
+- **`force` is accepted and ignored.** Aria's two upload call sites
+  (`DriveFilesNotifier.upload`/`.uploadBinary`) always send
+  `force: true`; this service performs no content-hash deduplication at
+  all, so there is no behavior for `force` to toggle.
+- **`md5` is a real MD5 digest**, computed and stored alongside the
+  `files` table's pre-existing `sha256` identity hash (migration 0024) —
+  not SHA256 projected under the wrong wire key. No traced Aria call
+  site reads this field's value, but the key itself is required on the
+  wire.
+- **`GET /files/{id}` is the anonymous serving route** `DriveFile.url`/
+  `thumbnailUrl` resolve to (PR0: "an ordinary GET with no special
+  headers"). It performs no ownership check by design: the id itself
+  (`domain.NewID()`, 128 bits of `crypto/rand`) is the access control,
+  the same unauthenticated-but-unguessable-URL design every Misskey/
+  Mastodon-shaped service already uses for media. `thumbnailUrl` is
+  always null — this service generates no separate thumbnail.
+- **`upload-from-url` fetches synchronously**, through
+  `internal/ingest/safehttp` (the same SSRF-protected client RSS/favicon
+  fetching uses), before responding — unlike real Misskey's async
+  behavior. Aria's only call site declares the method `Future<void>` and
+  never inspects the response, so this is wire-compatible.
+- **`drive/files/attached-notes` always returns `[]`** until Issue #77
+  PR6 adds `entry_files` — see this section's earlier PR0 note on why a
+  file can be attached to more than one note. It still verifies the
+  given `fileId` is owned by the caller first (`NO_SUCH_FILE` otherwise),
+  rather than returning `[]` for any id unconditionally.
+- **Folders are real** (migration 0025): create/list/show/update/delete,
+  with a "cannot delete a non-empty folder" check
+  (`FOLDER_NOT_EMPTY`, this service's own invented-but-Misskey-flavored
+  error code — see the next point) and a "cannot move a folder inside
+  its own descendant" cycle check (`INVALID_PARAM`).
+- **Drive error ids/codes** (`NO_SUCH_FILE`, `NO_SUCH_FOLDER`,
+  `FOLDER_NOT_EMPTY`, `FILE_TOO_LARGE`, ...) follow this document's
+  already-established local convention (kebab-case `id`, SCREAMING_SNAKE
+  `code` — see `NO_SUCH_NOTE`/`INVALID_PARAM` above): this service's own
+  contract, not literal real-Misskey error UUIDs, since no traced Aria
+  call site branches on a Drive error's specific id/code.
+- **`POST /api/drive`'s `capacity` is cosmetic.** This deployment
+  enforces no real storage quota beyond `DRIVE_MAX_FILE_BYTES` per
+  upload; `capacity` is a fixed constant (`cmd/server/main.go`'s
+  `driveCapacityBytes`, 10 GiB) purely so Aria's used/total bar renders
+  something reasonable.
 
 ## Minimum Note contract
 

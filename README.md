@@ -191,10 +191,13 @@ work:
   every other live event type are permanently unimplemented and never
   pushed (see [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s
   "Streaming decision").
-- **No full Misskey compatibility or federation**: reactions, files/
-  drive, polls, renotes, notifications, channels, chat, and every other
-  non-MVP Misskey feature are unimplemented; unsupported endpoints fail
-  explicitly rather than returning fabricated success.
+- **No full Misskey compatibility or federation**: polls, renotes,
+  channels, chat, and every other non-MVP Misskey feature are
+  unimplemented; unsupported endpoints fail explicitly rather than
+  returning fabricated success. (Reactions and notifications shipped in
+  Issue #23; the Drive API shipped in Issue #77 PR3 — see
+  [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s "Drive API
+  and note attachments" section.)
 - **No note editing**: `notes/update` is not implemented.
 - **Single-process, single-writer SQLite only**: there is no horizontal
   scaling and no PostgreSQL backend; this is a single-owner deployment

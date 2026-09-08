@@ -24,14 +24,18 @@ func TestEffectiveScopes_AriaPermissionList(t *testing.T) {
 	// docs/compat/aria-v1.5.11.md fixes the effective local scope set as
 	// exactly read:account, read:notes, write:notes, (since Issue #23
 	// PR1) write:account, (since Issue #23 PR4) read:reactions/
-	// write:reactions, and (since Issue #23 PR6) read:notifications for
-	// Aria's real request — this is the compat doc's literal contract,
-	// not derived from the request by pure intersection (see
-	// effectiveScopes' doc comment for why read:notes is unconditional;
-	// the other five, unlike read:notes, are granted via the normal
-	// intersection since ariaPermissionList does request them).
+	// write:reactions, (since Issue #23 PR6) read:notifications, and
+	// (since Issue #77 PR3) read:drive/write:drive for Aria's real
+	// request — this is the compat doc's literal contract, not derived
+	// from the request by pure intersection (see effectiveScopes' doc
+	// comment for why read:notes is unconditional; the other seven,
+	// unlike read:notes, are granted via the normal intersection since
+	// ariaPermissionList does request them).
 	got := effectiveScopes(ariaPermissionList)
-	want := []string{ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount, ScopeReadReactions, ScopeWriteReactions, ScopeReadNotifications}
+	want := []string{
+		ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount,
+		ScopeReadReactions, ScopeWriteReactions, ScopeReadNotifications, ScopeReadDrive, ScopeWriteDrive,
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("effectiveScopes(ariaPermissionList) = %v, want %v", got, want)
 	}
@@ -54,10 +58,22 @@ func TestEffectiveScopes_OnlyGrantsRequestedGrantableScopes(t *testing.T) {
 }
 
 func TestEffectiveScopes_IgnoresUnknownAndWhitespace(t *testing.T) {
-	got := effectiveScopes(" read:account , write:drive , write:notes ")
+	// write:blocks is a real Misskey permission ariaPermissionList
+	// requests but this service never grants (no blocks feature exists)
+	// — a stand-in for "unknown to this service," now that write:drive
+	// (Issue #77 PR3) is no longer unknown itself.
+	got := effectiveScopes(" read:account , write:blocks , write:notes ")
 	want := []string{ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("effectiveScopes() = %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveScopes_GrantsDriveScopesWhenRequested(t *testing.T) {
+	got := effectiveScopes("read:drive,write:drive")
+	want := []string{ScopeReadNotes, ScopeReadDrive, ScopeWriteDrive}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("effectiveScopes(\"read:drive,write:drive\") = %v, want %v", got, want)
 	}
 }
 

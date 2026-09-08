@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/drive"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
@@ -66,6 +67,18 @@ type Server struct {
 	// nil disables push delivery entirely, leaving GET /streaming as
 	// Issue #41's handshake/ack/keepalive-only stub.
 	streamHub *streamhub.Hub
+
+	// drive backs Issue #77 PR3's Misskey-compatible Drive API and the
+	// anonymous GET /files/{id} serving route. A nil value (the safe
+	// default) registers neither.
+	drive *drive.Service
+	// driveMaxFileBytes bounds a single POST /api/drive/files/create
+	// multipart upload's file part — drive_handlers.go enforces it
+	// directly while reading that part (before any byte reaches
+	// drive.Service), independent of drive.Service's own Config.
+	// MaxFileBytes (the same bound, kept in sync by cmd/server) that
+	// UploadFromURL and CreateFile's other callers rely on instead.
+	driveMaxFileBytes int64
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -111,6 +124,8 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		streamSem:                make(chan struct{}, maxConcurrentStreamConnections),
 		streamPingInterval:       pingInterval,
 		streamHub:                opts.StreamHub,
+		drive:                    opts.Drive,
+		driveMaxFileBytes:        opts.DriveMaxFileBytes,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +174,35 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /api/i/notifications", RequireScope(logger, s.miauth, miauth.ScopeReadNotifications)(http.HandlerFunc(s.handleAPINotifications)))
 		s.Handle("POST /api/users/search", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearch)))
 		s.Handle("POST /api/users/search-by-username-and-host", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearchByUsernameAndHost)))
+	}
+
+	// Issue #77 PR3: the Misskey-compatible Drive API. Independent of
+	// opts.TimelineService — Drive has never depended on the note
+	// timeline, only on opts.MiAuthService for RequireScope/manual token
+	// verification. drive/files/create authenticates itself (see
+	// handleDriveFilesCreate's doc comment) rather than being wrapped in
+	// RequireScope, since its multipart body carries "i" as a form
+	// field, not the JSON RequireScope reads from.
+	if opts.MiAuthService != nil && opts.Drive != nil {
+		s.Handle("POST /api/drive", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDrive)))
+		s.Handle("POST /api/drive/files", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDriveFiles)))
+		s.Handle("POST /api/drive/files/create", http.HandlerFunc(s.handleDriveFilesCreate))
+		s.Handle("POST /api/drive/files/show", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDriveFilesShow)))
+		s.Handle("POST /api/drive/files/update", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFilesUpdate)))
+		s.Handle("POST /api/drive/files/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFilesDelete)))
+		s.Handle("POST /api/drive/files/upload-from-url", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFilesUploadFromUrl)))
+		s.Handle("POST /api/drive/files/attached-notes", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDriveFilesAttachedNotes)))
+		s.Handle("POST /api/drive/folders", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDriveFolders)))
+		s.Handle("POST /api/drive/folders/create", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFoldersCreate)))
+		s.Handle("POST /api/drive/folders/show", RequireScope(logger, s.miauth, miauth.ScopeReadDrive)(http.HandlerFunc(s.handleDriveFoldersShow)))
+		s.Handle("POST /api/drive/folders/update", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFoldersUpdate)))
+		s.Handle("POST /api/drive/folders/delete", RequireScope(logger, s.miauth, miauth.ScopeWriteDrive)(http.HandlerFunc(s.handleDriveFoldersDelete)))
+	}
+	// GET /files/{id}: anonymous byte serving, independent of
+	// opts.MiAuthService (see handleFilesShow's doc comment on why no
+	// auth check belongs here).
+	if opts.Drive != nil {
+		s.Handle("GET /files/{id}", http.HandlerFunc(s.handleFilesShow))
 	}
 
 	return s

@@ -17,12 +17,20 @@ const (
 	ScopeReadReactions     = "read:reactions"
 	ScopeWriteReactions    = "write:reactions"
 	ScopeReadNotifications = "read:notifications"
+	// ScopeReadDrive and ScopeWriteDrive gate Issue #77 PR3's Misskey-
+	// compatible Drive API. Aria's MiAuth permission query already
+	// requests both today (docs/compat/aria-v1.5.11.md), so — like
+	// read:notifications before it — a local API token issued before
+	// this PR shipped will not carry them until the owner re-approves
+	// through miauthctl.
+	ScopeReadDrive  = "read:drive"
+	ScopeWriteDrive = "write:drive"
 )
 
 // grantableScopes are the scopes granted only when Aria's requested
 // permission set contains them. read:notes is deliberately excluded
 // here: see effectiveScopes.
-var grantableScopes = []string{ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount, ScopeReadReactions, ScopeWriteReactions, ScopeReadNotifications}
+var grantableScopes = []string{ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount, ScopeReadReactions, ScopeWriteReactions, ScopeReadNotifications, ScopeReadDrive, ScopeWriteDrive}
 
 // effectiveScopes computes the local API token scopes granted for a raw
 // requested permission string (Aria's comma-separated `permission`

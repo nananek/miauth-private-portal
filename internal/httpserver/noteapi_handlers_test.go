@@ -47,6 +47,14 @@ func TestHandleEndpoints_ListsOnlyImplementedNeverUpdate(t *testing.T) {
 		"notes/reactions/create": true, "notes/reactions/delete": true, "notes/reactions": true,
 		"notes/mentions": true, "i/notifications": true, "stats": true,
 		"users/search": true, "users/search-by-username-and-host": true,
+		// Issue #77 PR3's Drive API (drive_handlers.go). move-bulk and the
+		// other confirmed-unused drive/* names deliberately stay out of
+		// this list — see implementedEndpoints' own doc comment.
+		"drive": true, "drive/files": true, "drive/files/create": true,
+		"drive/files/show": true, "drive/files/update": true, "drive/files/delete": true,
+		"drive/files/upload-from-url": true, "drive/files/attached-notes": true,
+		"drive/folders": true, "drive/folders/create": true, "drive/folders/show": true,
+		"drive/folders/update": true, "drive/folders/delete": true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("endpoints = %v, want exactly %v", got, want)

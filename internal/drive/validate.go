@@ -33,7 +33,7 @@ var ErrInvalidImage = errors.New("drive: not a valid raster image")
 // package accepts. SVG has no entry here — and never will — because it
 // is a vector/XML format image.DecodeConfig cannot decode as any raster
 // format, so it is rejected by DecodeImage's ordinary
-// fails-to-decode path (ADR-0006 D2) rather than needing a dedicated
+// fails-to-decode path (ADR-0007 D2) rather than needing a dedicated
 // SVG/XML parser to detect and reject it by name.
 var AllowedImageFormats = map[string]bool{
 	"png":  true,
@@ -78,4 +78,29 @@ func ValidateImage(data []byte, maxWidth, maxHeight int) (ImageInfo, error) {
 		return ImageInfo{}, fmt.Errorf("%w: %dx%d exceeds the %dx%d limit", ErrInvalidImage, cfg.Width, cfg.Height, maxWidth, maxHeight)
 	}
 	return ImageInfo{Format: format, Width: cfg.Width, Height: cfg.Height}, nil
+}
+
+// imageFormatMIME maps an ImageInfo.Format (an image.DecodeConfig format
+// name, always one of AllowedImageFormats after ValidateImage succeeds)
+// to the canonical MIME type Service stores and reports — derived from
+// the decoded format, never from a client's declared Content-Type or
+// filename extension, the same untrusted-input stance ValidateImage
+// itself takes.
+var imageFormatMIME = map[string]string{
+	"png":  "image/png",
+	"jpeg": "image/jpeg",
+	"webp": "image/webp",
+}
+
+// MIMEForFormat returns the canonical MIME type for format (an
+// ImageInfo.Format value). It panics on an unrecognized format: every
+// caller only ever passes a format ValidateImage already confirmed is in
+// AllowedImageFormats, so an unrecognized value here is this package's
+// own bug, not a possible runtime input.
+func MIMEForFormat(format string) string {
+	mime, ok := imageFormatMIME[format]
+	if !ok {
+		panic("drive: MIMEForFormat: unrecognized format " + format)
+	}
+	return mime
 }
