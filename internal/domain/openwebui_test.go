@@ -11,7 +11,7 @@ import (
 // conversation link's whole safety story is "no state but this one may
 // do that", so a silently permissive new pair is exactly the bug worth
 // catching.
-var allLinkStates = []LinkState{LinkCreationPending, LinkReady, LinkAmbiguous, LinkFailed, LinkDead, LinkStateless}
+var allLinkStates = []LinkState{LinkCreationPending, LinkReady, LinkAmbiguous, LinkFailed, LinkDead}
 
 var allLinkEvents = []LinkEvent{
 	LinkEventConfirmed,
@@ -20,22 +20,19 @@ var allLinkEvents = []LinkEvent{
 	LinkEventUncertainContinuation,
 	LinkEventOwnerConfirmed,
 	LinkEventOwnerAbandoned,
-	LinkEventServedStateless,
 }
 
 // TestLinkTransition_ExhaustiveTable walks every (state, event) pair and
-// checks it against the roadmap's diagram (extended by ADR-0005
-// D24/D25's stateless addition): the seven listed edges are allowed and
-// reach the stated state, and every other pair is rejected. In
-// particular a failed, dead, or stateless link accepts nothing, and no
-// event other than an owner's may move an ambiguous link.
+// checks it against the roadmap's diagram: the five listed edges are
+// allowed and reach the stated state, and every other pair is rejected.
+// In particular a failed or dead link accepts nothing, and no event
+// other than an owner's may move an ambiguous link.
 func TestLinkTransition_ExhaustiveTable(t *testing.T) {
 	allowed := map[LinkState]map[LinkEvent]LinkState{
 		LinkCreationPending: {
 			LinkEventConfirmed:         LinkReady,
 			LinkEventDefinitiveFailure: LinkFailed,
 			LinkEventUncertainCreation: LinkAmbiguous,
-			LinkEventServedStateless:   LinkStateless,
 		},
 		LinkReady: {
 			LinkEventUncertainContinuation: LinkAmbiguous,
@@ -142,12 +139,6 @@ func TestConversationLink_AllowsInitialStartChat(t *testing.T) {
 			jobID: claimingJob,
 			want:  false,
 		},
-		{
-			name:  "claiming job once stateless",
-			link:  OpenWebUIConversationLink{State: LinkStateless, ClaimJobID: &jobID},
-			jobID: claimingJob,
-			want:  false,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -160,9 +151,7 @@ func TestConversationLink_AllowsInitialStartChat(t *testing.T) {
 
 // TestConversationLink_StatePredicates covers the remaining three
 // predicates across every state at once: only ready may continue, no
-// state may auto-retry, and failed, dead, and stateless are all
-// terminal — stateless included, even though (unlike the other two)
-// reaching it is success, not failure (LinkStateless's own doc comment).
+// state may auto-retry, and failed and dead are both terminal.
 func TestConversationLink_StatePredicates(t *testing.T) {
 	tests := []struct {
 		state          LinkState
@@ -174,7 +163,6 @@ func TestConversationLink_StatePredicates(t *testing.T) {
 		{state: LinkAmbiguous},
 		{state: LinkFailed, isTerminal: true},
 		{state: LinkDead, isTerminal: true},
-		{state: LinkStateless, isTerminal: true},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.state), func(t *testing.T) {

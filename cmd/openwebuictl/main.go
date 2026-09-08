@@ -385,9 +385,15 @@ func runAvatarClear(ctx context.Context, db *sqlite.DB, _ *config.Config, args [
 	return nil
 }
 
+// validLinkState no longer accepts "stateless" (ADR-0005 D27, Issue
+// #123 retired the LinkState constant it named): --state=stateless is
+// rejected as an unrecognized filter value now, the same as any other
+// unknown string, even against a deployment that still has an old row in
+// that state on disk (Issue #93, pre-#123) — list every link and filter
+// client-side to find one.
 func validLinkState(state domain.LinkState) bool {
 	switch state {
-	case domain.LinkCreationPending, domain.LinkReady, domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead, domain.LinkStateless:
+	case domain.LinkCreationPending, domain.LinkReady, domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead:
 		return true
 	default:
 		return false

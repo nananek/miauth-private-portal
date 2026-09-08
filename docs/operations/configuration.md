@@ -1508,14 +1508,16 @@ A poll that never resolves within that budget lands in the same
 unconfirmed completion already does (ADR-0005 D6) — a real chat exists
 for a later `GET` to resolve, so there is no longer a distinct
 "cannot ever be recovered" state for this case the way D25 (now
-withdrawn) required. `LinkStateless` (migration `0032`) is retired along
-with it: no turn is dispatched statelessly any longer, so no link ever
-reaches that state going forward; the migration itself is not reverted
-(never edit an applied migration), so `'stateless'` remains a
-technically-permitted but unused `CHECK` value, and
-`go run ./cmd/openwebuictl links --state=stateless` still works as a
-query but is expected to return nothing in a deployment that never ran
-the retired code.
+withdrawn) required. `domain.LinkStateless` (migration `0032`) is removed from the Go layer
+along with it: no turn is dispatched statelessly any longer, so no link
+ever reaches that state going forward. The migration itself is not
+reverted (never edit an applied migration), so `'stateless'` remains a
+technically-permitted `CHECK` value nothing in Go names anymore —
+`go run ./cmd/openwebuictl links --state=stateless` now rejects it as an
+unrecognized filter, same as any other unknown string; a deployment that
+somehow still has a row in that state from before this decision needs an
+unfiltered `links` listing (or a direct query) to find it, not this
+flag.
 
 ### Table rebuild note
 

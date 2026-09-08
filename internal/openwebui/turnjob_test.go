@@ -1268,7 +1268,7 @@ func TestTurnJob_ConcurrentHandle_SerializesPerThread(t *testing.T) {
 // so this exercises it directly rather than through handleCreationPending
 // or handleReady.
 func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.T) {
-	for _, state := range []domain.LinkState{domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead, domain.LinkStateless} {
+	for _, state := range []domain.LinkState{domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead} {
 		t.Run(string(state), func(t *testing.T) {
 			env := newTurnTestEnv(t)
 			root := env.mustCreateRoot(t, "hello")
@@ -1297,10 +1297,6 @@ func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.
 				}
 				if err := env.db.OpenWebUILinks.MarkDead(t.Context(), link.ID, domain.FailureCategoryOwnerAbandoned, now); err != nil {
 					t.Fatalf("mark dead: %v", err)
-				}
-			case domain.LinkStateless:
-				if err := env.db.OpenWebUILinks.MarkStateless(t.Context(), link.ID, now); err != nil {
-					t.Fatalf("mark stateless: %v", err)
 				}
 			}
 			preLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
