@@ -50,6 +50,12 @@ type Repos struct {
 	// startup auto-seed path does.
 	Config      ConfigRepository
 	ConfigAudit ConfigAuditRepository
+
+	// UserLists backs Issue #115's users/lists/* CRUD and
+	// notes/user-list-timeline. Always present; whether anything writes
+	// through it is internal/httpserver's route registration decision,
+	// mirroring the Files/Folders precedent above.
+	UserLists UserListRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made
