@@ -209,29 +209,27 @@ type TurnOutcome struct {
 	// Title mirrors TurnResult.Title (Issue #84): the chat's own title,
 	// read from the same GET /api/v1/chats/{id} body this lookup already
 	// decodes, once it has moved past the "bridge-precreated"
-	// placeholder. Unlike Sources, a lookup can report this for a
-	// continuation or a retried turn too, since the chat title is
-	// chat-wide state, not turn-specific.
-	//
-	// There is deliberately no Sources field here: D22 records that
-	// sources[] is captured only from the completions response body
-	// itself, never re-derived from this GET path, because whether GET
-	// /api/v1/chats/{id} even carries sources for a completed turn was
-	// never confirmed.
-	//
-	// NOT COSMETIC as of ADR-0005 D27 (Issue #123, self-review finding,
-	// 2026-09-08): this comment originally described a rare-recovery-
-	// path-only gap, back when a tool-carrying turn's common case read
-	// sources from a buffered, legacy-mode completions response instead.
-	// D27 retired that response shape for every native (tool-carrying)
-	// turn — its own completions response is always an empty body — and
-	// made this GET path (via awaitTurnDone) that turn's *only*
-	// confirmation step. The consequence: TurnResult.Sources is now
-	// unconditionally nil for every turn that actually calls a tool or
-	// searches the web, not merely for the rare uncertain-outcome retry
-	// this comment used to describe. See D27's own "self-review gap"
-	// paragraph for the open owner decision this needs before shipping.
+	// placeholder. A lookup can report this for a continuation or a
+	// retried turn too, since the chat title is chat-wide state, not
+	// turn-specific.
 	Title *string
+	// Sources is ADR-0005 D28's addition (Issue #127), resolving D27's
+	// "self-review gap": D22 originally left this field out because
+	// whether GET /api/v1/chats/{id} carries any equivalent of the
+	// completions response's own sources[] was unconfirmed, and D27 then
+	// found that every native (tool-carrying) turn's completions response
+	// is unconditionally empty — making this GET path (polled by
+	// awaitTurnDone) that turn's *only* confirmation step, with no
+	// sources anywhere to report. Issue #127's real-instance check
+	// resolved the question: the GET body carries no field literally
+	// named `sources`, but the same assistant message's own output[]
+	// (internal/provider/openwebui/client.go's normalizeOutputSources)
+	// carries an equivalent trace for a completed tool call. nil whenever
+	// output[] carried no completed tool call — including every plain
+	// turn, and a native turn's web-search round, whose own output[]
+	// shape remains unconfirmed (see normalizeOutputSources' own doc
+	// comment).
+	Sources []Source
 }
 
 // Provider is the outbound boundary a durable job handler (Issue #53's

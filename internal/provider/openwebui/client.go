@@ -330,9 +330,11 @@ type completionsResponseBody struct {
 	// body (see runTurn's own doc comment) — so this field is only ever
 	// populated for a plain turn that happens to carry a sources[] array
 	// on its buffered response, which no longer includes any real
-	// tool/web-search turn. See D27's "self-review gap" paragraph and
-	// openwebui.TurnOutcome's Title field doc comment for the unresolved
-	// consequence. Left as json.RawMessage here — decoded into
+	// tool/web-search turn. ADR-0005 D28 (Issue #127) recovers a native
+	// turn's citations from a different signal instead — GET
+	// /api/v1/chats/{id}'s own output[] trace, decoded by
+	// normalizeOutputSources — which runTurn falls back to whenever this
+	// field comes back empty. Left as json.RawMessage here — decoded into
 	// []wireSource separately, by decodeSources — so that
 	// an unexpected sources[] shape (a provider schema drift this
 	// adapter has not observed) degrades to "no citations for this
@@ -453,6 +455,115 @@ func stringifyArguments(params map[string]any) map[string]string {
 		out[boundedString(k)] = boundedString(fmt.Sprint(v))
 	}
 	return out
+}
+
+// wireOutputItem is one GET /api/v1/chats/{id} assistant message's
+// output[] entry (ADR-0005 D28, Issue #127's real-instance check,
+// 2026-09-08): the OpenAI Responses API's own item-trace shape a
+// native-mode (D27) turn carries in place of the legacy sources[] array
+// D22 describes. Only function_call/function_call_output pairing is
+// implemented — see normalizeOutputSources — so Type, Name, CallID, and
+// Arguments are the only members read anywhere. There is deliberately no
+// field here for function_call_output's own `output` (the tool's raw,
+// untrusted result text) or a reasoning item's `encrypted_content`: the
+// same "no field for it, so encoding/json's unknown-field-skipping
+// enforces D22's document[]-never-decoded rule for free" technique D22's
+// wireSource already relies on.
+type wireOutputItem struct {
+	Type      string          `json:"type"`
+	Name      string          `json:"name"`
+	CallID    string          `json:"call_id"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// decodeOutputItems decodes raw output[] entries, skipping — never
+// failing on — any element that does not match wireOutputItem's shape:
+// the same "an unrecognized entry degrades to no citation for it, never a
+// turn failure" rule decodeSources already applies to sources[].
+func decodeOutputItems(raw []json.RawMessage) []wireOutputItem {
+	if len(raw) == 0 {
+		return nil
+	}
+	items := make([]wireOutputItem, 0, len(raw))
+	for _, r := range raw {
+		var item wireOutputItem
+		if err := json.Unmarshal(r, &item); err != nil {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// functionCallArguments decodes a function_call item's own `arguments`
+// member into a map, tolerating either shape a Responses API
+// implementation might send it in: a JSON object directly, or (OpenAI's
+// own documented shape) a JSON-encoded string carrying that same object.
+// Issue #127's own capture rendered arguments unquoted, which this
+// adapter treats as possibly just a display artifact of the issue
+// write-up rather than a confirmed wire shape — so both are accepted.
+// Either shape mismatching, or the member being absent, yields nil:
+// enrichment only, never a decode failure.
+func functionCallArguments(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err == nil {
+		return m
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	var nested map[string]any
+	if err := json.Unmarshal([]byte(s), &nested); err != nil {
+		return nil
+	}
+	return nested
+}
+
+// normalizeOutputSources turns output[] items into openwebui.Source
+// records, one per function_call item whose call_id has a matching
+// function_call_output — i.e. a tool round that actually completed, not
+// one still in flight or abandoned mid-turn (ADR-0005 D28). Pairing by
+// call_id, rather than assuming array position, is deliberate: a
+// multi-round native turn is expected to carry several function_call/
+// function_call_output pairs, in an order this adapter does not assume
+// (UNVERIFIED — Issue #127's own real-instance capture observed exactly
+// one pair).
+//
+// Never reads function_call_output's own `output` member at all (see
+// wireOutputItem's doc comment) — only the call's name and arguments
+// survive, the same fields a legacy-path tool source's DisplayName/
+// Arguments already carry (ADR-0005 D22), so a citation's shape is
+// identical regardless of which path produced it. A web-search round's
+// own shape in output[] is unconfirmed (D28) and not attempted here: an
+// item whose type is neither function_call nor function_call_output is
+// silently skipped, exactly like an unrecognized sources[] entry already
+// is.
+func normalizeOutputSources(items []wireOutputItem) []openwebui.Source {
+	if len(items) == 0 {
+		return nil
+	}
+	completed := make(map[string]bool, len(items))
+	for _, it := range items {
+		if it.Type == "function_call_output" && it.CallID != "" {
+			completed[it.CallID] = true
+		}
+	}
+	var sources []openwebui.Source
+	for _, it := range items {
+		if it.Type != "function_call" || it.CallID == "" || !completed[it.CallID] {
+			continue
+		}
+		src := openwebui.Source{Kind: openwebui.SourceKindTool, DisplayName: boundedString(it.Name)}
+		if args := functionCallArguments(it.Arguments); len(args) > 0 {
+			src.Arguments = stringifyArguments(args)
+		}
+		sources = append(sources, src)
+	}
+	return sources
 }
 
 // runTurn sends one completions call and then confirms its outcome with
@@ -580,6 +691,19 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 		// failure: the turn's actual content already decoded fine, and
 		// citations are enrichment, not core to success.
 		rawSources, _ := decodeSources(parsed.Sources)
+		sources := normalizeSources(rawSources)
+		if len(sources) == 0 {
+			// ADR-0005 D28 (Issue #127): a native turn's completions POST
+			// body is always empty (D27), so parsed.Sources never carries
+			// anything for it — outcome, the same GET confirmation that
+			// just resolved Content/Done, is where D28 found the
+			// equivalent signal instead (output[]'s function_call/
+			// function_call_output pairs). A legacy-path turn that truly
+			// carried no sources[] falls through to this too, harmlessly:
+			// outcome.Sources is nil whenever output[] carried no
+			// completed tool call either.
+			sources = outcome.Sources
+		}
 		return openwebui.TurnResult{
 			Content:          outcome.Content,
 			RemoteCurrentID:  outcome.RemoteCurrentID,
@@ -587,7 +711,7 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 			CompletionTokens: outcome.CompletionTokens,
 			FinishReason:     finishReason,
 			Title:            outcome.Title,
-			Sources:          normalizeSources(rawSources),
+			Sources:          sources,
 		}, nil
 	}
 }
@@ -754,6 +878,12 @@ type chatMessageBody struct {
 		PromptTokens     *int `json:"prompt_tokens"`
 		CompletionTokens *int `json:"completion_tokens"`
 	} `json:"usage"`
+	// Output is ADR-0005 D28's addition (Issue #127): a native-mode
+	// assistant message's own tool-execution trace, present in place of
+	// the legacy sources[] array D22 describes. See wireOutputItem's own
+	// doc comment for the decode target and what is deliberately never
+	// captured from it.
+	Output []json.RawMessage `json:"output"`
 }
 
 // LookupTurnOutcome implements openwebui.Provider by calling
@@ -761,7 +891,9 @@ type chatMessageBody struct {
 // message named, plus the chat's current-message pointer — never any
 // other message, the title, or anything else the chat carries (the
 // port's own doc comment on this method, and ADR-0005 D1's addendum,
-// both hold this line: it is not GetChat).
+// both hold this line: it is not GetChat). Sources is ADR-0005 D28's
+// addition (Issue #127): normalizeOutputSources over that same message's
+// own output[] trace, nil whenever it carried no completed tool call.
 func (c *Client) LookupTurnOutcome(ctx context.Context, remoteChatID, assistantMessageID string) (openwebui.TurnOutcome, error) {
 	if !remoteIDPattern.MatchString(remoteChatID) {
 		return openwebui.TurnOutcome{}, openwebui.NewProviderError(openwebui.CategoryPolicyViolation, openwebui.PhaseLookup,
@@ -808,6 +940,7 @@ func (c *Client) LookupTurnOutcome(ctx context.Context, remoteChatID, assistantM
 		PromptTokens:     msg.Usage.PromptTokens,
 		CompletionTokens: msg.Usage.CompletionTokens,
 		Title:            title,
+		Sources:          normalizeOutputSources(decodeOutputItems(msg.Output)),
 	}, nil
 }
 

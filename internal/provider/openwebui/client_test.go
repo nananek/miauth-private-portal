@@ -950,6 +950,276 @@ func TestClient_ContinueTurn_MalformedSourcesNeverFailsTheTurn(t *testing.T) {
 	}
 }
 
+// --- ADR-0005 D28 (Issue #127): output[] citation recovery ---
+
+// TestClient_LookupTurnOutcome_NormalizesToolSourceFromOutput backs
+// ADR-0005 D28: a native-mode assistant message's output[] carries a
+// function_call/function_call_output pair sharing one call_id, and
+// LookupTurnOutcome normalizes it into exactly the shape a legacy-path
+// tool source already has (DisplayName from the call's own name,
+// Arguments from its own arguments) — the reasoning and message items
+// alongside it, present the way a real capture would have them, decode
+// but contribute nothing.
+func TestClient_LookupTurnOutcome_NormalizesToolSourceFromOutput(t *testing.T) {
+	const assistantID = "assistant-1"
+	message := map[string]any{
+		"done":    true,
+		"content": "the weather in Tokyo is sunny",
+		"output": []any{
+			map[string]any{"type": "reasoning", "content": []any{}, "encrypted_content": "opaque"},
+			map[string]any{
+				"type": "function_call", "name": "search_notes_search_get",
+				"call_id": "call-1", "arguments": map[string]any{"query": "weather", "max_results": 20},
+				"status": "completed",
+			},
+			map[string]any{
+				"type": "function_call_output", "call_id": "call-1",
+				"output": []any{map[string]any{"type": "input_text", "text": `{"hits":[]}`}}, "status": "completed",
+			},
+			map[string]any{"type": "message", "role": "assistant", "content": []any{}, "status": "completed"},
+		},
+	}
+	getResp := chatGetBody(t, assistantID, message, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", assistantID)
+	if err != nil {
+		t.Fatalf("LookupTurnOutcome: %v", err)
+	}
+	if len(outcome.Sources) != 1 {
+		t.Fatalf("Sources = %+v, want exactly 1", outcome.Sources)
+	}
+	src := outcome.Sources[0]
+	if src.Kind != openwebui.SourceKindTool {
+		t.Errorf("Kind = %q, want %q", src.Kind, openwebui.SourceKindTool)
+	}
+	if src.DisplayName != "search_notes_search_get" {
+		t.Errorf("DisplayName = %q, want %q", src.DisplayName, "search_notes_search_get")
+	}
+	if src.Arguments["query"] != "weather" {
+		t.Errorf("Arguments[query] = %q, want %q", src.Arguments["query"], "weather")
+	}
+}
+
+// TestClient_LookupTurnOutcome_OutputArgumentsAsJSONString backs
+// functionCallArguments' other tolerated shape: OpenAI's own Responses
+// API documents function_call.arguments as a JSON-encoded string, not a
+// bare object — Issue #127's own write-up rendered it unquoted, which may
+// just be the issue text's own formatting rather than the literal wire
+// shape, so both are accepted.
+func TestClient_LookupTurnOutcome_OutputArgumentsAsJSONString(t *testing.T) {
+	const assistantID = "assistant-1"
+	message := map[string]any{
+		"done": true, "content": "ok",
+		"output": []any{
+			map[string]any{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": `{"city":"Tokyo"}`},
+			map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "irrelevant"},
+		},
+	}
+	getResp := chatGetBody(t, assistantID, message, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", assistantID)
+	if err != nil {
+		t.Fatalf("LookupTurnOutcome: %v", err)
+	}
+	if len(outcome.Sources) != 1 || outcome.Sources[0].Arguments["city"] != "Tokyo" {
+		t.Fatalf("Sources = %+v, want one entry with Arguments[city] = Tokyo", outcome.Sources)
+	}
+}
+
+// TestClient_LookupTurnOutcome_OutputFunctionCallWithoutMatchingOutput_NotSurfaced
+// backs the "a tool round that actually completed" gate (ADR-0005 D28): a
+// function_call with no function_call_output sharing its call_id — still
+// in flight, or abandoned mid-turn — is never surfaced as a citation.
+func TestClient_LookupTurnOutcome_OutputFunctionCallWithoutMatchingOutput_NotSurfaced(t *testing.T) {
+	const assistantID = "assistant-1"
+	message := map[string]any{
+		"done": true, "content": "ok",
+		"output": []any{
+			map[string]any{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": map[string]any{}},
+		},
+	}
+	getResp := chatGetBody(t, assistantID, message, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", assistantID)
+	if err != nil {
+		t.Fatalf("LookupTurnOutcome: %v", err)
+	}
+	if outcome.Sources != nil {
+		t.Errorf("Sources = %+v, want nil for an unmatched function_call", outcome.Sources)
+	}
+}
+
+// TestClient_LookupTurnOutcome_OutputMultipleRoundsPaired backs
+// normalizeOutputSources' call_id pairing across more than one round —
+// UNVERIFIED against a real multi-round native turn (ADR-0005 D28), but
+// the pairing logic itself must not silently collapse to array position
+// or lose a round.
+func TestClient_LookupTurnOutcome_OutputMultipleRoundsPaired(t *testing.T) {
+	const assistantID = "assistant-1"
+	message := map[string]any{
+		"done": true, "content": "ok",
+		"output": []any{
+			map[string]any{"type": "function_call", "name": "search", "call_id": "call-1", "arguments": map[string]any{"q": "a"}},
+			map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "x"},
+			map[string]any{"type": "function_call", "name": "fetch", "call_id": "call-2", "arguments": map[string]any{"q": "b"}},
+			map[string]any{"type": "function_call_output", "call_id": "call-2", "output": "y"},
+		},
+	}
+	getResp := chatGetBody(t, assistantID, message, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", assistantID)
+	if err != nil {
+		t.Fatalf("LookupTurnOutcome: %v", err)
+	}
+	if len(outcome.Sources) != 2 {
+		t.Fatalf("Sources = %+v, want exactly 2", outcome.Sources)
+	}
+	if outcome.Sources[0].DisplayName != "search" || outcome.Sources[1].DisplayName != "fetch" {
+		t.Errorf("Sources = %+v, want [search, fetch] in order", outcome.Sources)
+	}
+}
+
+// TestClient_LookupTurnOutcome_OutputNeverCapturesRawToolResultOrEncryptedContent
+// is the security-regression pin for ADR-0005 D28's own extension of
+// D22's "document[] is never decoded" guarantee to output[]: neither
+// function_call_output's own raw result text nor a reasoning item's
+// encrypted_content may reach TurnOutcome in any field, mirroring
+// TestClient_ContinueTurn_SourcesDocumentNeverCaptured for sources[].
+func TestClient_LookupTurnOutcome_OutputNeverCapturesRawToolResultOrEncryptedContent(t *testing.T) {
+	const assistantID = "assistant-1"
+	const toolResultMarker = "super-secret-tool-result-text"
+	const encryptedMarker = "super-secret-encrypted-reasoning"
+	message := map[string]any{
+		"done": true, "content": "ok",
+		"output": []any{
+			map[string]any{"type": "reasoning", "encrypted_content": encryptedMarker},
+			map[string]any{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": map[string]any{}},
+			map[string]any{"type": "function_call_output", "call_id": "call-1", "output": toolResultMarker},
+		},
+	}
+	getResp := chatGetBody(t, assistantID, message, assistantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, getResp, http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	outcome, err := client.LookupTurnOutcome(t.Context(), "chat-1", assistantID)
+	if err != nil {
+		t.Fatalf("LookupTurnOutcome: %v", err)
+	}
+	encoded, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatalf("marshal TurnOutcome: %v", err)
+	}
+	for _, marker := range []string{toolResultMarker, encryptedMarker} {
+		if strings.Contains(string(encoded), marker) {
+			t.Errorf("TurnOutcome = %s, must never contain output[]-derived raw text (%q)", encoded, marker)
+		}
+	}
+}
+
+// TestClient_ContinueTurn_NativeModeRecoversSourcesFromOutput is the
+// end-to-end pin for ADR-0005 D28's actual fix: a native turn's
+// completions POST body is always empty (D27), so runTurn's own
+// parsed.Sources is always nil for it — this confirms runTurn falls back
+// to the GET confirmation's own output[]-derived Sources instead, rather
+// than leaving citations lost the way D27's self-review gap originally
+// found.
+func TestClient_ContinueTurn_NativeModeRecoversSourcesFromOutput(t *testing.T) {
+	const assistantID = "assistant-1"
+	done := chatGetBody(t, assistantID, map[string]any{
+		"done": true, "content": "the answer",
+		"output": []any{
+			map[string]any{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": map[string]any{"city": "Tokyo"}},
+			map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "irrelevant"},
+		},
+	}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, []byte("null"), http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, done, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	req.ToolIDs = []string{"calculator"}
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if len(result.Sources) != 1 {
+		t.Fatalf("Sources = %+v, want exactly 1 recovered from output[]", result.Sources)
+	}
+	if result.Sources[0].DisplayName != "get_weather" {
+		t.Errorf("DisplayName = %q, want %q", result.Sources[0].DisplayName, "get_weather")
+	}
+}
+
+// TestClient_ContinueTurn_LegacySourcesTakePriorityOverOutput confirms
+// the output[] fallback runs only when the completions response's own
+// sources[] came back empty: a legacy-path turn whose POST body already
+// carries sources[] (D22) is unaffected by whatever output[] the GET path
+// also happens to carry.
+func TestClient_ContinueTurn_LegacySourcesTakePriorityOverOutput(t *testing.T) {
+	const assistantID = "assistant-1"
+	turnResp := loadFixture(t, "completions_response_sources_tool.json")
+	getResp := chatGetBody(t, assistantID, map[string]any{
+		"done": true, "content": "ok",
+		"output": []any{
+			map[string]any{"type": "function_call", "name": "other_tool", "call_id": "call-1", "arguments": map[string]any{}},
+			map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "x"},
+		},
+	}, assistantID)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			writeJSON(t, w, turnResp, http.StatusOK)
+		case http.MethodGet:
+			writeJSON(t, w, getResp, http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalContinueTurnReq("chat-1")
+	req.IDs.AssistantMessageID = assistantID
+	result, err := client.ContinueTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if len(result.Sources) != 1 || result.Sources[0].DisplayName != "get_weather" {
+		t.Fatalf("Sources = %+v, want the legacy fixture's get_weather source, not output[]'s other_tool", result.Sources)
+	}
+}
+
 // --- Issue #84: chat title ---
 
 // TestClient_StartChat_EnableTitleGenerationSendsTitleGenerationTrue
