@@ -83,6 +83,7 @@ func defaultOpenWebUIConfig() OpenWebUIConfig {
 		MaxResponseBytes:    4_194_304,
 		MaxRequestBytes:     1_048_576,
 		MaxContextMessages:  100,
+		ToolTurnTimeout:     10 * time.Minute,
 	}
 }
 
@@ -1443,6 +1444,7 @@ func TestLoad_OpenWebUIEnabledWithRequiredFieldsSucceeds(t *testing.T) {
 		MaxResponseBytes:    4_194_304,
 		MaxRequestBytes:     1_048_576,
 		MaxContextMessages:  100,
+		ToolTurnTimeout:     10 * time.Minute,
 	}
 	if !reflect.DeepEqual(cfg.OpenWebUI, want) {
 		t.Errorf("OpenWebUI = %+v, want %+v", cfg.OpenWebUI, want)
@@ -1715,6 +1717,7 @@ func TestLoad_OpenWebUIClientBoundsAreValidatedWhenEnabled(t *testing.T) {
 		{"max request bytes below floor", KeyOpenWebUIMaxRequestBytes, "0"},
 		{"max context messages below floor", KeyOpenWebUIMaxContextMessages, "0"},
 		{"max context messages above ceiling", KeyOpenWebUIMaxContextMessages, "1001"},
+		{"tool turn timeout not positive", KeyOpenWebUIToolTurnTimeout, "0s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
