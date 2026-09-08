@@ -22,8 +22,6 @@ import (
 	"strings"
 	"time"
 
-	sse "github.com/tmaxmax/go-sse"
-
 	"github.com/nananek/miauth-private-portal/internal/config"
 	"github.com/nananek/miauth-private-portal/internal/ingest/safehttp"
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
@@ -57,14 +55,16 @@ type Config struct {
 	AllowedOrigins []string
 	APIKey         string
 	// Timeout bounds every individual HTTP call this client makes,
-	// except StreamTurn (see ToolTurnTimeout).
+	// including each poll awaitTurnDone performs (see ToolTurnTimeout for
+	// that loop's own, separate overall budget).
 	Timeout time.Duration
-	// ToolTurnTimeout bounds StreamTurn's own HTTP call only (ADR-0005
-	// D24, Issue #93): unlike every other call this client makes, a
-	// StreamTurn connection stays open for as long as Open WebUI's
-	// native tool-call loop takes — potentially several rounds — so it
-	// needs a longer, independently configurable budget than Timeout's
-	// default is sized for.
+	// ToolTurnTimeout bounds awaitTurnDone's polling budget for a native
+	// (tool-carrying) turn's confirmation only (ADR-0005 D27, Issue #123;
+	// originally sized for the now-retired Client.StreamTurn's own held-
+	// open connection, ADR-0005 D24, Issue #93): Open WebUI's native
+	// tool-call loop can take several rounds before the assistant message
+	// is done, so this needs a longer, independently configurable budget
+	// than Timeout's default is sized for.
 	ToolTurnTimeout time.Duration
 	// MaxResponseBytes and MaxRequestBytes are this client's own
 	// client-side bounds (ADR-0005 D11: no server-side limit could be
@@ -103,7 +103,8 @@ type Client struct {
 // Issue #116: before this existed, each call site listed the fields
 // inline, and two of the three silently omitted ToolTurnTimeout, leaving
 // it at its zero value — which NewClient now rejects outright rather
-// than building a Client that fails every StreamTurn instantly.
+// than building a Client that fails every native turn's polling
+// confirmation instantly.
 func ConfigFrom(oc config.OpenWebUIConfig) Config {
 	return Config{
 		BaseURL:          oc.BaseURL,
@@ -123,9 +124,9 @@ func ConfigFrom(oc config.OpenWebUIConfig) Config {
 // errors if Timeout or ToolTurnTimeout is not positive (Issue #116): a
 // zero-value context.WithTimeout deadline expires the instant it is
 // created, so a Client built with either left unset would fail every
-// call it makes — StreamTurn's within microseconds, never reaching the
-// network — instead of failing loudly here, at startup, where the cause
-// is obvious.
+// call it makes — a native turn's awaitTurnDone poll within
+// microseconds, never reaching the network — instead of failing loudly
+// here, at startup, where the cause is obvious.
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.Timeout <= 0 {
 		return nil, fmt.Errorf("openwebui: Timeout must be positive, got %s", cfg.Timeout)
@@ -255,7 +256,14 @@ func (c *Client) createChat(ctx context.Context, modelID string, sentAt time.Tim
 // --- POST /api/chat/completions ---
 
 type completionsRequestBody struct {
-	Model  string `json:"model"`
+	Model string `json:"model"`
+	// Stream is false for a plain turn (the buffered, single-response
+	// path D1-D23 describe) and true for a turn that resolved tool_ids or
+	// web_search (ADR-0005 D27, Issue #123): only a stream:true,
+	// chat-managed request reaches the event_emitter branch that runs
+	// Open WebUI's own native tool-calling loop at all. Either way the
+	// HTTP response itself is not read as the turn's result — runTurn
+	// always confirms via LookupTurnOutcome/awaitTurnDone instead (D6).
 	Stream bool   `json:"stream"`
 	ChatID string `json:"chat_id"`
 	// ParentID has no "omitempty": ADR-0005 D4 requires the parent_id
@@ -276,25 +284,10 @@ type completionsRequestBody struct {
 	// behavior change until an operator opts in via config.
 	Features *featuresBody `json:"features,omitempty"`
 	ToolIDs  []string      `json:"tool_ids,omitempty"`
-	// Params is Issue #74's fix: set only when this call also carries
-	// Features or ToolIDs (never on a plain turn — no behavior change
-	// for a caller that uses neither). Open WebUI's non_streaming_chat_
-	// response_handler never processes a native tool_calls response (it
-	// only reads choices[0].message.content), so a buffered stream:false
-	// call whose model decides to call a tool natively hangs the
-	// assistant message at done:false forever. function_calling=legacy
-	// routes web search and tool execution through a pre-completion
-	// injection step instead (Open WebUI's own internal task calls),
-	// which the buffered handler processes normally — see ADR-0005's
-	// tool/web-search addendum.
-	Params *paramsBody `json:"params,omitempty"`
-}
-
-// paramsBody is the subset of Open WebUI's per-request `params` object
-// this adapter sets: only FunctionCalling, only the literal "legacy"
-// value, only when Issue #72's opt-in tool/web-search flags are in use.
-type paramsBody struct {
-	FunctionCalling string `json:"function_calling"`
+	// No params key is ever sent (ADR-0005 D27 retired Issue #74's
+	// params.function_calling="legacy" fix entirely, along with the
+	// buffered/stream:false request shape it existed to patch — see
+	// Stream's own doc comment and D27/D17's amendment for why).
 }
 
 // featuresBody is the subset of Open WebUI's `features` request object
@@ -328,10 +321,19 @@ type completionsResponseBody struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	// Sources is Issue #81's addition: present whenever a tool call or
-	// web search actually ran (function_calling=legacy's own injection
-	// step — see paramsBody's doc comment). Left as json.RawMessage here
-	// — decoded into []wireSource separately, by decodeSources — so that
+	// Sources is Issue #81's addition: historically present whenever a
+	// tool call or web search actually ran, via the params.
+	// function_calling="legacy" pre-completion injection step D17 used
+	// to force (ADR-0005 D22). ADR-0005 D27 (Issue #123) retired that
+	// step entirely for a native (tool-carrying) turn in favor of
+	// stream:true, whose own completions response is always an empty
+	// body (see runTurn's own doc comment) — so this field is only ever
+	// populated for a plain turn that happens to carry a sources[] array
+	// on its buffered response, which no longer includes any real
+	// tool/web-search turn. See D27's "self-review gap" paragraph and
+	// openwebui.TurnOutcome's Title field doc comment for the unresolved
+	// consequence. Left as json.RawMessage here — decoded into
+	// []wireSource separately, by decodeSources — so that
 	// an unexpected sources[] shape (a provider schema drift this
 	// adapter has not observed) degrades to "no citations for this
 	// reply" rather than failing the whole completions decode and, with
@@ -460,7 +462,19 @@ func stringifyArguments(params map[string]any) map[string]string {
 // both funnel through this: the only difference between them is
 // parentID (nil for the former, the previous assistant message id for
 // the latter).
+//
+// native (ADR-0005 D27, Issue #123) is true whenever this turn resolved
+// tool_ids or web_search: the request is sent with Stream:true and no
+// params key at all, so Open WebUI's native tool-calling loop runs
+// instead of the single pre-completion legacy resolution step D17 used
+// to force — see completionsRequestBody's own doc comment on Stream, and
+// D27 for why this replaced D24's separate, chat-less StreamTurn
+// mechanism (Issue #93) instead of repairing it. A plain turn (neither
+// tool_ids nor web_search) is unaffected: native is false, and the
+// request/confirmation shape is exactly what it always was.
 func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string, webSearchEnabled, enableTitleGeneration bool) (openwebui.TurnResult, error) {
+	native := len(toolIDs) > 0 || webSearchEnabled
+
 	wireMessages := make([]wireMessage, 0, len(messages)+1)
 	for _, m := range messages {
 		wireMessages = append(wireMessages, wireMessage{Role: m.Role, Content: m.Content})
@@ -469,7 +483,7 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 
 	reqBody := completionsRequestBody{
 		Model:    modelID,
-		Stream:   false,
+		Stream:   native,
 		ChatID:   remoteChatID,
 		ParentID: parentID,
 		ID:       ids.AssistantMessageID,
@@ -490,9 +504,10 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 	if len(toolIDs) > 0 {
 		reqBody.ToolIDs = toolIDs
 	}
-	if reqBody.Features != nil || len(reqBody.ToolIDs) > 0 {
-		reqBody.Params = &paramsBody{FunctionCalling: "legacy"}
-	}
+	// No params.function_calling is ever sent (D27 retires D17's legacy
+	// forcing entirely): native mode needs Open WebUI's own tool-calling
+	// loop to run, and a plain turn never had tool_ids/features to force
+	// legacy resolution over in the first place.
 
 	data, err := c.post(ctx, openwebui.PhaseTurn, "/api/chat/completions", reqBody)
 	if err != nil {
@@ -500,14 +515,15 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 	}
 
 	// Unmarshaling a top-level JSON null into a non-pointer struct is a
-	// documented no-op in encoding/json (parsed stays its zero value),
-	// so the chat-managed failure signal (HTTP 200, body null — compat
-	// "a failure looks like success") and a genuine completion both
-	// reach the GET-based confirmation below unmarshaled the same way.
-	// Only a body that is neither an object nor null — a JSON string,
-	// per the legacy-path malformed fixture — fails to decode at all,
-	// which is schema drift this adapter refuses to guess at (D6: "body
-	// is a JSON string or otherwise undecodable -> contract_failed").
+	// documented no-op in encoding/json (parsed stays its zero value), so
+	// every "the real result is elsewhere" case — the legacy-path failure
+	// signal (HTTP 200, body null) and native mode's always-null
+	// streaming response (ADR-0005 D27, (k)) alike — reaches the
+	// GET-based confirmation below unmarshaled the same way. Only a body
+	// that is neither an object nor null — a JSON string, per the
+	// legacy-path malformed fixture — fails to decode at all, which is
+	// schema drift this adapter refuses to guess at (D6: "body is a JSON
+	// string or otherwise undecodable -> contract_failed").
 	var parsed completionsResponseBody
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return openwebui.TurnResult{}, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseTurn,
@@ -519,7 +535,11 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 		finishReason = &fr
 	}
 
-	outcome, err := c.LookupTurnOutcome(ctx, remoteChatID, ids.AssistantMessageID)
+	confirm := c.LookupTurnOutcome
+	if native {
+		confirm = c.awaitTurnDone
+	}
+	outcome, err := confirm(ctx, remoteChatID, ids.AssistantMessageID)
 	if err != nil {
 		return openwebui.TurnResult{}, err
 	}
@@ -571,324 +591,6 @@ func (c *Client) StartChat(ctx context.Context, req openwebui.StartChatRequest) 
 // all — see its doc comment).
 func (c *Client) ContinueTurn(ctx context.Context, req openwebui.ContinueTurnRequest) (openwebui.TurnResult, error) {
 	return c.runTurn(ctx, req.RemoteChatID, req.IDs.ParentAssistantID, req.ModelID, req.Messages, req.NewTurn, req.IDs, req.SentAt, req.ToolIDs, req.WebSearchEnabled, false)
-}
-
-// --- POST /api/chat/completions (native streaming, stateless — ADR-0005 D24, Issue #93) ---
-
-// streamCompletionsRequestBody is StreamTurn's own request shape —
-// deliberately minimal compared to completionsRequestBody: no chat_id,
-// parent_id, id, user_message, or background_tasks key at all (ADR-0005
-// D24), since this mode manages no remote chat for any of those to name.
-// Unlike completionsRequestBody, a "params" key is never sent: this mode
-// exists specifically so Open WebUI resolves tool calls and web search
-// natively — potentially over several rounds, docs/compat/
-// openwebui-0.11.3.md's Issue #74 observation record — rather than
-// through the legacy pre-completion injection step
-// params.function_calling="legacy" selects (ADR-0005 D16/D17, unchanged
-// for the chat-managed StartChat/ContinueTurn path).
-type streamCompletionsRequestBody struct {
-	Model    string        `json:"model"`
-	Stream   bool          `json:"stream"`
-	Messages []wireMessage `json:"messages"`
-	Features *featuresBody `json:"features,omitempty"`
-	ToolIDs  []string      `json:"tool_ids,omitempty"`
-}
-
-// streamChunkBody is one OpenAI-shaped SSE chunk's decoded JSON payload
-// (docs/compat/fixtures/openwebui/sse_passthrough_finish.sse.txt — the
-// real capture behind docs/compat/openwebui-0.11.3.md's "(h)" table, row
-// 1). Only the two members decodeStreamingCompletion reads are declared;
-// every other field a real chunk carries (id, object, created, model,
-// and delta members other than content — role, tool_calls) is decoded
-// away by encoding/json's default unknown-field-skipping, the same
-// deliberate omission completionsResponseBody's own doc comment
-// describes for sources[].document.
-//
-// UNVERIFIED (Issue #93, no real-instance access — see StreamTurn's own
-// doc comment): whether an in-progress native tool-call round ever
-// surfaces as a delta.tool_calls chunk on this SSE path, as opposed to
-// resolving entirely server-side with only the final round's answer
-// streamed as delta.content, was never exercised. This type's shape
-// makes that distinction irrelevant either way: a chunk carrying only
-// tool_calls (no content) contributes an empty string to the
-// accumulated content, exactly like a chunk this adapter chooses to
-// mostly ignore, never an error.
-type streamChunkBody struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
-}
-
-// StreamTurn implements the native, multi-round tool-execution path
-// ADR-0005 D24 adds alongside StartChat/ContinueTurn (Issue #93). Unlike
-// runTurn, there is no separate confirmation step: this mode keeps a
-// single HTTP connection open for the whole turn — however many tool
-// rounds Open WebUI itself runs before answering — and reads the
-// OpenAI-shaped SSE stream Open WebUI passes straight through when no
-// chat_id is sent (docs/compat/openwebui-0.11.3.md's "(h)" table, row
-// 1). Because that row also means nothing is persisted server-side,
-// there is nothing a later GET /api/v1/chats/{id} could confirm — see
-// ADR-0005 D25: this method's outcome is always exactly "succeeded" (the
-// stream reached the literal "data: [DONE]" event, and the accumulated
-// content is non-empty) or "failed" (anything else, including a clean
-// disconnect with no "[DONE]" ever seen); openwebui.CategoryAmbiguous is
-// never returned here, unlike runTurn.
-//
-// UNVERIFIED (no real-instance access for Issue #93 — see ADR-0005 D24's
-// own note and docs/compat/openwebui-0.11.3.md's "(h)"/(i) sections):
-// whether Open WebUI's native tool-call loop (utils/middleware.py's
-// process_chat_payload, looping while tool_calls and under
-// CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS) actually reaches this same SSE
-// path when tool_ids/features are also set — the only real capture
-// behind sse_passthrough_finish.sse.txt used neither. This method
-// assumes it does (Issue #93's Goal); if a real instance instead routes
-// a tool/web-search-carrying stream:true request into one of the other
-// two rows of the same table (background delivery over socket.io), the
-// observable effect is a stream that never reaches "[DONE]" or a
-// finish_reason before Open WebUI's own connection-idle behavior closes
-// it, which this method already treats as an ordinary failure — never a
-// wrong answer or a security concern, only "the feature does not work
-// yet on this build." Also unverified: whether sources[] (Issue #81) has
-// any equivalent on this path at all (TurnResult.Sources is always nil
-// here) and whether usage accounting is ever present in a stream chunk
-// (TurnResult.PromptTokens/CompletionTokens are always nil here — no
-// stream_options.include_usage request field is sent).
-func (c *Client) StreamTurn(ctx context.Context, req openwebui.StreamTurnRequest) (openwebui.TurnResult, error) {
-	wireMessages := make([]wireMessage, 0, len(req.Messages)+1)
-	for _, m := range req.Messages {
-		wireMessages = append(wireMessages, wireMessage{Role: m.Role, Content: m.Content})
-	}
-	wireMessages = append(wireMessages, wireMessage{Role: req.NewTurn.Role, Content: req.NewTurn.Content})
-
-	reqBody := streamCompletionsRequestBody{
-		Model:    req.ModelID,
-		Stream:   true,
-		Messages: wireMessages,
-	}
-	if req.WebSearchEnabled {
-		reqBody.Features = &featuresBody{WebSearch: true}
-	}
-	if len(req.ToolIDs) > 0 {
-		reqBody.ToolIDs = req.ToolIDs
-	}
-
-	resp, reqCtx, err := c.postStream(ctx, reqBody)
-	if err != nil {
-		return openwebui.TurnResult{}, err
-	}
-	defer drainAndClose(resp.Body, c.maxResponseBytes)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return openwebui.TurnResult{}, openwebui.NewProviderError(categorizeStatus(resp.StatusCode), openwebui.PhaseStream,
-			fmt.Errorf("status %d", resp.StatusCode))
-	}
-
-	content, finishReason, err := decodeStreamingCompletion(reqCtx, resp.Body, c.maxResponseBytes)
-	if err != nil {
-		return openwebui.TurnResult{}, err
-	}
-	if content == "" {
-		return openwebui.TurnResult{}, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream,
-			errors.New("stream completed with empty content"))
-	}
-	return openwebui.TurnResult{Content: content, FinishReason: finishReason}, nil
-}
-
-// cancelOnCloseBody makes resp.Body.Close() also release the
-// context.WithTimeout postStream creates for the streaming read that
-// follows the initial round-trip. The context's own deadline still
-// fires on its own if nobody closes the body, but this makes an
-// ordinary "read to completion or error, then close" caller (StreamTurn,
-// via drainAndClose) release the timer promptly instead of holding it
-// open for the rest of ToolTurnTimeout.
-type cancelOnCloseBody struct {
-	io.ReadCloser
-	cancel context.CancelFunc
-}
-
-func (b *cancelOnCloseBody) Close() error {
-	defer b.cancel()
-	return b.ReadCloser.Close()
-}
-
-// postStream is post's streaming counterpart: it returns the still-open
-// *http.Response rather than a fully buffered []byte, and applies
-// toolTurnTimeout instead of timeout for the reason ToolTurnTimeout's own
-// doc comment gives. It also returns the request-scoped context, which
-// the caller needs again to classify a read error that happens later,
-// while streaming the body (see classifyStreamReadError). The caller
-// owns resp.Body: closing it (directly, or via drainAndClose) is its
-// responsibility, not this function's, and is what releases the
-// context's timer (cancelOnCloseBody).
-func (c *Client) postStream(ctx context.Context, payload any) (*http.Response, context.Context, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream, fmt.Errorf("encode request: %w", err))
-	}
-	if int64(len(body)) > c.maxRequestBytes {
-		return nil, nil, openwebui.NewProviderError(openwebui.CategoryClientRejected, openwebui.PhaseStream, openwebui.ErrRequestTooLarge)
-	}
-
-	reqCtx, cancel := context.WithTimeout(ctx, c.toolTurnTimeout)
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+"/api/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		cancel()
-		return nil, nil, openwebui.NewProviderError(openwebui.CategoryTransport, openwebui.PhaseStream, fmt.Errorf("build request: %w", err))
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		cancel()
-		return nil, nil, classifyDoError(reqCtx, openwebui.PhaseStream, err)
-	}
-	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
-	return resp, reqCtx, nil
-}
-
-// streamLimitedReader wraps r, allowing at most maxBytes+1 bytes through
-// before turning the stream into a clean io.EOF — the same "+1 byte"
-// trick safehttp.ReadLimited uses to tell "the response is exactly at
-// the bound" apart from "the response is larger than the bound", adapted
-// for a reader that must never buffer the whole body in memory first
-// (which is exactly what ReadLimited itself does, and exactly what a
-// streaming call must not do). exceeded is only ever set once the
-// underlying reader is asked for a byte beyond that allowance — a
-// natural EOF (or any other error) arriving at or before the allowance
-// passes straight through untouched, leaving exceeded false.
-type streamLimitedReader struct {
-	r         io.Reader
-	remaining int64
-	exceeded  bool
-}
-
-func newStreamLimitedReader(r io.Reader, maxBytes int64) *streamLimitedReader {
-	return &streamLimitedReader{r: r, remaining: maxBytes + 1}
-}
-
-func (lr *streamLimitedReader) Read(p []byte) (int, error) {
-	if lr.remaining <= 0 {
-		lr.exceeded = true
-		return 0, io.EOF
-	}
-	if int64(len(p)) > lr.remaining {
-		p = p[:lr.remaining]
-	}
-	n, err := lr.r.Read(p)
-	lr.remaining -= int64(n)
-	return n, err
-}
-
-// decodeStreamingCompletion reads r as an OpenAI-shaped SSE stream
-// (docs/compat/openwebui-0.11.3.md's "(h)" table, row 1: no chat_id) and
-// accumulates every choices[0].delta.content chunk into one string,
-// stopping only at the literal "data: [DONE]" event. A chunk's own
-// finish_reason is recorded (last non-null value wins) but never used to
-// end the read: OpenAI's own streaming semantics use finish_reason ==
-// "tool_calls" mid-stream, on the round that decided to call a tool,
-// well before a native multi-round turn's actual final answer, so
-// treating any non-null finish_reason as terminal would stop this read
-// on exactly the wrong round for Issue #93's own purpose. Per ADR-0005
-// D25, any other outcome (a decode error, a size-limit overrun, or the
-// stream ending — cleanly or not — without ever reaching "[DONE]") is
-// always a failure: there is no GET-based confirmation this mode can
-// fall back on, so a caller must never adopt whatever partial content
-// had accumulated so far.
-//
-// go-sse's Read is chosen deliberately over a reconnecting client
-// (docs/decisions/0005-openwebui-boundary.md's D24 own reasoning): this
-// call decodes exactly one already-established *http.Response.Body once,
-// never reconnects, and the wire carries no per-chunk sequence number to
-// make reconnect-and-resume meaningful anyway (openwebui-0.11.3.md's
-// "(h)" section).
-func decodeStreamingCompletion(ctx context.Context, r io.Reader, maxBytes int64) (content string, finishReason *string, err error) {
-	limited := newStreamLimitedReader(r, maxBytes)
-	var sb strings.Builder
-
-	for ev, evErr := range sse.Read(limited, nil) {
-		if evErr != nil {
-			if limited.exceeded {
-				return "", nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream,
-					fmt.Errorf("response exceeds %d byte limit", maxBytes))
-			}
-			return "", nil, classifyStreamReadError(ctx, evErr)
-		}
-		if ev.Data == "[DONE]" {
-			return sb.String(), finishReason, nil
-		}
-
-		var chunk streamChunkBody
-		if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
-			return "", nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream,
-				fmt.Errorf("decode SSE chunk: %w", err))
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		sb.WriteString(chunk.Choices[0].Delta.Content)
-		// A non-null finish_reason is recorded, never treated as the
-		// stream's own end: OpenAI's own streaming semantics (which this
-		// adapter otherwise assumes throughout — the format is
-		// "OpenAI-shaped", never Open WebUI's own invention) use
-		// finish_reason == "tool_calls" mid-stream, on the round that
-		// decided to call a tool, well before native execution's final
-		// answer. Stopping here on any non-null value would end the read
-		// on exactly that round instead of the one Issue #93 exists to
-		// reach. Only "[DONE]" (checked above, once per loop iteration)
-		// ends the read; this last-write-wins value is only ever
-		// reported once "[DONE]" is actually seen.
-		if fr := chunk.Choices[0].FinishReason; fr != nil && *fr != "" {
-			finishReason = fr
-		}
-	}
-
-	if limited.exceeded {
-		return "", nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream,
-			fmt.Errorf("response exceeds %d byte limit", maxBytes))
-	}
-	// sse.Read reached a clean io.EOF (its own doc: "considered
-	// successful") without ever observing "[DONE]" — Open WebUI closed
-	// the connection before this turn signaled completion. ADR-0005 D25:
-	// never adopted as a partial success, even if a finish_reason had
-	// already been seen.
-	return "", nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream,
-		errors.New("stream ended without a completion signal"))
-}
-
-// classifyStreamReadError classifies an error sse.Read yielded while
-// reading the streaming response body, mirroring classifyDoError's
-// timeout/policy-violation/transport split for the initial round-trip.
-// go-sse's parser wraps a bufio.Scanner, which surfaces the underlying
-// reader's error unwrapped (bufio.Scanner.Err's own contract), so a
-// streamLimitedReader/*http.body read error reaches here exactly as it
-// would have reached classifyDoError for a non-streaming call.
-func classifyStreamReadError(ctx context.Context, err error) error {
-	if errors.Is(err, safehttp.ErrPolicyViolation) {
-		return openwebui.NewProviderError(openwebui.CategoryPolicyViolation, openwebui.PhaseStream, err)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return openwebui.NewProviderError(openwebui.CategoryTimeout, openwebui.PhaseStream, err)
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return openwebui.NewProviderError(openwebui.CategoryTimeout, openwebui.PhaseStream, err)
-	}
-	if ctx.Err() != nil {
-		return openwebui.NewProviderError(openwebui.CategoryTimeout, openwebui.PhaseStream, err)
-	}
-	if errors.Is(err, sse.ErrUnexpectedEOF) {
-		// The connection closed mid-event, with no trailing newline —
-		// ADR-0005 D25 treats this the same as any other disconnect: a
-		// definite failure, discarding whatever content had accumulated
-		// so far, never CategoryAmbiguous.
-		return openwebui.NewProviderError(openwebui.CategoryTransport, openwebui.PhaseStream, err)
-	}
-	return openwebui.NewProviderError(openwebui.CategoryContractFailed, openwebui.PhaseStream, err)
 }
 
 // --- GET /api/models ---
@@ -1086,6 +788,83 @@ func (c *Client) LookupTurnOutcome(ctx context.Context, remoteChatID, assistantM
 		CompletionTokens: msg.Usage.CompletionTokens,
 		Title:            title,
 	}, nil
+}
+
+// nativeTurnPollInterval is how often awaitTurnDone re-checks
+// LookupTurnOutcome while a native (tool-carrying) turn's completion is
+// pending (ADR-0005 D27, Issue #123). No prior art for a polling interval
+// exists elsewhere in this codebase; this value is an engineering
+// estimate — a single tool round trip (a web search) is expected to take
+// low single-digit seconds — not a measurement, and may need revisiting
+// once real production latency is observed.
+const nativeTurnPollInterval = 2 * time.Second
+
+// awaitTurnDone is runTurn's native-mode confirmation step, replacing a
+// single LookupTurnOutcome call with a bounded loop over the same,
+// unmodified method: Open WebUI's own native tool-calling loop can run
+// for an unknown number of rounds server-side (ADR-0005 D24's original
+// reasoning, still true), and GET /api/v1/chats/{id} is the only signal
+// available for when it finishes (D27) — there is no separate "still
+// running" notification to wait on instead.
+//
+// It returns the last outcome (or error) observed once either the
+// assistant message resolves (Done or HasError) or c.toolTurnTimeout's
+// budget is exhausted — deliberately never a distinct "poll timed out"
+// error: runTurn's own switch already treats "!Found || !Done" as
+// ADR-0005 D6's ordinary CategoryAmbiguous case, exactly the outcome an
+// exhausted-but-still-pending poll should produce, so no new
+// classification is needed here. A hard failure (the credential was
+// rejected, this client's own policy refused the request, or the
+// response could not be decoded at all) stops the loop immediately
+// instead of spending the rest of the budget re-asking a question whose
+// answer cannot change.
+func (c *Client) awaitTurnDone(ctx context.Context, remoteChatID, assistantMessageID string) (openwebui.TurnOutcome, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, c.toolTurnTimeout)
+	defer cancel()
+
+	var last openwebui.TurnOutcome
+	for {
+		outcome, err := c.LookupTurnOutcome(pollCtx, remoteChatID, assistantMessageID)
+		switch {
+		case err == nil:
+			last = outcome
+			if outcome.HasError || (outcome.Found && outcome.Done) {
+				return outcome, nil
+			}
+		case isHardLookupFailure(err):
+			return openwebui.TurnOutcome{}, err
+		}
+		// Anything else — the null-body CategoryAmbiguous LookupTurnOutcome
+		// itself returns, or a transient rate_limited/server_error/
+		// transport/timeout from one poll's own short c.timeout — is
+		// treated as "still generating, or a passing hiccup" and simply
+		// retried on the next tick, exactly as a rate limit or a dropped
+		// connection would be tolerated across job-level retries for any
+		// other chat-managed turn (ADR-0005 D7).
+		select {
+		case <-time.After(nativeTurnPollInterval):
+		case <-pollCtx.Done():
+			return last, nil
+		}
+	}
+}
+
+// isHardLookupFailure reports whether err is a LookupTurnOutcome failure
+// awaitTurnDone must not spend the rest of its polling budget retrying:
+// the credential was rejected, this client's own policy refused the
+// request, or the response could not be decoded as the pinned contract at
+// all. None of these can resolve differently on a later poll.
+func isHardLookupFailure(err error) bool {
+	var pe *openwebui.ProviderError
+	if !errors.As(err, &pe) {
+		return false
+	}
+	switch pe.Category {
+	case openwebui.CategoryAuthFailed, openwebui.CategoryPolicyViolation, openwebui.CategoryContractFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // --- shared HTTP plumbing ---

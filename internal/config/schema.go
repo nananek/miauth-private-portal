@@ -98,14 +98,17 @@ const (
 	KeyOpenWebUIMaxRequestBytes    = "OPENWEBUI_MAX_REQUEST_BYTES"
 	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
 
-	// KeyOpenWebUIToolTurnTimeout is Issue #93's own per-HTTP-call bound
-	// for Client.StreamTurn (ADR-0005 D24) — deliberately separate from
-	// OPENWEBUI_TIMEOUT because a StreamTurn connection stays open for
-	// Open WebUI's whole native tool-call loop, potentially several
-	// rounds, not one buffered call. Consumed by
-	// internal/provider/openwebui.Client.StreamTurn, and — since D26's
-	// dispatch wiring (TurnJob.handleCreationPending) — reached whenever
-	// a branch's first turn resolves a non-empty tool_ids/web_search.
+	// KeyOpenWebUIToolTurnTimeout bounds a native (tool-carrying) turn's
+	// completion-polling budget (ADR-0005 D27, Issue #123) —
+	// deliberately separate from OPENWEBUI_TIMEOUT because Open WebUI's
+	// native tool-call loop can take several rounds before the assistant
+	// message is done, not one buffered call. Consumed by
+	// internal/provider/openwebui.Client.awaitTurnDone, reached whenever
+	// any turn (a branch's first, or a continuation — Client.runTurn
+	// decides per turn) resolves a non-empty tool_ids/web_search.
+	// Originally Issue #93's per-HTTP-call bound for the now-retired
+	// Client.StreamTurn (ADR-0005 D24); D27 repointed the same config key
+	// at the mechanism that replaced it, keeping its default.
 	KeyOpenWebUIToolTurnTimeout = "OPENWEBUI_TOOL_TURN_TIMEOUT"
 
 	// KeyOpenWebUIWebSearchEnabled is Issue #72's opt-in web-search flag

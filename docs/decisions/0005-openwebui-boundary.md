@@ -480,6 +480,16 @@ the "unset" state would relitigate that decision, not merely extend it —
 so even a future tri-state upgrade should not wire `defaultFeatureIds`
 into this key without first revisiting Issue #72's own reasoning.
 
+**Amended by D27 (Issue #123):** `"params": {"function_calling":
+"legacy"}` is no longer sent for a tool-carrying turn at all — D27 replaces
+it with `stream:true` and no `params` key, letting Open WebUI's native loop
+run instead of forcing legacy pre-resolution. `runTurn` no longer has any
+caller that sets `params`, so `completionsRequestBody.Params`/`paramsBody`
+are removed from the adapter. This paragraph's account of *why* legacy mode
+was chosen over native under `stream:false` remains accurate history; it
+no longer describes this adapter's present behavior, since no code path
+sends a `stream:false` tool-carrying request anymore.
+
 ### D18. Catalog sync replaces the single seeded model with every model the account can see
 
 The roadmap's OWUI-P section originally said the MVP "publishes only the
@@ -874,7 +884,8 @@ instance before this note is removed from `EnableTitleGeneration`'s and
 
 ### D24. A new, stateless, true-SSE turn mode carries native multi-round tool execution — mechanism only, not yet dispatched to
 
-> **Superseded in premise — decision requested (Issue #120, 2026-09-08).**
+> **Superseded (Issue #120 found the premise false; Issue #123/D27 replaces
+> the mechanism, 2026-09-08).**
 > This decision rests on "row 1 of (h) delivers native multi-round tool
 > execution over plain HTTP". A real-instance capture falsifies that: row 1 is
 > served by `stream_wrapper` (`utils/middleware.py:6320`), a pure proxy, while
@@ -892,9 +903,10 @@ instance before this note is removed from `EnableTitleGeneration`'s and
 > so the turn is not retried and the post receives no reply.
 >
 > Per AGENTS.md ("stop implementation and record or request an ADR update; do
-> not silently invent a protocol") this PR changes no behavior. **Recommended
-> replacement, for the owner to accept or reject:** send the tool-carrying turn
-> **chat-managed** (`chat_id` + `id` + `user_message`, `stream: true`), ignore
+> not silently invent a protocol") the PR that recorded this finding (#121)
+> changed no behavior. **Decided and implemented as D27 below (Issue #123):**
+> send the tool-carrying turn **chat-managed** (`chat_id` + `id` +
+> `user_message`, `stream: true`), ignore
 > the `null` body, and wait for completion by polling
 > `GET /api/v1/chats/{id}` — the read `Client.LookupTurnOutcome`
 > (`internal/provider/openwebui/client.go`) already performs — until the
@@ -903,14 +915,14 @@ instance before this note is removed from `EnableTitleGeneration`'s and
 > `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS` rounds and persists the result with
 > `done: true` (`:6249`); it needs no socket listener, because
 > `get_event_emitter` (`socket/main.py:1057`) emits into an unattended room and
-> then writes to the database. Its costs are explicit: D25 below must be
-> withdrawn (polling reintroduces exactly the `ambiguous` outcome D25 removed,
-> and D6's chat-state classification returns), `LookupTurnOutcome` is currently
-> a single-shot read with no waiting loop, and `StreamTurn` today sends no
-> chat-management keys at all, so a chat must be created for it as the buffered
-> path does. Browser-side "direct" tools and the pyodide code interpreter stay
-> unavailable either way — they need `event_caller`, hence a real `session_id`
-> (`:3131`).
+> then writes to the database. Its costs, all accepted in D27: D25 is
+> withdrawn (polling reintroduces exactly the `ambiguous` outcome D25
+> removed, and D6's chat-state classification returns), `LookupTurnOutcome`
+> gains a caller that polls it instead of reading it once, and `StreamTurn`'s
+> stateless request shape is retired in favor of the chat-management keys the
+> buffered path already sends. Browser-side "direct" tools and the pyodide
+> code interpreter stay unavailable either way — they need `event_caller`,
+> hence a real `session_id` (`:3131`).
 >
 > Alternatives considered and not recommended: implementing a socket.io client
 > (large surface, and the same result is already durably readable from the chat);
@@ -1023,14 +1035,13 @@ before this mode is ever dispatched to in production.
 
 ### D25. The stateless mode has no `ambiguous` outcome: every failure discards partial content and ends the whole turn
 
-> **Conditional on D24 (Issue #120, 2026-09-08).** This decision holds only
-> while the mode is stateless. D24's recommended replacement is chat-managed, so
-> a chat *does* exist for a later `GET /api/v1/chats/{id}` to read — the exact
-> premise this decision denies — and adopting it means withdrawing this decision
-> and letting D6's classification apply to tool-carrying turns as well. Note
-> also the practical effect of keeping it as written while D24's premise is
-> broken: `contract_failed` is permanent, so today's failing turns are not
-> retried at all.
+> **Withdrawn (Issue #123/D27, 2026-09-08).** This decision held only while
+> the mode was stateless. D27 replaces it with a chat-managed mode, so a
+> chat *does* exist for a later `GET /api/v1/chats/{id}` to read — the exact
+> premise this decision denied — and D6's classification now applies to
+> tool-carrying turns exactly as it does to every other chat-managed turn.
+> The paragraphs below are retained as the record of this decision while it
+> held, from Issue #93 until Issue #120 found its premise false.
 
 D6's `ambiguous` classification exists because the chat-managed path can
 always fall back on `GET /api/v1/chats/{id}` to find out what actually
@@ -1068,6 +1079,16 @@ since D25's safety argument depends specifically on every currently
 configured tool being idempotent-enough to re-run for free.
 
 ### D26. `TurnJob` dispatches a branch's first turn to StreamTurn when its resolved tool config calls for it — and never a continuation
+
+> **Withdrawn (Issue #123/D27, 2026-09-08), including the "never a
+> continuation" restriction below, not only the StreamTurn dispatch
+> mechanism.** D27 folds tool-carrying turns back into the ordinary
+> `StartChat`/`ContinueTurn` call sites via `runTurn`, so there is no longer
+> a separate dispatch decision to make at `handleCreationPending`, and no
+> reason a continuation cannot use native tool execution too — the
+> restriction this section documents is resolved, not merely obsolete. The
+> paragraphs below are retained as the record of this decision while it
+> held, from Issue #93 until Issue #123 replaced it.
 
 D24 built the mechanism; this is Issue #93's own "switch tool/web-search
 calls over" stage. `TurnJob.handleCreationPending`
@@ -1157,6 +1178,172 @@ observability, but nothing gates re-entry on its value the way
 `handleCreationPending`'s own `turn.Attempt > 0` check does for
 StartChat.
 
+### D27. Tool-carrying turns run chat-managed with `stream:true`, polling `GET /api/v1/chats/{id}` for completion — StreamTurn's stateless mode is retired
+
+**Decided (Issue #123, 2026-09-08), replacing D24's stateless mechanism and
+withdrawing D25 and D26's dispatch restriction, per the recommendation D24's
+own "Superseded in premise" note (Issue #120) already recorded.** The premise
+falsification stands as found: row 1 (`stream:true`, no `chat_id`) can never
+enter Open WebUI's native tool loop, because that loop lives inside
+`if event_emitter:` and `event_emitter` requires `chat_id` *and*
+`message_id` (`utils/middleware.py:3127`,`:5576`). The fix is not a
+correction to `StreamTurn`; it is retiring the whole stateless mechanism and
+returning tool-carrying turns to the chat-managed path D1-D23 already
+describe, with two changes: `stream:true` instead of `stream:false`, and no
+`params.function_calling: "legacy"` — so Open WebUI's native loop actually
+runs — plus polling in place of D6's single confirming `GET`.
+
+**The change is confined to `internal/provider/openwebui.Client.runTurn`.**
+`StartChat` and `ContinueTurn` already funnel every turn through `runTurn`,
+which already decides whether to set `params.function_calling: "legacy"`
+from the same `len(toolIDs) > 0 || webSearchEnabled` condition. That
+condition now also selects `Stream: true` (instead of the previous
+unconditional `false`) and skips setting `params` entirely, and replaces the
+single `LookupTurnOutcome` confirmation with a new `awaitTurnDone` helper
+that calls the same, unmodified `LookupTurnOutcome` (`GET
+/api/v1/chats/{id}`) repeatedly — on a fixed interval, bounded by a
+`context.WithTimeout(ctx, c.toolTurnTimeout)` deadline — until the assistant
+message reports `done` or carries an error, or the deadline passes. The
+poll loop returns whatever outcome (or error) it last observed; `runTurn`'s
+own success/failure switch, unchanged, then classifies it exactly as it
+already does for a single-shot confirmation: `Found && Done` succeeds,
+`HasError` fails, and anything else — now including "still polling when the
+deadline passed" — is `CategoryAmbiguous`, D6's ordinary "resolve it later
+from a GET" case.
+
+**`OPENWEBUI_TOOL_TURN_TIMEOUT`'s meaning changes.** It bounded a single
+open SSE connection under D24; it now bounds the whole polling loop's
+wall-clock budget after the initiating POST returns. Its default (10
+minutes) is unchanged — sized, both times, for "however many rounds Open
+WebUI's own native loop runs before answering." The initiating POST itself
+keeps using the ordinary, shorter `Timeout` (via the existing `c.post`),
+since (h)/(h.1)'s observed rows 2-3 both return immediately with a `null`
+body while generation continues server-side — **UNVERIFIED for the specific
+combination this mode sends** (`chat_id` + `stream:true` + `tool_ids`/
+`features` together, no `session_id`): the real captures behind that
+"returns immediately" observation used neither `tool_ids` nor `features`.
+If a real instance instead blocks the initiating POST for the whole
+native-loop duration under this exact combination, the initiating POST
+needs `ToolTurnTimeout` too — a bounded, one-line fix, not a redesign,
+should it come to that.
+
+**D25 is withdrawn.** Every reason it gave no longer holds once the mode is
+chat-managed: a chat now exists, so an inconclusive completion is no longer
+unrecoverable — it is exactly what a later `GET` can still resolve, D6's
+`ambiguous` case, unchanged from every other chat-managed turn. The
+practical costs D25's own text flagged when it was written are accepted:
+`LookupTurnOutcome` gains a caller that polls it, rather than only calling
+it once; a chat now exists for this mode, so `TurnJob` gains its own state
+to track for it, in place of nothing.
+
+**D26 is withdrawn — including its "never a continuation" restriction, not
+only its dispatch mechanism.** `TurnJob.handleCreationPending` no longer
+special-cases a tool-carrying first turn at all: it always calls `StartChat`
+(Issue #93's own change to it is fully reverted), which reaches the new
+`runTurn` behavior exactly as any other call site does. Because
+`ContinueTurn` shares the same `runTurn`, `handleReady`'s continuations gain
+native tool execution too, as a direct consequence rather than new code —
+resolving, not merely leaving in place, the "a link only ever reaches
+`LinkReady` through a chat-managed StartChat... every later turn... stays on
+legacy tool handling" limitation D26's own text documented and
+`docs/operations/configuration.md` recorded. `TurnJob.complete`'s
+`stateless` parameter, `handleCreationPendingStateless`,
+`handleStreamTurnError`, and `streamExhaustionCategory` are removed, not
+adapted: with the dispatch split gone, `complete` always takes the
+`SetRemoteCurrent` branch its `else` case already had, and every failure
+classification a tool-carrying turn can now produce is one
+`handleCreateError`/`handleTurnError` already handles for a chat-managed
+turn, unchanged.
+
+**`domain.LinkStateless` and `OpenWebUIConversationLinkRepository.
+MarkStateless` are removed from the Go layer.** No code path writes this
+state any longer. Migration `0032`'s widened `state` CHECK constraint is
+*not* reverted — AGENTS.md's "do not edit an applied migration" rule, and
+the same precedent `0016`/`0027` already set for a since-superseded `CHECK`
+value — so the column merely permits a value nothing writes anymore, the
+same harmless state those earlier migrations' own now-unused values are in.
+Any link that somehow reached `LinkStateless` before this decision is
+already handled correctly by existing code with no migration or backfill:
+`AllowsContinue`'s `state == LinkReady` check treats it, like `LinkFailed`/
+`LinkDead`, as a dead branch a reply must start fresh from. In practice
+none is expected to exist, for two independent, stacking reasons covering
+the whole time `StreamTurn` was ever dispatched to: from Issue #93's own
+original merge until Issue #116 fixed it, `ToolTurnTimeout` was never
+wired into the turn client, so every call failed a
+`context.WithTimeout(ctx, 0)` deadline before ever reaching the network;
+after Issue #116's fix, Issue #120's capture shows the upstream connection
+speaks the Responses API regardless of whether a tool was actually called
+(`sse_passthrough_responses_api.sse.txt`, no `tool_ids` needed to
+reproduce it), so the read never reaches the literal `data: [DONE]`
+`StreamTurn` required for success either way.
+
+**`Client.StreamTurn` and its entire SSE-reading mechanism —
+`postStream`, `decodeStreamingCompletion`, `streamChunkBody`,
+`streamCompletionsRequestBody`, `cancelOnCloseBody`,
+`classifyStreamReadError` — are deleted, along with `Provider.StreamTurn`,
+`StreamTurnRequest`, and `PhaseStream`.** Issue #120's finding is
+structural, not a parsing gap this code could be salvaged to work around:
+row 1 never reaches a branch that runs a tool, so nothing this mechanism
+reads is ever the result of native tool execution. Its dedicated test
+suites (7 cases in `internal/openwebui/turnjob_test.go`, 12 in
+`internal/provider/openwebui/client_test.go`) are removed with it, replaced
+by tests of `runTurn`'s new native branch and `awaitTurnDone` directly.
+
+**UNVERIFIED (2026-09-08, per the owner's direction to implement Issue #123
+without further real-instance access — the same "ship on a documented
+assumption" precedent D22/D23/D24 already set): whether `chat_id` +
+`stream:true` + `tool_ids`/`features` together (no `session_id`) actually
+reaches `done: true` with real content, the way the plain, toolless capture
+behind (h)'s row 3 does.** D24's own recommendation text reasoned from
+source (`event_emitter`'s condition, the native loop's location, `Chats.
+upsert_message_to_chat_by_id_and_message_id`'s unconditional persistence)
+that it must, but no capture exists of this exact combination — only of row
+3 without tool config, and of row 1 (no `chat_id`) with tool config, which
+is the combination Issue #120 showed fails. This is the one load-bearing
+assumption this decision rests on that Issue #120 did not itself verify;
+the concrete failure mode if it is wrong is the same non-alarming one D24
+already named for a different unverified assumption — polling never
+observes `done: true`, `ToolTurnTimeout` elapses, and the turn ends
+`ambiguous` (D6) rather than hanging, answering incorrectly, or posing a
+security concern.
+
+**Newly discovered self-review gap (2026-09-08), not yet resolved: this
+decision silently drops Issue #81's `sources[]`/citations for every
+native turn.** `openwebui.TurnResult.Sources` is populated in exactly one
+place, `runTurn`'s `decodeSources(parsed.Sources)`, reading the *initial*
+`/api/chat/completions` **POST** response. Section (i)'s 2026-09-07
+capture found `sources[]` present there specifically *because*
+`params.function_calling=legacy` ((c)) triggered a synchronous
+pre-completion tool/web-search resolution that this same buffered
+response then carried. D27 removes `params.function_calling=legacy` for
+every turn that condition covers, and (h)/(k) already establish that
+mode's own POST response body is always `null` regardless of outcome —
+so `parsed.Sources` is now unconditionally empty for exactly the turns
+that actually call a tool or search the web, the only population that
+ever had a non-empty `sources[]` to begin with. `awaitTurnDone`'s own
+confirmation path, `LookupTurnOutcome` (`GET /api/v1/chats/{id}`), has no
+`Sources` field to fall back on either — `openwebui.TurnOutcome`'s own
+doc comment already named this gap under D22, but as a "cosmetic,"
+rare-recovery-path-only cost, on the premise that the common case reached
+sources through the (then buffered, legacy) POST response instead. D27
+inverts which path is common: every native turn now confirms exclusively
+through the GET path that was always missing `sources`, so the "cosmetic,
+rare" framing no longer holds — this is now the unconditional outcome for
+every tool-carrying and web-search-carrying turn, not an edge case. No
+test added by this PR catches it:
+`TestClient_ContinueTurn_Normalize{Tool,WebSearch}SourceFromFixture`
+still pass, but only because neither request sets `ToolIDs`/
+`WebSearchEnabled`, so they exercise the legacy (`Stream: false`) path
+with a hand-authored POST body — a shape a real native-mode turn's POST
+response can no longer produce. Per AGENTS.md ("stop implementation and
+record or request an ADR update; do not silently invent a protocol"),
+this is recorded here rather than papered over with an unverified guess
+at whether `GET /api/v1/chats/{id}` might carry `sources` for a done
+message (itself still an open 要実機確認, section (i)) — **this needs an
+owner decision (accept the regression, or block Issue #123 on
+re-verifying the GET body / finding another source of `sources[]` for
+native mode) before this ships.**
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
@@ -1207,7 +1394,9 @@ StartChat.
   `tool_ids`/`web_search` call for it, and every continuation through
   D16/D17's chat-managed path unchanged, exactly the split D26 describes
   — Issue #93's own staged migration plan, both stages landing in the
-  same PR series.
+  same PR series. (Superseded by D27, Issue #123: D24's mechanism, D25,
+  and D26's dispatch split are all retired — see D27 for what replaced
+  them.)
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Regeneration, remote branch management, and cancellation each still need
   their own contract work before they can be picked up; none of them is a

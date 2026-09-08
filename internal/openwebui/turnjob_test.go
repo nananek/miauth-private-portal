@@ -30,12 +30,9 @@ type fakeProvider struct {
 	inFlight    int32
 	maxInFlight int32
 
-	streamTurnCalls int
-
 	startChat     func(ctx context.Context, req StartChatRequest) (TurnResult, error)
 	continueTurn  func(ctx context.Context, req ContinueTurnRequest) (TurnResult, error)
 	lookupOutcome func(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error)
-	streamTurn    func(ctx context.Context, req StreamTurnRequest) (TurnResult, error)
 }
 
 func newFakeProvider(t *testing.T) *fakeProvider { return &fakeProvider{t: t} }
@@ -87,28 +84,10 @@ func (f *fakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatID, assi
 	return f.lookupOutcome(ctx, remoteChatID, assistantMessageID)
 }
 
-func (f *fakeProvider) StreamTurn(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-	leave := f.enter()
-	defer leave()
-	f.mu.Lock()
-	f.streamTurnCalls++
-	f.mu.Unlock()
-	if f.streamTurn == nil {
-		f.t.Fatalf("fakeProvider: unexpected StreamTurn call")
-	}
-	return f.streamTurn(ctx, req)
-}
-
 func (f *fakeProvider) counts() (start, cont, lookup int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.startChatCalls, f.continueCalls, f.lookupCalls
-}
-
-func (f *fakeProvider) streamCalls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.streamTurnCalls
 }
 
 func ptrInt(v int) *int { return &v }
@@ -458,17 +437,17 @@ func TestTurnJob_ResolveWebSearchEnabled_NilReloadFuncUsesConstructionValue(t *t
 	}
 }
 
-// TestTurnJob_StreamTurn_SendsResolvedToolIDs backs Issue #75 PR5's
-// tool_ids resolution together with Issue #93's dispatch wiring
-// (ADR-0005 D24): a branch's first turn whose model resolves non-empty
-// tool_ids (Registry.SyncCatalog's own writes, keyed by
-// ExternalModelID) now goes to StreamTurn instead of StartChat — see
-// handleCreationPending's own doc comment — carrying that same resolved
-// list. Before Issue #93 this scenario exercised StartChat directly;
-// TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs below is what still
-// does, for the empty-resolution case that stays on the chat-managed
-// path.
-func TestTurnJob_StreamTurn_SendsResolvedToolIDs(t *testing.T) {
+// TestTurnJob_StartChat_SendsResolvedToolIDs backs Issue #75 PR5's
+// tool_ids resolution: a branch's first turn whose model resolves
+// non-empty tool_ids (Registry.SyncCatalog's own writes, keyed by
+// ExternalModelID) carries that same resolved list on its StartChat call.
+// Before ADR-0005 D27 (Issue #123) this scenario instead dispatched to
+// the now-retired StreamTurn; resolved tool_ids are handled inside
+// Client.runTurn's own native/legacy branch now, not by a separate
+// TurnJob dispatch decision, so StartChat is the only call this turn
+// makes either way — see TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs
+// below for the empty-resolution case.
+func TestTurnJob_StartChat_SendsResolvedToolIDs(t *testing.T) {
 	env := newTurnTestEnv(t)
 	bridge := newTestBridge(env)
 	root := env.mustCreateRoot(t, "hello model")
@@ -482,9 +461,12 @@ func TestTurnJob_StreamTurn_SendsResolvedToolIDs(t *testing.T) {
 
 	var sawToolIDs []string
 	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
 		sawToolIDs = req.ToolIDs
-		return TurnResult{Content: "hi there"}, nil
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
 	}
 
 	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
@@ -492,10 +474,10 @@ func TestTurnJob_StreamTurn_SendsResolvedToolIDs(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	if !reflect.DeepEqual(sawToolIDs, []string{"web_search", "calculator"}) {
-		t.Errorf("StreamTurn ToolIDs = %v, want the cached resolution", sawToolIDs)
+		t.Errorf("StartChat ToolIDs = %v, want the cached resolution", sawToolIDs)
 	}
-	if start, cont, _ := provider.counts(); start != 0 || cont != 0 {
-		t.Errorf("StartChat/ContinueTurn calls = %d/%d, want 0/0 (resolved tool_ids must route to StreamTurn only)", start, cont)
+	if _, cont, lookup := provider.counts(); cont != 0 || lookup != 0 {
+		t.Errorf("ContinueTurn/LookupTurnOutcome calls = %d/%d, want 0/0 (a branch's first turn is a single bundled StartChat call)", cont, lookup)
 	}
 }
 
@@ -538,16 +520,14 @@ func TestTurnJob_StartChat_ToolCacheMissSendsNoToolIDs(t *testing.T) {
 	}
 }
 
-// TestTurnJob_StreamTurn_SendsResolvedWebSearchEnabled backs Issue #75
-// AC#11's resolution together with Issue #93's dispatch wiring (ADR-0005
-// D24): with OPENWEBUI_WEB_SEARCH_ENABLED left unset
+// TestTurnJob_StartChat_SendsResolvedWebSearchEnabled backs Issue #75
+// AC#11's resolution: with OPENWEBUI_WEB_SEARCH_ENABLED left unset
 // (TurnJobConfig.WebSearchOverride nil), a branch's first turn whose
-// model's synced default resolves web_search=true now goes to
-// StreamTurn instead of StartChat, carrying that same resolution — see
+// model's synced default resolves web_search=true carries that
+// resolution on its StartChat call — see
 // TestTurnJob_StartChat_ExplicitWebSearchOverrideWinsOverModelDefault
-// below for the case an explicit override still keeps on StartChat by
-// resolving false.
-func TestTurnJob_StreamTurn_SendsResolvedWebSearchEnabled(t *testing.T) {
+// below for the case an explicit override resolves false instead.
+func TestTurnJob_StartChat_SendsResolvedWebSearchEnabled(t *testing.T) {
 	env := newTurnTestEnv(t)
 	bridge := newTestBridge(env)
 	root := env.mustCreateRoot(t, "hello model")
@@ -561,9 +541,12 @@ func TestTurnJob_StreamTurn_SendsResolvedWebSearchEnabled(t *testing.T) {
 
 	var sawWebSearchEnabled bool
 	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
+	provider.startChat = func(ctx context.Context, req StartChatRequest) (TurnResult, error) {
 		sawWebSearchEnabled = req.WebSearchEnabled
-		return TurnResult{Content: "hi there"}, nil
+		if err := req.OnChatCreated(ctx, "remote-chat-1"); err != nil {
+			return TurnResult{}, err
+		}
+		return TurnResult{Content: "hi there", RemoteCurrentID: strPtr("remote-msg-1")}, nil
 	}
 
 	turnJob, _ := newTestTurnJobWithCaches(env, provider, nil, featureCache, TurnJobConfig{})
@@ -571,10 +554,7 @@ func TestTurnJob_StreamTurn_SendsResolvedWebSearchEnabled(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	if !sawWebSearchEnabled {
-		t.Error("StreamTurn WebSearchEnabled = false, want true (following the model's synced default)")
-	}
-	if start, cont, _ := provider.counts(); start != 0 || cont != 0 {
-		t.Errorf("StartChat/ContinueTurn calls = %d/%d, want 0/0 (resolved web_search=true must route to StreamTurn only)", start, cont)
+		t.Error("StartChat WebSearchEnabled = false, want true (following the model's synced default)")
 	}
 }
 
@@ -615,336 +595,6 @@ func TestTurnJob_StartChat_ExplicitWebSearchOverrideWinsOverModelDefault(t *test
 	}
 	if sawWebSearchEnabled {
 		t.Error("StartChat WebSearchEnabled = true, want false (explicit override must win over the model's own default)")
-	}
-}
-
-// --- StreamTurn dispatch and outcomes (ADR-0005 D24/D25, Issue #93) ---
-
-// TestTurnJob_StreamTurn_SuccessCreatesReplyAndMarksLinkStateless is the
-// stateless path's counterpart to
-// TestTurnJob_StartChat_SuccessCreatesReplyAndNotification: a reply is
-// created and notified exactly the same way, but the link lands in
-// LinkStateless (never LinkReady), carries no remote_chat_id/
-// remote_current_id at all, and the turn's own correlation columns stay
-// nil — nothing here ever creates a remote chat.
-func TestTurnJob_StreamTurn_SuccessCreatesReplyAndMarksLinkStateless(t *testing.T) {
-	env := newTurnTestEnv(t)
-	bridge := newTestBridge(env)
-	root := env.mustCreateRoot(t, "search for foo")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
-		t.Fatalf("EnqueueTurn: %v", err)
-	}
-	job := mustSoleJob(t, env)
-	payload := mustTurnJobPayload(t, job)
-
-	toolCache := NewToolConfigCache()
-	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search"}})
-
-	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		if len(req.Messages) != 0 {
-			t.Errorf("StreamTurn Messages = %v, want empty for a root post", req.Messages)
-		}
-		if req.NewTurn.Content != "search for foo" {
-			t.Errorf("StreamTurn NewTurn = %+v", req.NewTurn)
-		}
-		return TurnResult{Content: "found it", FinishReason: strPtr("stop")}, nil
-	}
-
-	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
-	if err := turnJob.Handle(t.Context(), job); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if n := provider.streamCalls(); n != 1 {
-		t.Errorf("StreamTurn calls = %d, want exactly 1", n)
-	}
-	if start, cont, lookup := provider.counts(); start != 0 || cont != 0 || lookup != 0 {
-		t.Errorf("StartChat/ContinueTurn/LookupTurnOutcome calls = %d/%d/%d, want 0/0/0", start, cont, lookup)
-	}
-
-	children, err := env.db.Entries.ListChildren(t.Context(), root.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(children) != 1 || children[0].Body != "found it" {
-		t.Fatalf("children = %v, want exactly one reply \"found it\"", children)
-	}
-	reply := children[0]
-
-	notifications, err := env.db.Notifications.ListDesc(t.Context(), nil, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(notifications) != 1 || notifications[0].RelatedEntryID != reply.ID {
-		t.Errorf("notifications = %+v, want one reply notification for %q", notifications, reply.ID)
-	}
-
-	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if link.State != domain.LinkStateless {
-		t.Errorf("link.State = %q, want stateless", link.State)
-	}
-	if link.RemoteChatID != nil || link.RemoteCurrentID != nil || link.ReadyAt != nil {
-		t.Errorf("link = %+v, want RemoteChatID/RemoteCurrentID/ReadyAt all nil", link)
-	}
-	if !link.IsTerminal() || link.AllowsContinue() {
-		t.Errorf("link = %+v, want terminal and not continuable", link)
-	}
-
-	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Status != domain.TurnSucceeded {
-		t.Errorf("turn.Status = %q, want succeeded", turn.Status)
-	}
-	if turn.AssistantEntryID == nil || *turn.AssistantEntryID != reply.ID {
-		t.Errorf("turn.AssistantEntryID = %v, want %q", turn.AssistantEntryID, reply.ID)
-	}
-	if turn.FinishReason == nil || *turn.FinishReason != "stop" {
-		t.Errorf("turn.FinishReason = %v, want \"stop\"", turn.FinishReason)
-	}
-	if turn.RemoteChatID != nil || turn.RemoteMessageID != nil || turn.RemoteAssistantMessageID != nil || turn.RemoteCurrentID != nil {
-		t.Errorf("turn = %+v, want every remote_* correlation column nil — this mode manages no remote chat", turn)
-	}
-}
-
-// TestTurnJob_StreamTurn_AuthFailed_PermanentAndMarksLinkFailed mirrors
-// TestTurnJob_StartChat_AuthFailed_PermanentAndMarksLinkFailed: a
-// definitive category fails the turn and the link immediately, on the
-// very first attempt, exactly like a StartChat creation failure would —
-// even though, unlike StartChat, this path could safely have retried
-// (ADR-0005 D25); CategoryAuthFailed is simply never worth retrying
-// regardless of path.
-func TestTurnJob_StreamTurn_AuthFailed_PermanentAndMarksLinkFailed(t *testing.T) {
-	env := newTurnTestEnv(t)
-	bridge := newTestBridge(env)
-	root := env.mustCreateRoot(t, "search for foo")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
-		t.Fatalf("EnqueueTurn: %v", err)
-	}
-	job := mustSoleJob(t, env)
-	payload := mustTurnJobPayload(t, job)
-
-	toolCache := NewToolConfigCache()
-	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search"}})
-
-	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		return TurnResult{}, NewProviderError(CategoryAuthFailed, PhaseStream, errors.New("401"))
-	}
-	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
-
-	err := turnJob.Handle(t.Context(), job)
-	var permanent *jobs.PermanentError
-	if !errors.As(err, &permanent) {
-		t.Fatalf("Handle error = %v, want a jobs.PermanentError", err)
-	}
-
-	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if link.State != domain.LinkFailed {
-		t.Errorf("link.State = %q, want failed", link.State)
-	}
-	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Status != domain.TurnFailed || turn.FailureCategory == nil || *turn.FailureCategory != domain.FailureCategoryAuthFailed {
-		t.Errorf("turn = %+v, want failed/auth_failed", turn)
-	}
-}
-
-// TestTurnJob_StreamTurn_TransientFailureRetriesRatherThanFreezing backs
-// ADR-0005 D25's repeatability: unlike a StartChat creation failure, a
-// transient StreamTurn failure that is not yet this job's last attempt
-// is simply retried — the link and turn are left exactly as
-// BeginAttempt set them (still creation_pending/pending), with no
-// failure category recorded and no ambiguous freeze, so the next
-// delivery calls StreamTurn again from scratch.
-func TestTurnJob_StreamTurn_TransientFailureRetriesRatherThanFreezing(t *testing.T) {
-	env := newTurnTestEnv(t)
-	bridge := newTestBridge(env)
-	root := env.mustCreateRoot(t, "search for foo")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
-		t.Fatalf("EnqueueTurn: %v", err)
-	}
-	job := mustSoleJob(t, env)
-	payload := mustTurnJobPayload(t, job)
-	job.Attempt = 0 // 0+1 < MaxAttempts below, so this is not the last attempt.
-
-	toolCache := NewToolConfigCache()
-	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search"}})
-
-	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		return TurnResult{}, NewProviderError(CategoryServerError, PhaseStream, errors.New("500"))
-	}
-	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{MaxAttempts: 3})
-
-	err := turnJob.Handle(t.Context(), job)
-	var permanent *jobs.PermanentError
-	if errors.As(err, &permanent) {
-		t.Fatalf("Handle error = %v, want a retryable (non-Permanent) error", err)
-	}
-	if err == nil {
-		t.Fatal("Handle error = nil, want a retryable error for the failed stream turn")
-	}
-
-	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if link.State != domain.LinkCreationPending {
-		t.Errorf("link.State = %q, want unchanged creation_pending", link.State)
-	}
-	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Status.IsTerminal() {
-		t.Errorf("turn.Status = %q, want non-terminal (still retryable)", turn.Status)
-	}
-	if turn.Attempt != 1 {
-		t.Errorf("turn.Attempt = %d, want 1 (BeginAttempt ran once)", turn.Attempt)
-	}
-
-	// A second delivery must call StreamTurn again from scratch — unlike
-	// StartChat, there is no "already attempted once" guard for this
-	// path (ADR-0005 D25).
-	job.Attempt = 1
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		return TurnResult{Content: "found it on retry"}, nil
-	}
-	if err := turnJob.Handle(t.Context(), job); err != nil {
-		t.Fatalf("second Handle: %v", err)
-	}
-	if n := provider.streamCalls(); n != 2 {
-		t.Errorf("StreamTurn calls across both deliveries = %d, want 2", n)
-	}
-}
-
-// TestTurnJob_StreamTurn_TransientFailureExhaustedNeverGoesAmbiguous is
-// ADR-0005 D25's central guarantee, made concrete: once a transient
-// StreamTurn failure reaches this job's last attempt, it fails
-// permanently — never ambiguous, unlike handleTurnError's identically
-// shaped default case for a chat-managed continuation — and the
-// recorded failure category reflects the actual provider category
-// (CategoryTimeout here), not a generic placeholder.
-func TestTurnJob_StreamTurn_TransientFailureExhaustedNeverGoesAmbiguous(t *testing.T) {
-	env := newTurnTestEnv(t)
-	bridge := newTestBridge(env)
-	root := env.mustCreateRoot(t, "search for foo")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
-		t.Fatalf("EnqueueTurn: %v", err)
-	}
-	job := mustSoleJob(t, env)
-	payload := mustTurnJobPayload(t, job)
-
-	toolCache := NewToolConfigCache()
-	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search"}})
-
-	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		return TurnResult{}, NewProviderError(CategoryTimeout, PhaseStream, context.DeadlineExceeded)
-	}
-	// MaxAttempts: 1 makes job.Attempt(0)+1 >= 1 true: this delivery is
-	// its own last attempt (newTestTurnJobWithCaches would otherwise
-	// default a zero-valued MaxAttempts up to 8).
-	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{MaxAttempts: 1})
-
-	err := turnJob.Handle(t.Context(), job)
-	var permanent *jobs.PermanentError
-	if !errors.As(err, &permanent) {
-		t.Fatalf("Handle error = %v, want a jobs.PermanentError once retries are exhausted", err)
-	}
-
-	link, err := env.db.OpenWebUILinks.Get(t.Context(), payload.LinkID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if link.State != domain.LinkFailed {
-		t.Errorf("link.State = %q, want failed — never ambiguous for this path", link.State)
-	}
-	turn, err := env.db.OpenWebUITurnLinks.Get(t.Context(), payload.TurnID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Status != domain.TurnFailed {
-		t.Errorf("turn.Status = %q, want failed — never ambiguous for this path", turn.Status)
-	}
-	if turn.FailureCategory == nil || *turn.FailureCategory != domain.FailureCategoryTimeout {
-		t.Errorf("turn.FailureCategory = %v, want %q", turn.FailureCategory, domain.FailureCategoryTimeout)
-	}
-}
-
-// TestTurnJob_StreamTurn_ReplyToStatelessLinkStartsNewBranch confirms
-// the consequence ADR-0005 D24 predicts from LinkStateless never
-// allowing a continuation (AllowsContinue): a reply to a message a
-// stateless turn generated finds no ready link to continue, so
-// SelectBranch (via Bridge.EnqueueTurn) starts a brand new one, exactly
-// as it would for a reply to a failed or dead link's message.
-func TestTurnJob_StreamTurn_ReplyToStatelessLinkStartsNewBranch(t *testing.T) {
-	env := newTurnTestEnv(t)
-	bridge := newTestBridge(env)
-	root := env.mustCreateRoot(t, "search for foo")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, root); err != nil {
-		t.Fatalf("EnqueueTurn: %v", err)
-	}
-	firstJob := mustSoleJob(t, env)
-	firstPayload := mustTurnJobPayload(t, firstJob)
-
-	toolCache := NewToolConfigCache()
-	toolCache.Replace(map[string][]string{env.model.ExternalModelID: {"web_search"}})
-
-	provider := newFakeProvider(t)
-	provider.streamTurn = func(ctx context.Context, req StreamTurnRequest) (TurnResult, error) {
-		return TurnResult{Content: "found it"}, nil
-	}
-	turnJob, _ := newTestTurnJobWithToolCache(env, provider, toolCache, TurnJobConfig{})
-	if err := turnJob.Handle(t.Context(), firstJob); err != nil {
-		t.Fatalf("first Handle: %v", err)
-	}
-
-	children, err := env.db.Entries.ListChildren(t.Context(), root.ID)
-	if err != nil || len(children) != 1 {
-		t.Fatalf("children = %v, %v, want exactly one reply", children, err)
-	}
-	assistantReply := children[0]
-
-	ownerReply := env.mustCreateReply(t, assistantReply, "and again")
-	if err := bridge.EnqueueTurn(t.Context(), env.db.Repos, ownerReply); err != nil {
-		t.Fatalf("second EnqueueTurn: %v", err)
-	}
-
-	jobRows, err := env.db.Jobs.List(t.Context(), domain.JobFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(jobRows) != 2 {
-		t.Fatalf("jobs = %v, want exactly 2 (one per branch)", jobRows)
-	}
-	var secondJob domain.Job
-	for _, j := range jobRows {
-		if j.ID != firstJob.ID {
-			secondJob = j
-		}
-	}
-	secondPayload := mustTurnJobPayload(t, secondJob)
-	if secondPayload.LinkID == firstPayload.LinkID {
-		t.Fatal("the second post reused the first (stateless) link's id, want a brand new one")
-	}
-
-	secondLink, err := env.db.OpenWebUILinks.Get(t.Context(), secondPayload.LinkID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secondLink.State != domain.LinkCreationPending {
-		t.Errorf("second link.State = %q, want a fresh creation_pending link", secondLink.State)
 	}
 }
 
@@ -1618,7 +1268,7 @@ func TestTurnJob_ConcurrentHandle_SerializesPerThread(t *testing.T) {
 // so this exercises it directly rather than through handleCreationPending
 // or handleReady.
 func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.T) {
-	for _, state := range []domain.LinkState{domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead, domain.LinkStateless} {
+	for _, state := range []domain.LinkState{domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead} {
 		t.Run(string(state), func(t *testing.T) {
 			env := newTurnTestEnv(t)
 			root := env.mustCreateRoot(t, "hello")
@@ -1647,10 +1297,6 @@ func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.
 				}
 				if err := env.db.OpenWebUILinks.MarkDead(t.Context(), link.ID, domain.FailureCategoryOwnerAbandoned, now); err != nil {
 					t.Fatalf("mark dead: %v", err)
-				}
-			case domain.LinkStateless:
-				if err := env.db.OpenWebUILinks.MarkStateless(t.Context(), link.ID, now); err != nil {
-					t.Fatalf("mark stateless: %v", err)
 				}
 			}
 			preLink, err := env.db.OpenWebUILinks.Get(t.Context(), link.ID)
@@ -1702,9 +1348,6 @@ func TestTurnJob_LinkStateGuard_AmbiguousFailedDeadNeverCallProvider(t *testing.
 			}
 			if start, cont, lookup := provider.counts(); start != 0 || cont != 0 || lookup != 0 {
 				t.Errorf("provider calls = start:%d continue:%d lookup:%d, want none", start, cont, lookup)
-			}
-			if n := provider.streamCalls(); n != 0 {
-				t.Errorf("provider StreamTurn calls = %d, want 0", n)
 			}
 		})
 	}

@@ -492,6 +492,22 @@ assumption would look like (a cosmetic footnote mismatch, never a
 `GET /api/v1/chats/{id}` ever carries `sources` for a completed turn — this
 adapter assumes not, and never depends on retrieving it a second time.
 
+**Elevated by ADR-0005 D27 (Issue #123, self-review finding,
+2026-09-08): the mechanism this section describes no longer runs for any
+real tool/web-search turn.** The `params.function_calling=legacy` request
+this whole section's capture depended on is retired for exactly that
+population — D27 sends `stream:true` with no `params` key instead, whose
+completions response is always an empty body ((h)/(k)), never a
+`sources[]`-bearing one. The "whether GET ever carries sources" question
+directly above, previously relevant only to a rare uncertain-outcome
+retry, is now load-bearing for whether Issue #81's citations feature
+works **at all** for a native turn (the only kind that ever calls a tool
+or searches the web): if GET does not carry it either, `sources[]` is
+unconditionally lost for that entire population, not degraded for an edge
+case. This needs its own real-instance check (or an owner decision to
+accept the loss) before Issue #123 ships — see ADR-0005 D27's
+"self-review gap" paragraph.
+
 Separately, **要実機確認**: whether `background_tasks.title_generation:
 true` ((g) above) resolves synchronously (the chat's `title` field is
 already updated by the time `runTurn`'s own post-completion
@@ -518,7 +534,10 @@ path) — 全項目 要実機確認, none of it exercised against a real instanc
 > tool-execution loop it was meant to consume lives in a branch this request
 > shape cannot enter. Points 2 and 4 are moot while the mode is unusable. The
 > paragraphs below are retained as the record of what was assumed when Issue #93
-> shipped; ADR-0005 D24 carries the decision request that follows from this.
+> shipped; ADR-0005 D24 carried the decision request that followed from this,
+> and D27 (Issue #123, 2026-09-08) records the decision made: retire this
+> mode and run tool-carrying turns chat-managed instead, polling
+> `GET /api/v1/chats/{id}` for completion.
 
 D8/(h)'s row 1 (`stream:true`, no `chat_id`) was captured with neither
 `tool_ids` nor `features` set. Issue #93 needs exactly that combination —
@@ -567,6 +586,23 @@ other synthetic `sse_*` fixtures) built only to pin
 followed by a final content-bearing round — against point 3's "not
 exercised" gap above; it is not, and must never be read as, evidence of
 what a real instance actually does.
+
+**(k) Issue #123: tool-carrying turns retired to chat-managed `stream:true`,
+polled via `GET /api/v1/chats/{id}` — ADR-0005 D27.** In place of (j)'s
+mode, a tool-carrying turn now sends `chat_id` + `id` + `user_message` +
+`stream: true` (the same request `runTurn` already sends for a plain turn,
+minus `params.function_calling: "legacy"`) and ignores the `null` body this
+returns — see (h)'s row 3, `streaming_no_session_response.json` — instead
+reading the result from `GET /api/v1/chats/{id}` (below), polled every
+`nativeTurnPollInterval` until the assistant message reports `done` or
+`OPENWEBUI_TOOL_TURN_TIMEOUT` elapses. **UNVERIFIED**: no real capture
+exists of this exact combination (`chat_id` + `stream:true` +
+`tool_ids`/`features` together) reaching `done: true`; the assumption rests
+on (h.1)'s source trace (`event_emitter`'s condition, the native loop's
+location, `Chats.upsert_message_to_chat_by_id_and_message_id`'s
+unconditional persistence), not a capture. ADR-0005 D27 records the same
+caveat and its non-alarming failure mode (polling times out, the turn ends
+`ambiguous`, nothing hangs or answers incorrectly).
 
 ### `GET /api/v1/chats/{id}` (必要)
 

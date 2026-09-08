@@ -433,53 +433,6 @@ func TestOpenWebUIConversationLinkRepository_MarkTerminalRecordsCategory(t *test
 	}
 }
 
-// TestOpenWebUIConversationLinkRepository_MarkStateless backs ADR-0005
-// D24/D25 (Issue #93): a creation_pending link may become stateless with
-// no failure category recorded (unlike MarkFailed/MarkDead — reaching
-// this state is success), it is then terminal and permits neither a
-// continuation nor SetRemoteCurrent, and — unlike MarkReady's
-// owner-recovery reopening from ambiguous — nothing may ever move a
-// link out of it again, including a second MarkStateless call.
-func TestOpenWebUIConversationLinkRepository_MarkStateless(t *testing.T) {
-	db := newTestDB(t)
-	f := newLinkFixture(t, db)
-	l := f.claim(t, db, "branch-stateless", testTime)
-
-	at := testTime.Add(time.Minute)
-	if err := db.OpenWebUILinks.MarkStateless(t.Context(), l.ID, at); err != nil {
-		t.Fatalf("MarkStateless: %v", err)
-	}
-	got, err := db.OpenWebUILinks.Get(t.Context(), l.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != domain.LinkStateless {
-		t.Errorf("State = %q, want %q", got.State, domain.LinkStateless)
-	}
-	if got.FailureCategory != nil {
-		t.Errorf("FailureCategory = %v, want nil — reaching stateless is success, not failure", got.FailureCategory)
-	}
-	if got.RemoteChatID != nil || got.RemoteCurrentID != nil || got.ReadyAt != nil {
-		t.Errorf("got = %+v, want RemoteChatID/RemoteCurrentID/ReadyAt all left nil — no remote chat was ever created", got)
-	}
-	if !got.LastTransitionAt.Equal(at) {
-		t.Errorf("LastTransitionAt = %v, want %v", got.LastTransitionAt, at)
-	}
-	if !got.IsTerminal() || got.AllowsContinue() || got.AllowsAutoRetry() {
-		t.Errorf("a stateless link should be terminal and permit nothing: %+v", got)
-	}
-	if got.AllowsInitialStartChat(f.jobID) {
-		t.Error("the claim is spent once the link is stateless")
-	}
-
-	if err := db.OpenWebUILinks.SetRemoteCurrent(t.Context(), l.ID, nil, at.Add(time.Hour)); !errors.Is(err, domain.ErrConflict) {
-		t.Errorf("SetRemoteCurrent on a stateless link error = %v, want ErrConflict", err)
-	}
-	if err := db.OpenWebUILinks.MarkStateless(t.Context(), l.ID, at.Add(time.Hour)); !errors.Is(err, domain.ErrConflict) {
-		t.Errorf("second MarkStateless error = %v, want ErrConflict", err)
-	}
-}
-
 // TestOpenWebUIConversationLinkRepository_SetRemoteCurrentRequiresReady
 // keeps the current-message pointer tied to a link that actually has a
 // chat, and checks it does not disturb the state machine's own
