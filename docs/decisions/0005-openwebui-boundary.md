@@ -1227,6 +1227,47 @@ native-loop duration under this exact combination, the initiating POST
 needs `ToolTurnTimeout` too — a bounded, one-line fix, not a redesign,
 should it come to that.
 
+> **Addendum (Issue #126, 2026-09-08): the UNVERIFIED risk above was
+> confirmed — the initiating POST does block for the whole native-loop
+> duration, and the fix has been applied.** A real-instance capture
+> against the exact combination this mode sends (`chat_id` + `parent_id`
+> + `id` + `user_message` + `stream:true` + `tool_ids` (6) +
+> `features.web_search:true`) measured the initiating POST taking 7.39s
+> for a single-round tool call, returning only once the assistant
+> message already reported `done:true` — confirmed by the very first
+> poll, 3s later. This directly contradicts the "returns immediately"
+> assumption this decision's main text carried over from (h)/(h.1)'s
+> toolless captures. `Client.runTurn`'s native branch now bounds that one
+> `POST /api/chat/completions` call by `c.toolTurnTimeout`
+> (`OPENWEBUI_TOOL_TURN_TIMEOUT`) instead of `c.timeout`
+> (`OPENWEBUI_TIMEOUT`) — the "bounded, one-line fix" this decision
+> already pre-approved — leaving every other call through `Client.post`
+> (`createChat`, a plain turn's completions call) on the ordinary,
+> shorter `Timeout` unchanged.
+>
+> **The one point this decision's text did not settle: `awaitTurnDone`'s
+> own polling budget, which starts only after the initiating POST
+> returns, keeps its own independent `c.toolTurnTimeout` deadline rather
+> than sharing one combined budget with the POST.** Decided (owner
+> approval, Issue #126, 2026-09-08): keep the two budgets independent. A
+> native turn's worst-case total wall time is therefore up to
+> `2 * OPENWEBUI_TOOL_TURN_TIMEOUT` (20 minutes at the default), not
+> `OPENWEBUI_TOOL_TURN_TIMEOUT`. This is accepted rather than threading
+> one shared deadline through both calls, because in the observed
+> capture the assistant message was already `done` by the time the POST
+> returned — `awaitTurnDone` is expected to resolve on its very first
+> poll (`nativeTurnPollInterval`, 2s later) in the common case, so the
+> 2x worst case is a rare edge (the POST itself failing for a reason
+> unrelated to generation time, e.g. a network hiccup, while generation
+> is separately still running long) rather than the everyday path. A
+> combined budget would also require threading a single deadline-bound
+> context through both `runTurn`'s completions call and its `confirm`
+> step, which `StartChat`/`ContinueTurn`'s shared `runTurn` plumbing does
+> not currently carry — a larger change than this fix's scope, for a
+> benefit (tightening an already-rare worst case) an operator can
+> approximate today by lowering `OPENWEBUI_TOOL_TURN_TIMEOUT` itself if
+> the combined 2x figure ever becomes a real operational concern.
+
 **D25 is withdrawn.** Every reason it gave no longer holds once the mode is
 chat-managed: a chat now exists, so an inconclusive completion is no longer
 unrecoverable — it is exactly what a later `GET` can still resolve, D6's

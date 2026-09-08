@@ -225,7 +225,7 @@ func (c *Client) createChat(ctx context.Context, modelID string, sentAt time.Tim
 		Timestamp: sentAt.UnixMilli(),
 	}}
 
-	data, err := c.post(ctx, openwebui.PhaseCreate, "/api/v1/chats/new", reqBody)
+	data, err := c.post(ctx, openwebui.PhaseCreate, "/api/v1/chats/new", reqBody, c.timeout)
 	if err != nil {
 		return "", err
 	}
@@ -472,6 +472,23 @@ func stringifyArguments(params map[string]any) map[string]string {
 // mechanism (Issue #93) instead of repairing it. A plain turn (neither
 // tool_ids nor web_search) is unaffected: native is false, and the
 // request/confirmation shape is exactly what it always was.
+//
+// native also selects a longer timeout for the completions call itself
+// (ADR-0005 D27 addendum, Issue #126): a real-instance capture found the
+// initiating POST blocks until Open WebUI's native tool-calling loop
+// fully finishes, not the "returns immediately with a null body while
+// generation continues" behavior D27 assumed and left UNVERIFIED for
+// this exact request shape. c.timeout (the ordinary per-call bound,
+// ~120s by default) is sized for one buffered call, not a loop that can
+// run CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS rounds server-side, so a
+// native call instead uses c.toolTurnTimeout — the same budget
+// awaitTurnDone below already uses for its own, separate polling loop.
+// The two budgets are independent (not shared/threaded through a single
+// deadline): in the observed capture the assistant message was already
+// done by the time the POST returned, so awaitTurnDone typically
+// resolves on its very first poll a couple of seconds later, making the
+// combined worst case (up to 2x c.toolTurnTimeout) a rare edge rather
+// than the common path — see the D27 addendum for the full reasoning.
 func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *string, modelID string, messages []openwebui.Message, newTurn openwebui.Message, ids openwebui.TurnIDs, sentAt time.Time, toolIDs []string, webSearchEnabled, enableTitleGeneration bool) (openwebui.TurnResult, error) {
 	native := len(toolIDs) > 0 || webSearchEnabled
 
@@ -509,7 +526,11 @@ func (c *Client) runTurn(ctx context.Context, remoteChatID string, parentID *str
 	// loop to run, and a plain turn never had tool_ids/features to force
 	// legacy resolution over in the first place.
 
-	data, err := c.post(ctx, openwebui.PhaseTurn, "/api/chat/completions", reqBody)
+	completionsTimeout := c.timeout
+	if native {
+		completionsTimeout = c.toolTurnTimeout
+	}
+	data, err := c.post(ctx, openwebui.PhaseTurn, "/api/chat/completions", reqBody, completionsTimeout)
 	if err != nil {
 		return openwebui.TurnResult{}, err
 	}
@@ -873,8 +894,11 @@ func isHardLookupFailure(err error) bool {
 // maxRequestBytes (returning ErrRequestTooLarge wrapped as
 // CategoryClientRejected — roadmap: "must not silently send an
 // incomplete context", so this client never truncates instead), and
-// performs the call.
-func (c *Client) post(ctx context.Context, phase openwebui.Phase, path string, payload any) ([]byte, error) {
+// performs the call bounded by timeout. Every caller but runTurn's
+// native branch passes c.timeout, the ordinary per-call bound; see
+// runTurn's own doc comment (Issue #126) for why that one call instead
+// passes c.toolTurnTimeout.
+func (c *Client) post(ctx context.Context, phase openwebui.Phase, path string, payload any, timeout time.Duration) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, openwebui.NewProviderError(openwebui.CategoryContractFailed, phase, fmt.Errorf("encode request: %w", err))
@@ -883,7 +907,7 @@ func (c *Client) post(ctx context.Context, phase openwebui.Phase, path string, p
 		return nil, openwebui.NewProviderError(openwebui.CategoryClientRejected, phase, openwebui.ErrRequestTooLarge)
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {

@@ -145,7 +145,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 | `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
-| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Bounds a tool/web-search-carrying turn's completion-polling budget (`internal/provider/openwebui.Client.awaitTurnDone`, ADR-0005 D27) — kept separate from `OPENWEBUI_TIMEOUT` because Open WebUI's native tool-call loop can take several rounds, not one buffered call. Originally Issue #93's per-HTTP-call bound for the now-retired `Client.StreamTurn` (ADR-0005 D24); D27 (Issue #123) repointed the same config key at the polling loop that replaced it, keeping its default and its "how long a native tool-call loop may run" meaning. Must be a positive duration. `Client.runTurn` selects this path for any turn (first or continuation) whose own resolved `tool_ids`/`web_search` is non-empty — see "Native multi-round tool execution" below for the full mechanism. |
+| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Bounds a tool/web-search-carrying turn's own long-running budget in two places (ADR-0005 D27, D27 addendum/Issue #126): the initiating `POST /api/chat/completions` call itself (`Client.runTurn`'s native branch, since a real-instance capture found that call blocks until Open WebUI's native tool-call loop fully finishes, not "returns immediately") and, independently, the completion-polling loop after it (`Client.awaitTurnDone`) — each gets its own full `OPENWEBUI_TOOL_TURN_TIMEOUT` budget rather than sharing one, so a turn's worst-case total wall time is up to 2x this value, not this value. Kept separate from `OPENWEBUI_TIMEOUT` (which still bounds every other call, including a plain turn's completions POST) because Open WebUI's native tool-call loop can take several rounds, not one buffered call. Originally Issue #93's per-HTTP-call bound for the now-retired `Client.StreamTurn` (ADR-0005 D24); D27 (Issue #123) repointed the same config key at the polling loop that replaced it, keeping its default and its "how long a native tool-call loop may run" meaning. Must be a positive duration. `Client.runTurn` selects this path for any turn (first or continuation) whose own resolved `tool_ids`/`web_search` is non-empty — see "Native multi-round tool execution" below for the full mechanism. |
 | `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0007): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
 | `DRIVE_DATA_DIR` | no | `./data/drive` | The `localdisk` backend's root directory (`internal/drive.Local`). Must not be empty when `DRIVE_BACKEND=localdisk`; this package does not check it exists on disk — `internal/drive.Local` fails closed at first use (`Put`/`Get`/`Delete`) if it does not, the same "config validates shape, the consumer validates reachability" split `DB_PATH` already has. |
 | `DRIVE_S3_ENDPOINT` | required if `DRIVE_BACKEND=s3compat` | `""` | The S3-compatible API's `host[:port]`, no scheme (`minio-go`'s own convention) — for example `minio.internal:9000`, or an AWS S3 regional endpoint. |
@@ -1491,17 +1491,33 @@ separate mode a continuation could fail to switch onto. Inside
 non-empty sends `stream: true` and no `params` key at all (instead of
 `stream: false` plus D17's `params.function_calling="legacy"`), so Open
 WebUI's native tool-calling loop runs — potentially over several rounds
-— against the real chat this path already creates/continues. Since that
-request's HTTP response is always a `null` body regardless
-(`docs/compat/openwebui-0.11.3.md`'s "(h)"/"(k)" sections), confirmation
-is `LookupTurnOutcome` (`GET /api/v1/chats/{id}`, the same read a plain
-turn's single confirming call already performs), polled every
+— against the real chat this path already creates/continues.
+
+**The initiating `POST /api/chat/completions` call itself blocks until
+that loop finishes (ADR-0005 D27 addendum, Issue #126).** D27's original
+text left this UNVERIFIED, reasoning by analogy from a capture that used
+neither `tool_ids` nor `features`; a real-instance capture of the exact
+native combination found the call does not return early with a `null`
+body the way that other capture did — it returns only once generation is
+already done. `runTurn`'s native branch therefore bounds this one POST by
+`OPENWEBUI_TOOL_TURN_TIMEOUT` instead of the ordinary, shorter
+`OPENWEBUI_TIMEOUT` a plain turn's completions call still uses
+(`internal/provider/openwebui.Client.post`'s `timeout` parameter).
+Regardless, the response body itself is still always `null`
+(`docs/compat/openwebui-0.11.3.md`'s "(h)"/"(k)" sections) — this adapter
+never trusts the completions response for the result — so confirmation
+is still `LookupTurnOutcome` (`GET /api/v1/chats/{id}`, the same read a
+plain turn's single confirming call already performs), polled every
 `nativeTurnPollInterval` (2s, a package constant, not configurable)
-until the assistant message reports done or an error, bounded by
-`OPENWEBUI_TOOL_TURN_TIMEOUT` — which now bounds this polling loop's
-wall-clock budget rather than one held-open SSE connection's deadline,
-though its own meaning as "how long a native tool-call loop may run
-before this adapter gives up" is unchanged.
+until the assistant message reports done or an error, bounded by its
+own, independent `OPENWEBUI_TOOL_TURN_TIMEOUT` budget (`Client.
+awaitTurnDone`) — not a budget shared with the initiating POST's. In
+practice the assistant message is typically already done by the time
+the initiating POST returns (the observed capture behind Issue #126), so
+this poll loop usually resolves on its first tick; the two independent
+budgets mean a turn's worst-case total wall time is up to 2x
+`OPENWEBUI_TOOL_TURN_TIMEOUT`, accepted as a rare edge rather than
+threading one shared deadline through both calls.
 
 A poll that never resolves within that budget lands in the same
 `CategoryAmbiguous`/`ambiguous` outcome any other chat-managed turn's
