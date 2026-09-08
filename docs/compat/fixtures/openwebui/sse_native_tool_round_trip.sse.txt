@@ -1,0 +1,44 @@
+data: {"id": "chatcmpl-mock-93a", "object": "chat.completion.chunk", "created": 1788672050, "model": "mock-model", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93a", "object": "chat.completion.chunk", "created": 1788672050, "model": "mock-model", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "web_search", "arguments": "{\"query\": \"foo\"}"}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93a", "object": "chat.completion.chunk", "created": 1788672050, "model": "mock-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "no "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "results, "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "retrying "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "with "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "an "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "alt "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "spelling."}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_2", "type": "function", "function": {"name": "web_search", "arguments": "{\"query\": \"foo alt spelling\"}"}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93b", "object": "chat.completion.chunk", "created": 1788672051, "model": "mock-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "found "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "it "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "on "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "the "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "second "}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {"content": "try."}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-mock-93c", "object": "chat.completion.chunk", "created": 1788672052, "model": "mock-model", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: [DONE]
+
