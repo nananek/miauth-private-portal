@@ -556,7 +556,7 @@ func (s *Server) handleDriveFoldersDelete(w http.ResponseWriter, r *http.Request
 // byte-serving route DriveFile.url points at (see
 // drive.Service.OpenFile's doc comment for why no auth check belongs
 // here). A long, immutable Cache-Control is safe because Storage.Put is
-// create-only (ADR-0006 D1) — the bytes behind a given id never change.
+// create-only (ADR-0007 D1) — the bytes behind a given id never change.
 func (s *Server) handleFilesShow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	f, rc, err := s.drive.OpenFile(r.Context(), id)

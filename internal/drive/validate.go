@@ -33,7 +33,7 @@ var ErrInvalidImage = errors.New("drive: not a valid raster image")
 // package accepts. SVG has no entry here — and never will — because it
 // is a vector/XML format image.DecodeConfig cannot decode as any raster
 // format, so it is rejected by DecodeImage's ordinary
-// fails-to-decode path (ADR-0006 D2) rather than needing a dedicated
+// fails-to-decode path (ADR-0007 D2) rather than needing a dedicated
 // SVG/XML parser to detect and reject it by name.
 var AllowedImageFormats = map[string]bool{
 	"png":  true,

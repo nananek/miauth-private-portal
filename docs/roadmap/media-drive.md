@@ -222,11 +222,11 @@ implementation order but has no dependency on it.
   `file_repository.go`/`folder_repository.go`, and on
   `internal/ingest/safehttp` for `upload-from-url`'s SSRF-protected
   fetch.
-- Two new migrations: `0023_drive_folders.sql` (the `folders` table —
+- Two new migrations: `0025_drive_folders.sql` (the `folders` table —
   PR0's trace found folder support is not optional to skip) and
-  `0024_drive_files_metadata.sql` (adds `name`/`comment`/`is_sensitive`/
+  `0026_drive_files_metadata.sql` (adds `name`/`comment`/`is_sensitive`/
   `folder_id`/`md5` to the `files` table PR1 deliberately left bare —
-  ADR-0006 D6's "repository ships when a concrete use case exists" now
+  ADR-0007 D6's "repository ships when a concrete use case exists" now
   applies to these columns too).
 - `POST /api/drive`, `/files`, `/files/create`, `/files/show`,
   `/files/update`, `/files/delete`, `/files/upload-from-url`,

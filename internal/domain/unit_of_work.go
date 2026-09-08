@@ -42,7 +42,7 @@ type Repos struct {
 	OpenWebUITurnLinks  OpenWebUITurnLinkRepository
 
 	// Config and ConfigAudit back Issue #76's DB configuration overlay
-	// (ADR-0006). Always present, like the Open WebUI repositories
+	// (ADR-0007). Always present, like the Open WebUI repositories
 	// above; nothing writes through them until miauthctl config or the
 	// startup auto-seed path does.
 	Config      ConfigRepository

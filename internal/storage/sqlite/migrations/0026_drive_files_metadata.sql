@@ -1,5 +1,5 @@
--- Issue #77 PR3: adds the Drive-API-specific columns migration 0022
--- deliberately deferred (ADR-0006 D6) — name/comment/is_sensitive/
+-- Issue #77 PR3: adds the Drive-API-specific columns migration 0024
+-- deliberately deferred (ADR-0007 D6) — name/comment/is_sensitive/
 -- folder_id have no meaning for the other purposes files rows can hold
 -- (avatar, source_favicon, app_icon), only for the 'attachment'-purpose
 -- rows internal/drive.Service.CreateFile writes. Plain ADD COLUMN, not a
@@ -8,7 +8,7 @@
 -- constraints.
 --
 -- name has a NOT NULL DEFAULT '' rather than being nullable: every row
--- 0022 already created is a static app icon or similar non-Drive-API
+-- 0024 already created is a static app icon or similar non-Drive-API
 -- purpose with no meaningful name, and misskey_dart's DriveFile.name is
 -- a required wire field (docs/compat/aria-v1.5.11.md's Drive API
 -- section) — internal/drive.Service always supplies a real name for

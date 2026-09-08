@@ -1211,7 +1211,7 @@ did not already settle:
   file can be attached to more than one note. It still verifies the
   given `fileId` is owned by the caller first (`NO_SUCH_FILE` otherwise),
   rather than returning `[]` for any id unconditionally.
-- **Folders are real** (migration 0023): create/list/show/update/delete,
+- **Folders are real** (migration 0025): create/list/show/update/delete,
   with a "cannot delete a non-empty folder" check
   (`FOLDER_NOT_EMPTY`, this service's own invented-but-Misskey-flavored
   error code — see the next point) and a "cannot move a folder inside

@@ -1085,15 +1085,15 @@ func TestMigrate_UpgradeAppliesFilesTable(t *testing.T) {
 }
 
 // TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata backs migrations
-// 0023 (folders table) and 0024 (files' Drive-API-specific columns),
-// both Issue #77 PR3. It opens at version 22 (right after 0022's plain
+// 0025 (folders table) and 0026 (files' Drive-API-specific columns),
+// both Issue #77 PR3. It opens at version 24 (right after 0024's plain
 // files table, before either of these) so it can also confirm a files
-// row that predates 0024 upgrades with the new columns' declared
+// row that predates 0026 upgrades with the new columns' declared
 // defaults (” for name, 0 for is_sensitive, NULL for comment/
 // folder_id) rather than failing the upgrade or leaving them NULL where
 // a NOT NULL default was declared.
 func TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata(t *testing.T) {
-	sqlDB := openUpgradeDB(t, 22)
+	sqlDB := openUpgradeDB(t, 24)
 	ctx := t.Context()
 
 	const ownerID = "pre-existing-owner"

@@ -16,7 +16,7 @@ import (
 // the configured secret_ref to its environment-variable value before
 // building this struct, the same secret_ref indirection
 // internal/openwebui/registry.go uses for its provider API key
-// (ADR-0006 reuses that pattern rather than inventing a second one).
+// (ADR-0007 reuses that pattern rather than inventing a second one).
 type S3Config struct {
 	// Endpoint is the host[:port] the S3-compatible API is served from,
 	// without a scheme (matching minio-go's own convention) — for
@@ -41,7 +41,7 @@ type S3Config struct {
 // S3 is a Storage backed by an S3-compatible object store, reached
 // through minio-go — a client library whose primary purpose (unlike the
 // full AWS SDK for Go v2) is broad S3-compatible-server support, not
-// AWS-specific features this service never uses (ADR-0006).
+// AWS-specific features this service never uses (ADR-0007).
 type S3 struct {
 	client *minio.Client
 	bucket string
