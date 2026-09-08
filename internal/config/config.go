@@ -389,6 +389,14 @@ type OpenWebUIConfig struct {
 	// makes, and this value is display-only), so validation checks only
 	// its shape.
 	ViewerBaseURL string
+	// ToolTurnTimeout mirrors OPENWEBUI_TOOL_TURN_TIMEOUT (Issue #93,
+	// ADR-0005 D24): the per-HTTP-call bound
+	// internal/provider/openwebui.Client.StreamTurn uses instead of
+	// Timeout, sized for Open WebUI's own native tool-call loop rather
+	// than one buffered call. Meaningless (never read) while
+	// GenerationEnabled is false, the same relationship Timeout already
+	// has.
+	ToolTurnTimeout time.Duration
 }
 
 // DriveConfig configures Issue #77 PR1's Drive storage foundation
@@ -740,6 +748,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.OpenWebUI.MaxContextMessages = parseOptionalInt(values, KeyOpenWebUIMaxContextMessages, 100, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax, &errs)
 	cfg.OpenWebUI.WebSearchEnabled = parseOptionalBoolPtr(values, KeyOpenWebUIWebSearchEnabled, &errs)
 	cfg.OpenWebUI.ViewerBaseURL = strings.TrimRight(parseOptionalString(values, KeyOpenWebUIViewerBaseURL, ""), "/")
+	cfg.OpenWebUI.ToolTurnTimeout = parseOptionalDuration(values, KeyOpenWebUIToolTurnTimeout, 10*time.Minute, &errs)
 
 	return cfg, errs
 }
@@ -925,6 +934,7 @@ func (c Config) Validate() error {
 		validateInt64Min(&errs, KeyOpenWebUIMaxRequestBytes, c.OpenWebUI.MaxRequestBytes, openWebUIMaxRequestBytesMin)
 		validateIntBounds(&errs, KeyOpenWebUIMaxContextMessages, c.OpenWebUI.MaxContextMessages, openWebUIMaxContextMessagesMin, openWebUIMaxContextMessagesMax)
 		validateOpenWebUIViewerBaseURL(&errs, KeyOpenWebUIViewerBaseURL, c.OpenWebUI.ViewerBaseURL)
+		validatePositiveDuration(&errs, KeyOpenWebUIToolTurnTimeout, c.OpenWebUI.ToolTurnTimeout)
 	}
 
 	if c.Env == EnvProduction {
@@ -1052,6 +1062,7 @@ func (c Config) Redacted() map[string]string {
 		KeyOpenWebUIMaxContextMessages: strconv.Itoa(c.OpenWebUI.MaxContextMessages),
 		KeyOpenWebUIWebSearchEnabled:   optionalBoolString(c.OpenWebUI.WebSearchEnabled),
 		KeyOpenWebUIViewerBaseURL:      c.OpenWebUI.ViewerBaseURL,
+		KeyOpenWebUIToolTurnTimeout:    c.OpenWebUI.ToolTurnTimeout.String(),
 	}
 }
 

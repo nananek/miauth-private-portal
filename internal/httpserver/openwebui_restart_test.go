@@ -47,6 +47,13 @@ func (p *restartFakeProvider) LookupTurnOutcome(ctx context.Context, remoteChatI
 	return openwebui.TurnOutcome{}, errNotScripted
 }
 
+// StreamTurn is Issue #93's addition (ADR-0005 D24/D25): no scenario
+// here opts a turn into tool_ids/web_search, so this exists only to
+// keep restartFakeProvider satisfying openwebui.Provider.
+func (p *restartFakeProvider) StreamTurn(ctx context.Context, req openwebui.StreamTurnRequest) (openwebui.TurnResult, error) {
+	return openwebui.TurnResult{}, errNotScripted
+}
+
 // runOpenWebUITurnJobFor finds the pending "openwebui_turn" job enqueued
 // for sourceEntryID (via findOpenWebUITurnJobFor, openwebui_testhelpers_
 // test.go) and hands it to a fresh *openwebui.TurnJob backed by ts's own

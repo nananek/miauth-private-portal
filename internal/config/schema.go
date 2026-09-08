@@ -98,6 +98,16 @@ const (
 	KeyOpenWebUIMaxRequestBytes    = "OPENWEBUI_MAX_REQUEST_BYTES"
 	KeyOpenWebUIMaxContextMessages = "OPENWEBUI_MAX_CONTEXT_MESSAGES"
 
+	// KeyOpenWebUIToolTurnTimeout is Issue #93's own per-HTTP-call bound
+	// for Client.StreamTurn (ADR-0005 D24) — deliberately separate from
+	// OPENWEBUI_TIMEOUT because a StreamTurn connection stays open for
+	// Open WebUI's whole native tool-call loop, potentially several
+	// rounds, not one buffered call. Consumed by
+	// internal/provider/openwebui.Client.StreamTurn, and — since D26's
+	// dispatch wiring (TurnJob.handleCreationPending) — reached whenever
+	// a branch's first turn resolves a non-empty tool_ids/web_search.
+	KeyOpenWebUIToolTurnTimeout = "OPENWEBUI_TOOL_TURN_TIMEOUT"
+
 	// KeyOpenWebUIWebSearchEnabled is Issue #72's opt-in web-search flag
 	// for the outbound completions call, tri-state since Issue #75 AC#11
 	// (ADR-0005 D21): unset defers per model to that model's own synced
@@ -227,6 +237,7 @@ var knownKeyOrder = []string{
 	KeyOpenWebUIMaxContextMessages,
 	KeyOpenWebUIWebSearchEnabled,
 	KeyOpenWebUIViewerBaseURL,
+	KeyOpenWebUIToolTurnTimeout,
 	KeyDriveBackend,
 	KeyDriveDataDir,
 	KeyDriveS3Endpoint,

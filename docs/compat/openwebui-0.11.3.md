@@ -458,6 +458,57 @@ generated title (Issue #84's `"[reply]"` marker, unchanged), not an
 incorrect one. See ADR-0005 D23 and `StartChatRequest.
 EnableTitleGeneration`'s doc comment.
 
+**(j) Issue #93 (native multi-round tool execution over the same row-1 SSE
+path) — 全項目 要実機確認, none of it exercised against a real instance.**
+
+D8/(h)'s row 1 (`stream:true`, no `chat_id`) was captured with neither
+`tool_ids` nor `features` set. Issue #93 needs exactly that combination —
+`stream:true`, no `chat_id`, **and** `tool_ids`/`features` set, so Open
+WebUI's native (non-legacy) tool-calling loop has a reason to run at all
+— and none of the following was checked against a real instance for this
+PR, per the owner's 2026-09-08 direction to implement Issue #93 without
+further real-instance access (the same "ship on a documented assumption"
+precedent (i) above already set for Issues #81/#84):
+
+1. Whether that combined request actually reaches row 1 of (h)'s table at
+   all, as opposed to one of the other two (queued, socket.io-delivered)
+   rows — nothing rules out the tool-decision code path changing which
+   row a request lands in once `tool_ids`/`features` are present.
+2. Whether it silently creates an orphaned, untracked chat server-side
+   despite no `chat_id` ever being sent — row 1's "Persistence: none" was
+   observed only for a plain, toolless turn.
+3. Whether an in-progress tool-call round ever surfaces as its own SSE
+   chunk (an OpenAI-shaped `delta.tool_calls` payload, ending with
+   `finish_reason: "tool_calls"`) on this passthrough path, or whether
+   native execution resolves entirely server-side with only the final
+   round's answer ever streamed as `delta.content`.
+4. Whether any usage-accounting equivalent to the buffered path's
+   `usage` object ever appears on a chunk of this stream.
+
+`internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24) is written
+to tolerate either answer to point 3 without guessing wrong: it
+accumulates every `delta.content` chunk and treats the literal
+`data: [DONE]` event as the *only* end-of-stream signal, deliberately
+never a chunk's own `finish_reason` (`decodeStreamingCompletion`'s own
+doc comment has the full reasoning — an intermediate
+`finish_reason: "tool_calls"` chunk must not be mistaken for the turn's
+actual end). Point 4 degrades to "no usage recorded for this mode,"
+matching (i)'s own precedent for a gap that is cosmetic rather than
+correctness-affecting. Points 1 and 2 are the ones actual re-verification
+must resolve before this mode is dispatched to in production — see D24's
+own note for the concrete, non-alarming failure mode if point 1 turns out
+false (the read simply never reaches `[DONE]` and the turn fails
+normally, per D25, rather than hanging or returning a wrong answer).
+
+No real capture exists for any of this. [`sse_native_tool_round_trip.sse.txt`](fixtures/openwebui/sse_native_tool_round_trip.sse.txt)
+is a synthetic fixture (marked as such by this table entry, not by an
+in-file comment, matching this document's existing convention for the
+other synthetic `sse_*` fixtures) built only to pin
+`Client.StreamTurn`'s own parsing contract — two `tool_calls`-only rounds
+followed by a final content-bearing round — against point 3's "not
+exercised" gap above; it is not, and must never be read as, evidence of
+what a real instance actually does.
+
 ### `GET /api/v1/chats/{id}` (必要)
 
 Returns the same `ChatResponse` shape. The tree lives in
@@ -697,6 +748,7 @@ All fixtures live in [`fixtures/openwebui/`](fixtures/openwebui/).
 | `sse_duplicate_chunk.sse.txt` | **synthetic**, derived from the above | A repeated chunk, indistinguishable on the wire |
 | `sse_out_of_order_chunk.sse.txt` | **synthetic**, derived from the above | Transposed chunks, silently corrupting naive concatenation |
 | `sse_truncated_no_done.sse.txt` | **synthetic**, derived from the above | Response loss: no finish event, no `[DONE]` |
+| `sse_native_tool_round_trip.sse.txt` | **synthetic**, not derived from any real capture (Issue #93, (j) above) | Two `tool_calls`-only rounds (each ending `finish_reason: "tool_calls"`, no content) followed by a final content-bearing round and `finish_reason: "stop"`; pins `Client.StreamTurn`'s "never end on `finish_reason`, only on `[DONE]`" parsing rule, not real multi-round behavior |
 | `streaming_task_response.json` | observed | `{"status":true,"task_ids":[…],"chat_id":…}` for `stream:true` + `session_id`, here creating a new chat, whose id therefore does come back in-band |
 | `streaming_no_session_response.json` | observed | Literal `null` for `stream:true` without `session_id` |
 | `fork_response_reference.json` | observed | What `/fork` returns, and how a broken chain truncates it |

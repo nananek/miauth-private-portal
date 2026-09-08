@@ -131,6 +131,37 @@ type ContinueTurnRequest struct {
 	WebSearchEnabled bool
 }
 
+// StreamTurnRequest is one native, tool/web-search-capable turn run over
+// Open WebUI's true SSE passthrough path (ADR-0005 D24, Issue #93)
+// instead of the chat-managed StartChat/ContinueTurn path D1-D23
+// describe. It carries no chat_id, parent_id, id, or user_message: this
+// mode never creates or continues a remote chat, so the correlation ids
+// and OnChatCreated hook StartChatRequest needs for chat management have
+// no counterpart here — see Client.StreamTurn's own doc comment
+// (internal/provider/openwebui/client.go) for why.
+type StreamTurnRequest struct {
+	ModelID string
+	// Messages is the root-to-parent context this turn continues, in
+	// order — the same locally reconstructed sequence StartChatRequest
+	// uses (ADR-0005 D5); NewTurn is the message being asked now.
+	Messages []Message
+	NewTurn  Message
+	// ToolIDs and WebSearchEnabled mirror StartChatRequest's fields of
+	// the same name, with the one difference this mode exists for: no
+	// params.function_calling is ever sent, so Open WebUI resolves tool
+	// calls and web search natively — potentially over several rounds —
+	// inside the single SSE connection this call keeps open, rather than
+	// the legacy path's single pre-completion injection step (ADR-0005
+	// D16/D17, unchanged for the chat-managed path StartChat/ContinueTurn
+	// still use).
+	ToolIDs          []string
+	WebSearchEnabled bool
+	// CorrelationID is a local request id for logging only, exactly as
+	// StartChatRequest.CorrelationID — never sent to the provider.
+	CorrelationID string
+	SentAt        time.Time
+}
+
 // SourceKind names the two sources[] shapes Issue #81's real-instance
 // check (2026-09-07) found — see Source's own doc comment.
 const (
@@ -173,6 +204,15 @@ type Source struct {
 // PromptTokens, CompletionTokens, and FinishReason are accounting and
 // correlation metadata only — nothing about them is authoritative for
 // anything but bookkeeping.
+//
+// Client.StreamTurn (ADR-0005 D24) returns this same struct, but leaves
+// RemoteCurrentID, PromptTokens, CompletionTokens, Title, and Sources
+// always nil/zero: that mode manages no remote chat for RemoteCurrentID
+// or Title to name, its request never asks for usage accounting the way
+// StartChatRequest/ContinueTurnRequest's completions response does, and
+// whether an equivalent to Issue #81's sources[] exists on the SSE path
+// at all is unverified (see StreamTurn's own doc comment). Only Content
+// and FinishReason are ever populated by that path.
 type TurnResult struct {
 	Content          string
 	RemoteCurrentID  *string
@@ -243,6 +283,17 @@ type Provider interface {
 	// before ever retrying a continuation whose previous attempt's
 	// outcome is unknown.
 	LookupTurnOutcome(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error)
+	// StreamTurn runs a turn over Open WebUI's native, multi-round
+	// tool-execution path (ADR-0005 D24/D25, Issue #93) instead of the
+	// chat-managed path the three methods above use: no remote chat is
+	// ever created, so there is no OnChatCreated hook and nothing for a
+	// later LookupTurnOutcome to confirm. TurnJob.handleCreationPending
+	// calls it, instead of StartChat, only for a branch's first turn when
+	// this turn's own resolved tool_ids/web_search indicate tool use —
+	// never for a continuation on an already-ready link (see
+	// TurnJob.handleReady's own doc comment for why that stays on the
+	// chat-managed path unconditionally).
+	StreamTurn(ctx context.Context, req StreamTurnRequest) (TurnResult, error)
 }
 
 // Phase names which of Provider's three calls a ProviderError came
@@ -255,6 +306,12 @@ const (
 	PhaseCreate Phase = "create"
 	PhaseTurn   Phase = "turn"
 	PhaseLookup Phase = "lookup"
+	// PhaseStream is Client.StreamTurn's own phase (ADR-0005 D24, Issue
+	// #93): kept distinct from PhaseTurn so a log line or ProviderError
+	// can tell a stateless streaming turn's failure apart from a
+	// chat-managed one, even though both represent "the model was asked
+	// for an answer."
+	PhaseStream Phase = "stream"
 )
 
 // Category classifies a Provider failure. It is this port's own
@@ -307,6 +364,12 @@ const (
 	// a possible 200 body, or (from runTurn) a turn whose lookup found
 	// the assistant message not yet done and not erroring either. It is
 	// never adopted as evidence of failure — only of "unknown".
+	//
+	// Client.StreamTurn (PhaseStream, ADR-0005 D24/D25) never returns
+	// this category: that mode manages no remote chat for a later GET to
+	// confirm, so there is no "unknown, check again later" outcome to
+	// represent — every StreamTurn failure is classified into one of the
+	// concrete categories below instead, and is always final.
 	CategoryAmbiguous Category = "ambiguous"
 )
 
