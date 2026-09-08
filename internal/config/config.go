@@ -197,7 +197,7 @@ type RSSConfig struct {
 	// domain.ExternalSource rows (kind "rss") at startup.
 	FeedURLs []string
 	// FeedUsernames[i] is FeedURLs[i]'s optional per-feed username
-	// (Issue #77 PR4/ADR-0007's design-A host display: the feed's own
+	// (Issue #77 PR4/ADR-0008's design-A host display: the feed's own
 	// ActorExternalSource username, settable via a "|username" suffix on
 	// the corresponding RSS_FEED_URLS entry), or nil if that entry set
 	// none — cmd/server then derives a default from the feed's host
@@ -1325,7 +1325,7 @@ func validateCallbackEntries(errs *[]FieldError, key string, list []string) bool
 // splitRSSFeedURLs splits RSS_FEED_URLS the same way splitOptionalURLList
 // splits any other comma list (splitCallbackList's "a separator is a
 // comma followed by the next absolute URL" rule), then extracts each
-// entry's optional "|username" suffix (Issue #77 PR4/ADR-0007's design-A
+// entry's optional "|username" suffix (Issue #77 PR4/ADR-0008's design-A
 // per-feed username) — "|" is never a valid unencoded URI character
 // (RFC 3986), so it unambiguously separates an entry's URL from this
 // suffix without needing a second, position-matched config key. Returns

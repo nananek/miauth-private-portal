@@ -586,11 +586,11 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 
 // resolveExternalEntryAuthor returns the actor ID a news/mail entry from
 // sourceID should be authored by: that source's own dedicated
-// ActorExternalSource actor (Issue #77 PR4/ADR-0007's design-A host
+// ActorExternalSource actor (Issue #77 PR4/ADR-0008's design-A host
 // display) when it has one, otherwise the shared singleton actor
 // fallbackType names — the same authorActorTypeForKind[kind] lookup
 // every external entry used before PR4. A source's ActorID is nil for
-// every imap-kind source (ADR-0007's design-A host display is RSS-only)
+// every imap-kind source (ADR-0008's design-A host display is RSS-only)
 // and for an rss-kind source pre-dating PR4's migration, so this
 // fallback is not merely defensive: it is the real, ongoing behavior
 // for every kind that does not get its own actor.

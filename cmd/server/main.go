@@ -625,7 +625,7 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 
 // ensureRSSSourcesWithActors idempotently creates one domain.ExternalSource
 // (kind rss.Kind) plus its own dedicated ActorExternalSource actor
-// (Issue #77 PR4, ADR-0007's design-A host display) for every feedURLs
+// (Issue #77 PR4, ADR-0008's design-A host display) for every feedURLs
 // entry not already registered. feedUsernames[i], when non-nil, is
 // feedURLs[i]'s owner-chosen username (RSS_FEED_URLS' "|username"
 // suffix); otherwise one is derived from the feed's own host

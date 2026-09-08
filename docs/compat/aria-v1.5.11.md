@@ -1312,7 +1312,7 @@ are never exposed through any Note field — no marker is needed for them, since
 no Aria/Misskey-compatible HTTP endpoint exposes them at all (see
 `docs/operations/configuration.md`'s "Review/notebook/unresolved queries").
 
-**Since Issue #77 PR4 (ADR-0007), a `news` entry's provenance is no
+**Since Issue #77 PR4 (ADR-0008), a `news` entry's provenance is no
 longer text-only.** Before PR4, every `news`/`mail` entry projected
 `user: {username: "system", host: null}` regardless of which RSS feed
 or mailbox it came from — the table above's markers were the *only*
@@ -1321,9 +1321,9 @@ of that unchanged text-marker behavior:
 
 - **`user.host` is the feed's own real origin domain** for a `news`
   entry ingested from an RSS-kind source registered after PR4 shipped
-  (`ActorExternalSource`, ADR-0007) — `@<username>@<feed's real host>`,
+  (`ActorExternalSource`, ADR-0008) — `@<username>@<feed's real host>`,
   not `system`. `mail` entries are unaffected and still project as
-  `system`: ADR-0007 excludes IMAP from this treatment. A `news` entry
+  `system`: ADR-0008 excludes IMAP from this treatment. A `news` entry
   from a source that predates PR4 (no `ActorID` on its
   `domain.ExternalSource` row) also still projects as `system`, exactly
   as before — nothing is backfilled.

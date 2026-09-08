@@ -1,4 +1,4 @@
-# ADR-0007: RSS external-source identity — real host, design A
+# ADR-0008: RSS external-source identity — real host, design A
 
 - Status: Accepted for Issue #77 PR4
 - Date: 2026-09-08
@@ -110,12 +110,12 @@ here as accepted trade-offs, not oversights:
 
 ## Consequences
 
-- `internal/storage/sqlite/migrations/0025_actors_external_source_type.sql`
+- `internal/storage/sqlite/migrations/0027_actors_external_source_type.sql`
   rebuilds `actors` (SQLite cannot alter a `CHECK` list in place — the
   same shape migration 0016 already used for `openwebui_model`).
-  `0026_external_sources_identity.sql` adds `actor_id`/`username`/`host`
+  `0028_external_sources_identity.sql` adds `actor_id`/`username`/`host`
   plus a `UNIQUE(host, username)` partial index.
-  `0027_entries_provenance_url.sql` denormalizes each ingested entry's
+  `0029_entries_provenance_url.sql` denormalizes each ingested entry's
   source-item URL onto `entries` (Misskey's `Note.url`, projected by
   `internal/httpserver`).
 - `internal/ingest/rss`'s host/username derivation

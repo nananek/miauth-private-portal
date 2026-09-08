@@ -90,7 +90,7 @@ type Options struct {
 	VirtualActors VirtualActorResolver
 
 	// ExternalSources resolves an ActorExternalSource actor to its owning
-	// domain.ExternalSource (Issue #77 PR4/ADR-0007's design-A host
+	// domain.ExternalSource (Issue #77 PR4/ADR-0008's design-A host
 	// display). A nil value means resolveUserLite's existing fallback
 	// projection applies. It is the narrow ExternalSourceResolver
 	// interface (satisfied structurally by domain.ExternalSourceRepository

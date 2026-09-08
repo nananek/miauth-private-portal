@@ -275,7 +275,7 @@ implementation order but has no dependency on it.
 ## PR4: RSS/external-source icons and attribution
 
 **Status: partially complete.** Depended on PR1. The identity/
-attribution half of this PR (plan-77 §2.4, ADR-0007's design-A decision)
+attribution half of this PR (plan-77 §2.4, ADR-0008's design-A decision)
 is done; **favicon fetching/storage is not yet implemented** — see
 "Not yet done" below.
 
@@ -283,11 +283,11 @@ Done:
 
 - `domain.ActorExternalSource` (Issue #52's "1 external identity = 1
   actor row" pattern, applied to RSS-kind `domain.ExternalSource`), a
-  rebuild migration (`0025_actors_external_source_type.sql`, mirroring
+  rebuild migration (`0027_actors_external_source_type.sql`, mirroring
   migration 0016's shape) and two plain-ADD-COLUMN migrations
-  (`0026_external_sources_identity.sql`: `actor_id`/`username`/`host`
+  (`0028_external_sources_identity.sql`: `actor_id`/`username`/`host`
   plus a `UNIQUE(host, username)` partial index;
-  `0027_entries_provenance_url.sql`: denormalizes each ingested entry's
+  `0029_entries_provenance_url.sql`: denormalizes each ingested entry's
   source-item URL onto `entries`).
 - `internal/ingest/rss`'s `HostFromFeedURL`/`DefaultUsername` (host
   parsing plus a Issue-75-`GenerateActorSlug`-shaped, deliberately not
@@ -307,11 +307,11 @@ Done:
 - `docs/compat/aria-v1.5.11.md`'s "Note.text provenance markers" section
   now documents the real `user.host`/`note.url` signals PR4 adds
   alongside the pre-existing text markers (which are unchanged).
-- New ADR: [`docs/decisions/0007-external-source-identity.md`](../decisions/0007-external-source-identity.md)
+- New ADR: [`docs/decisions/0008-external-source-identity.md`](../decisions/0008-external-source-identity.md)
   — the design-A decision, the considered-and-accepted impersonation-
   adjacent concerns, why IMAP is deliberately excluded, and the
   "Revisit if real federation ships" condition plan-77 §2.4.7 required.
-- **Deliberately excluded from this PR (ADR-0007's own scope note):**
+- **Deliberately excluded from this PR (ADR-0008's own scope note):**
   IMAP-kind sources keep projecting as the shared `system` actor,
   unchanged.
 

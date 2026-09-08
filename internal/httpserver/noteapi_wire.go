@@ -39,7 +39,7 @@ type VirtualActorResolver interface {
 }
 
 // ExternalSourceResolver resolves an ActorExternalSource actor
-// (Issue #77 PR4/ADR-0007's design-A host display) to the
+// (Issue #77 PR4/ADR-0008's design-A host display) to the
 // domain.ExternalSource that owns it, or reports it as not resolvable —
 // resolveUserLite treats that identically to VirtualActorResolver's own
 // failure case, falling back to the plain projection.

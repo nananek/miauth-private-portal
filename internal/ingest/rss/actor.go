@@ -1,4 +1,4 @@
-// This file is Issue #77 PR4's (ADR-0007) design-A host/username
+// This file is Issue #77 PR4's (ADR-0008) design-A host/username
 // derivation for one RSS-kind domain.ExternalSource, computed once when
 // the source is first registered (cmd/server) and never recomputed
 // afterward — the same "compute once at registration, never resync"
@@ -34,7 +34,7 @@ const (
 var usernameInvalidChars = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 // HostFromFeedURL returns feedURL's hostname (no port, no scheme) —
-// ADR-0007's real, per-feed presentation host. It fails only when
+// ADR-0008's real, per-feed presentation host. It fails only when
 // feedURL does not parse as an absolute URL with a host at all, which
 // should not happen for a value RSS_FEED_URLS' own validation already
 // accepted (internal/config's validateRSSFeedURLs requires an absolute
@@ -56,7 +56,7 @@ func HostFromFeedURL(feedURL string) (string, error) {
 // "|username" suffix (internal/config's parsing — that explicit value
 // is used verbatim instead, never passed through here). It disambiguates
 // against reserved (every username already registered for the same
-// host — ADR-0007's per-host uniqueness) the same way GenerateActorSlug
+// host — ADR-0008's per-host uniqueness) the same way GenerateActorSlug
 // disambiguates a model slug: the normalized host first, then that
 // candidate plus a hash-of-feedURL suffix, then (astronomically
 // unlikely) a hash of host+feedURL outright.

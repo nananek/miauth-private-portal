@@ -9,7 +9,7 @@ import (
 
 // mustCreateExternalSourceActorForTest seeds an ActorExternalSource actor
 // plus its owning rss-kind domain.ExternalSource (Issue #77 PR4/
-// ADR-0007's design-A host display), mirroring what
+// ADR-0008's design-A host display), mirroring what
 // cmd/server's ensureRSSSourcesWithActors creates at startup.
 func mustCreateExternalSourceActorForTest(t *testing.T, ts *noteAPITestServer, host, username string) domain.Actor {
 	t.Helper()
@@ -28,7 +28,7 @@ func mustCreateExternalSourceActorForTest(t *testing.T, ts *noteAPITestServer, h
 }
 
 // TestResolveUserLite_ProjectsExternalSourceRealHost is Issue #77 PR4/
-// ADR-0007's core contract test: an entry authored by an
+// ADR-0008's core contract test: an entry authored by an
 // ActorExternalSource actor must project host as that source's own real
 // origin and username as its registered (or derived) username — not the
 // single synthetic OPENWEBUI_PRESENTATION_HOST value Issue #52's

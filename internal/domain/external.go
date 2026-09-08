@@ -14,7 +14,7 @@ type ExternalSource struct {
 	URI         string
 	DisplayName *string
 	// ActorID, Username, and Host are all nil for an imap-kind source
-	// (Issue #77 PR4/ADR-0007's design-A host display is RSS-only) and
+	// (Issue #77 PR4/ADR-0008's design-A host display is RSS-only) and
 	// all set together for an rss-kind one, computed once when the
 	// source is first registered (cmd/server's startup seeding) and
 	// never recomputed afterward:
@@ -28,7 +28,7 @@ type ExternalSource struct {
 	//   - Host is this feed's own real origin (net/url.Parse(URI).Host)
 	//     — a real, deployment-uncontrolled domain, unlike
 	//     OPENWEBUI_PRESENTATION_HOST's single synthetic value. See
-	//     ADR-0007 for why this is safe only because this deployment
+	//     ADR-0008 for why this is safe only because this deployment
 	//     never federates, and the condition that would require
 	//     revisiting it.
 	ActorID  *string

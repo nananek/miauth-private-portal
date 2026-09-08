@@ -30,12 +30,12 @@ const (
 	// by MiAuth.
 	ActorOpenWebUIModel ActorType = "openwebui_model"
 	// ActorExternalSource is a presentation actor for one RSS-kind
-	// domain.ExternalSource (Issue #77 PR4, ADR-0007). Like
+	// domain.ExternalSource (Issue #77 PR4, ADR-0008). Like
 	// ActorOpenWebUIModel it is not a singleton — one row per registered
 	// feed — and is never accepted by MiAuth. Unlike ActorOpenWebUIModel,
 	// its projected host (docs/compat/aria-v1.5.11.md's Note.user.host)
 	// is the feed's own real origin, not a synthetic deployment-wide
-	// value: ADR-0007 records why that is safe for this non-federating
+	// value: ADR-0008 records why that is safe for this non-federating
 	// deployment and the condition ("Revisit if") that would invalidate
 	// the decision. imap-kind sources are deliberately excluded from
 	// this type and keep projecting as the shared ActorSystem actor.
@@ -85,7 +85,7 @@ func (a Actor) CanOwnSecret() bool { return false }
 // non-null UserLite.host. ActorOpenWebUIModel and ActorExternalSource
 // are; see their doc comments for why that is presentation (or, for
 // ActorExternalSource, a deliberately real-but-non-federating host —
-// ADR-0007), never actual federation.
+// ADR-0008), never actual federation.
 func (a Actor) IsRemote() bool {
 	return a.Type == ActorOpenWebUIModel || a.Type == ActorExternalSource
 }

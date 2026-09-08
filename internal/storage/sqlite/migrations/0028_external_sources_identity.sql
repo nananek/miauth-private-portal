@@ -1,9 +1,9 @@
--- Issue #77 PR4 (ADR-0007): the "1 external identity = 1 actor row"
+-- Issue #77 PR4 (ADR-0008): the "1 external identity = 1 actor row"
 -- columns an RSS-kind external_sources row needs. Plain ADD COLUMN, not
 -- a -- migrate:rebuild table rebuild: none of these touch this table's
 -- existing UNIQUE(kind, uri) or any CHECK constraint.
 --
--- All three are NULL for an imap-kind row: ADR-0007's design-A host
+-- All three are NULL for an imap-kind row: ADR-0008's design-A host
 -- display is RSS-only (a spoofable email-sender-domain equivalent for
 -- IMAP was explicitly rejected as a materially different phishing risk,
 -- not merely deferred) — imap sources keep projecting as the shared

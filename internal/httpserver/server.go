@@ -50,7 +50,7 @@ type Server struct {
 	// projection untouched for every actor.
 	virtualActors VirtualActorResolver
 	// externalSources resolves an ActorExternalSource actor to its owning
-	// domain.ExternalSource (Issue #77 PR4/ADR-0007). A nil value leaves
+	// domain.ExternalSource (Issue #77 PR4/ADR-0008). A nil value leaves
 	// resolveUserLite's existing fallback projection untouched — never
 	// expected in production (cmd/server always passes db.Repos.
 	// ExternalSources), but every httpserver test predating PR4 still

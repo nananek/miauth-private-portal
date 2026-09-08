@@ -1158,13 +1158,13 @@ func TestMigrate_UpgradeAppliesDriveFoldersAndFileMetadata(t *testing.T) {
 }
 
 // TestMigrate_UpgradeAppliesExternalSourceActorType backs migrations
-// 0025 (actors' external_source CHECK entry), 0026 (external_sources'
-// actor_id/username/host columns), and 0027 (entries.provenance_url) —
-// all Issue #77 PR4/ADR-0007. It opens at version 24 (before any of the
+// 0027 (actors' external_source CHECK entry), 0028 (external_sources'
+// actor_id/username/host columns), and 0029 (entries.provenance_url) —
+// all Issue #77 PR4/ADR-0008. It opens at version 26 (before any of the
 // three) so it can also confirm pre-existing actors/external_sources/
-// entries rows survive migration 0025's table rebuild unchanged.
+// entries rows survive migration 0027's table rebuild unchanged.
 func TestMigrate_UpgradeAppliesExternalSourceActorType(t *testing.T) {
-	sqlDB := openUpgradeDB(t, 24)
+	sqlDB := openUpgradeDB(t, 26)
 	ctx := t.Context()
 
 	const preOwnerID = "pre-existing-owner"

@@ -40,7 +40,7 @@ func TestExternalSourceRepository_CreateGetList(t *testing.T) {
 }
 
 // TestExternalSourceRepository_CreateGet_RoundTripsIdentityFields backs
-// Issue #77 PR4/ADR-0007's design-A columns: ActorID/Username/Host round
+// Issue #77 PR4/ADR-0008's design-A columns: ActorID/Username/Host round
 // -trip exactly, and stay nil for an imap-kind source that never sets
 // them (mustCreateExternalSource's plain shape, unchanged since before
 // PR4).

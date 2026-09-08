@@ -137,7 +137,7 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 		LLMEnabled:               llmEnabled,
 		LLMClassificationEnabled: llmClassificationEnabled,
 		// Wired unconditionally, matching cmd/server (Issue #77 PR4/
-		// ADR-0007's design-A host display has no feature flag): only
+		// ADR-0008's design-A host display has no feature flag): only
 		// entries authored by an ActorExternalSource actor are affected,
 		// which no pre-PR4 test creates.
 		ExternalSources: db.Repos.ExternalSources,

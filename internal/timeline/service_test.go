@@ -762,7 +762,7 @@ func TestCreateExternalEntry_CreatesRootEntryAndPromotesItem(t *testing.T) {
 }
 
 // TestCreateExternalEntry_UsesSourceActorAndProvenanceURL is Issue #77
-// PR4/ADR-0007's regression test: a source with its own
+// PR4/ADR-0008's regression test: a source with its own
 // ActorExternalSource (design A's per-feed host display) must author
 // its entries as that actor, not the shared system actor, and the
 // item's ProvenanceURL must be denormalized onto the created Entry.
