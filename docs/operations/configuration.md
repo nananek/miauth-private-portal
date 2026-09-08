@@ -145,7 +145,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 | `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
-| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Issue #93's own per-HTTP-call bound for `internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24) — kept separate from `OPENWEBUI_TIMEOUT` because a `StreamTurn` connection stays open for Open WebUI's whole native tool-call loop (potentially several rounds), not one buffered call. Must be a positive duration. `TurnJob` dispatches a branch's first turn to `StreamTurn` (ADR-0005 D26) whenever that turn's own resolved `tool_ids`/`web_search` is non-empty — see "Native multi-round tool execution (Issue #93)" below for the full dispatch rule. |
+| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Bounds a tool/web-search-carrying turn's completion-polling budget (`internal/provider/openwebui.Client.awaitTurnDone`, ADR-0005 D27) — kept separate from `OPENWEBUI_TIMEOUT` because Open WebUI's native tool-call loop can take several rounds, not one buffered call. Originally Issue #93's per-HTTP-call bound for the now-retired `Client.StreamTurn` (ADR-0005 D24); D27 (Issue #123) repointed the same config key at the polling loop that replaced it, keeping its default and its "how long a native tool-call loop may run" meaning. Must be a positive duration. `Client.runTurn` selects this path for any turn (first or continuation) whose own resolved `tool_ids`/`web_search` is non-empty — see "Native multi-round tool execution" below for the full mechanism. |
 | `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0007): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
 | `DRIVE_DATA_DIR` | no | `./data/drive` | The `localdisk` backend's root directory (`internal/drive.Local`). Must not be empty when `DRIVE_BACKEND=localdisk`; this package does not check it exists on disk — `internal/drive.Local` fails closed at first use (`Put`/`Get`/`Delete`) if it does not, the same "config validates shape, the consumer validates reachability" split `DB_PATH` already has. |
 | `DRIVE_S3_ENDPOINT` | required if `DRIVE_BACKEND=s3compat` | `""` | The S3-compatible API's `host[:port]`, no scheme (`minio-go`'s own convention) — for example `minio.internal:9000`, or an AWS S3 regional endpoint. |
@@ -563,11 +563,15 @@ over the singleton types, so an Open WebUI model's VirtualActor row
 `0027_actors_external_source_type.sql` (Issue #77 PR4) widens the same
 `CHECK` list again, for RSS-kind `external_sources` actors.
 `0032_openwebui_links_stateless.sql` (Issue #93 PR2, ADR-0005 D24/D25)
-is the first to rebuild a *different* table: it widens
+is the first to rebuild a *different* table: it widened
 `openwebui_conversation_links.state`'s `CHECK` list to admit
-`'stateless'`, the terminal state a branch reaches when its turn was
-served through the native multi-round tool-execution path instead of a
-chat-managed one.
+`'stateless'`, the terminal state a branch reached when its turn was
+served through Issue #93's native multi-round tool-execution path
+instead of a chat-managed one. ADR-0005 D27 (Issue #123) retired that
+path — no code writes `'stateless'` any longer, and this migration is
+not reverted (AGENTS.md: never edit an applied migration), so the value
+stays permitted but unused, the same state `0016`'s and `0027`'s own
+now-superseded `CHECK` values are already in.
 
 ## Durable jobs
 
@@ -1464,54 +1468,54 @@ rather than dropped, the same unregistered-job-type recovery path
 `LLM_ENABLED` already relies on — `jobsctl` can list and requeue it once
 generation is turned back on.
 
-### Native multi-round tool execution (Issue #93)
+### Native multi-round tool execution (Issue #93, redesigned by Issue #123)
 
-`internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24/D25) is a
-second, independent turn method the adapter has, alongside the
-`StartChat`/`ContinueTurn` path the "Outbound turn bridge" section above
-describes in full. **`TurnJob.handleCreationPending` dispatches to it
-(ADR-0005 D26)**, instead of `StartChat`, whenever a branch's first
-turn's own resolved `tool_ids`/`web_search` (the same per-model
-resolution the "Outbound turn bridge" section's model-selection table
-already reads from `ToolConfigCache`/`FeatureDefaultCache`) is non-empty
-— tool/web-search-using turns no longer force `params.function_calling=
-legacy` (D17) once they take this path. **Scoped to a branch's first
-turn only**: a continuation on an already-`ready` link (a reply that
-`SelectBranch` routes onto an existing chat) always stays on
-`ContinueTurn`, even if that specific turn's own resolved config would
-now call for tool use — there is no remote-chat-preserving way to move
-an established chat-managed link onto the chat-less streaming path
-mid-conversation. A reply wanting native tool execution that is not
-itself continuing such a link (a different position, a different model,
-or simply a branch's own first message) is unaffected and free to go
-stateless on its own first turn.
+Issue #93 originally gave the adapter a second, independent turn method
+(`Client.StreamTurn`, ADR-0005 D24) that sent a chat-less, `stream:true`
+request and read Open WebUI's SSE passthrough directly, dispatched to
+(ADR-0005 D26) instead of `StartChat` whenever a branch's first turn's
+own resolved `tool_ids`/`web_search` was non-empty. **Issue #120 found
+this could never actually run a tool**: Open WebUI's native tool-calling
+loop only runs for a request that carries `chat_id` (`event_emitter`'s
+own condition), which a chat-less request by definition never sends —
+see `docs/compat/openwebui-0.11.3.md`'s "(h.1)" section for the real
+captures behind this finding. **ADR-0005 D27 (Issue #123) retired
+`StreamTurn` and this whole separate dispatch** rather than repairing it.
 
-A successful stateless turn's link lands in a new terminal state,
-`LinkStateless` (migration `0032`), never `LinkReady`: no remote chat
-was ever created, so nothing exists for a later reply to continue —
-`AllowsContinue`'s existing `state == LinkReady` check already routes
-any such reply to a brand new branch, the same as a reply to a failed or
-dead link would. `go run ./cmd/openwebuictl links --state=stateless`
-lists these for operator visibility; there is nothing to recover on them
-(D25: the outcome — success or failure — is already fully known by the
-time the link reaches a terminal state at all), so none of the owner
-recovery subcommands (`confirm`/`abandon`/`freeze`) apply.
+Tool/web-search-using turns now go through the *same* `StartChat`/
+`ContinueTurn` path the "Outbound turn bridge" section above describes,
+for both a branch's first turn and every continuation on it — the
+former "first turn only" restriction is gone, since there is no longer a
+separate mode a continuation could fail to switch onto. Inside
+`Client.runTurn`, a turn whose resolved `tool_ids`/`web_search` is
+non-empty sends `stream: true` and no `params` key at all (instead of
+`stream: false` plus D17's `params.function_calling="legacy"`), so Open
+WebUI's native tool-calling loop runs — potentially over several rounds
+— against the real chat this path already creates/continues. Since that
+request's HTTP response is always a `null` body regardless
+(`docs/compat/openwebui-0.11.3.md`'s "(h)"/"(k)" sections), confirmation
+is `LookupTurnOutcome` (`GET /api/v1/chats/{id}`, the same read a plain
+turn's single confirming call already performs), polled every
+`nativeTurnPollInterval` (2s, a package constant, not configurable)
+until the assistant message reports done or an error, bounded by
+`OPENWEBUI_TOOL_TURN_TIMEOUT` — which now bounds this polling loop's
+wall-clock budget rather than one held-open SSE connection's deadline,
+though its own meaning as "how long a native tool-call loop may run
+before this adapter gives up" is unchanged.
 
-`StreamTurn` sends `stream:true` with **no** `chat_id`/`parent_id`/`id`/
-`user_message`/`background_tasks`/`params` key — this mode manages no
-remote chat and never forces `params.function_calling=legacy`, so Open
-WebUI resolves tool calls natively, potentially over several rounds,
-inside one held-open SSE connection (`docs/compat/openwebui-0.11.3.md`'s
-"(h)" table, row 1: the one real true-HTTP-SSE path that row already
-documented, now given a first consumer). It has none of the
-`ConversationLink`/`remote_chat_id`/recovery-CLI machinery the
-chat-managed path relies on: a mid-stream failure of any kind (decode
-error, size limit, disconnect, timeout) always discards whatever content
-had accumulated and fails the whole turn — there is no `ambiguous` state
-here, because there is no chat for a later `GET` to reconfirm against
-(D25). See ADR-0005 D24's own "UNVERIFIED" note and
-`docs/compat/openwebui-0.11.3.md`'s (j) section for exactly what has not
-yet been checked against a real instance.
+A poll that never resolves within that budget lands in the same
+`CategoryAmbiguous`/`ambiguous` outcome any other chat-managed turn's
+unconfirmed completion already does (ADR-0005 D6) — a real chat exists
+for a later `GET` to resolve, so there is no longer a distinct
+"cannot ever be recovered" state for this case the way D25 (now
+withdrawn) required. `LinkStateless` (migration `0032`) is retired along
+with it: no turn is dispatched statelessly any longer, so no link ever
+reaches that state going forward; the migration itself is not reverted
+(never edit an applied migration), so `'stateless'` remains a
+technically-permitted but unused `CHECK` value, and
+`go run ./cmd/openwebuictl links --state=stateless` still works as a
+query but is expected to return nothing in a deployment that never ran
+the retired code.
 
 ### Table rebuild note
 

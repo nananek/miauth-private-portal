@@ -257,25 +257,23 @@ func eligibleForGeneration(workspace domain.OpenWebUIWorkspace, model domain.Ope
 	return true
 }
 
-// handleCreationPending dispatches a branch's first turn. When this
-// turn's own resolved tool_ids/web_search call for tool use, it hands
-// off to handleCreationPendingStateless (ADR-0005 D24/D25, Issue #93)
-// instead: Open WebUI's native multi-round tool-call loop, reached over
-// Client.StreamTurn, never a remote chat this StartChat path would
-// otherwise pre-create. Everything below this check is unchanged
-// pre-#93 behavior: issue the link's single, never-repeated StartChat,
-// or — if a previous attempt's outcome is unknown — freeze the link
-// ambiguous without ever calling the provider again (ADR-0005 D7: a
-// creation_pending StartChat is never replayed).
+// handleCreationPending dispatches a branch's first turn: issue the
+// link's single, never-repeated StartChat, or — if a previous attempt's
+// outcome is unknown — freeze the link ambiguous without ever calling the
+// provider again (ADR-0005 D7: a creation_pending StartChat is never
+// replayed). This turn's own resolved tool_ids/web_search (below) select
+// StartChat's request shape and confirmation strategy internally (via
+// Client.runTurn — ADR-0005 D27), not a separate dispatch branch here:
+// Issue #93/#120 tried the latter (a chat-less StreamTurn call handled by
+// handleCreationPendingStateless) and found it could never actually run a
+// tool at all, so D27 retired it and returned tool-carrying turns to this
+// same StartChat path.
 func (j *TurnJob) handleCreationPending(
 	ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
 	workspace domain.OpenWebUIWorkspace, model domain.OpenWebUIModel, entry domain.Entry, path TurnPath,
 ) error {
 	toolIDs := j.resolveToolIDs(model.ExternalModelID)
 	webSearch := j.resolveWebSearchEnabled(ctx, model.ExternalModelID)
-	if len(toolIDs) > 0 || webSearch {
-		return j.handleCreationPendingStateless(ctx, job, turn, link, model, entry, path, toolIDs, webSearch)
-	}
 
 	if !link.AllowsInitialStartChat(job.ID) {
 		return j.failPermanent(ctx, turn, link, domain.FailureCategoryLinkNotReady, "link's creation claim does not belong to this job")
@@ -342,7 +340,7 @@ func (j *TurnJob) handleCreationPending(
 	if err != nil {
 		return j.handleCreateError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, model, entry, result, false, false)
+	return j.complete(ctx, turn, link, model, entry, result, false)
 }
 
 // handleCreateError classifies a StartChat failure per the plan's
@@ -397,136 +395,21 @@ func (j *TurnJob) handleCreateError(ctx context.Context, job domain.Job, turn do
 	}
 }
 
-// handleCreationPendingStateless is handleCreationPending's counterpart
-// for a turn whose resolved tool_ids/web_search call for native,
-// multi-round tool execution (ADR-0005 D24, Issue #93): it calls
-// Client.StreamTurn instead of StartChat, and never pre-creates a remote
-// chat at all.
-//
-// Unlike a StartChat call, a StreamTurn call carries none of chat
-// creation's "replaying it would create a second, duplicate remote
-// object" risk — it creates nothing remote to duplicate (ADR-0005 D25) —
-// so this path has no counterpart to handleCreationPending's own
-// turn.Attempt > 0 guard: every delivery of this job, whatever attempt
-// number it is, simply calls StreamTurn again from scratch, the same
-// safe-to-repeat shape resendContinue's continuation retries already
-// have. AllowsInitialStartChat's claim check is still honored, purely as
-// the same defense-in-depth belt this link row's whole lifecycle already
-// gets: only the job that claimed the branch may ever act on it,
-// whichever path it turns out to take.
-//
-// There is deliberately no continuation analogue to this path at all: a
-// link reached through here either fails (LinkFailed, same as a
-// definitive StartChat failure) or succeeds into LinkStateless — never
-// LinkReady — so it can never be continued (see LinkStateless's own doc
-// comment); a reply to it always starts a brand new branch instead, free
-// to go stateless again on its own first turn.
-func (j *TurnJob) handleCreationPendingStateless(
-	ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
-	model domain.OpenWebUIModel, entry domain.Entry, path TurnPath, toolIDs []string, webSearch bool,
-) error {
-	if !link.AllowsInitialStartChat(job.ID) {
-		return j.failPermanent(ctx, turn, link, domain.FailureCategoryLinkNotReady, "link's creation claim does not belong to this job")
-	}
-
-	now := j.clock.Now().UTC()
-	if err := j.repos.OpenWebUITurnLinks.BeginAttempt(ctx, turn.ID, turn.Attempt+1, now); err != nil {
-		return fmt.Errorf("openwebui: turn: begin attempt: %w", err)
-	}
-
-	result, err := j.provider.StreamTurn(ctx, StreamTurnRequest{
-		ModelID:          model.ExternalModelID,
-		Messages:         ProviderMessages(path),
-		NewTurn:          Message{Role: pathRoleUser, Content: stripMentionTagsForProvider(entry.Body)},
-		ToolIDs:          toolIDs,
-		WebSearchEnabled: webSearch,
-		CorrelationID:    turn.RequestID,
-		SentAt:           now,
-	})
-	if err != nil {
-		return j.handleStreamTurnError(ctx, job, turn, link, err)
-	}
-	return j.complete(ctx, turn, link, model, entry, result, false, true)
-}
-
-// handleStreamTurnError classifies a StreamTurn failure (ADR-0005
-// D24/D25, Issue #93). Unlike handleCreateError/handleTurnError, there
-// is no ambiguous outcome anywhere in this function: StreamTurn's own
-// atomicity (one HTTP call, no separate chat-creation step to have
-// half-succeeded) means every failure is already a definitive
-// classification, never a "some prior attempt's result is unknown" case
-// that would need a later lookup to resolve. A transient category is
-// retried, exactly like handleTurnError's own default case, but the
-// retry budget's exhaustion still lands on failPermanent here, never
-// failAmbiguous.
-func (j *TurnJob) handleStreamTurnError(ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink, err error) error {
-	var pe *ProviderError
-	if !errors.As(err, &pe) {
-		return fmt.Errorf("openwebui: turn: stream: %w", err)
-	}
-	switch pe.Category {
-	case CategoryAuthFailed:
-		return j.failPermanent(ctx, turn, link, domain.FailureCategoryAuthFailed, "stream turn rejected the credential")
-	case CategoryClientRejected:
-		return j.failPermanent(ctx, turn, link, domain.FailureCategoryClientRejected, "stream turn rejected the request")
-	case CategoryContractFailed:
-		return j.failPermanent(ctx, turn, link, domain.FailureCategoryContractFailed, "stream turn response did not match the pinned contract")
-	case CategoryPolicyViolation:
-		return j.failPermanent(ctx, turn, link, domain.FailureCategoryPolicyViolation, "stream turn refused by local policy")
-	default: // rate_limited, server_error, transport, timeout — turn_failed and ambiguous are never actually returned by StreamTurn (see its own doc comment), but fall through here just as safely if that ever changed.
-		if ctx.Err() != nil {
-			// A failure that surfaces only because ctx was already
-			// cancelled (Manager shutting down, this job's lease
-			// expiring) must not consume this job's own retry budget —
-			// mirrors handleCreateError's identical cancellation guard.
-			return fmt.Errorf("openwebui: turn: stream: %s", pe.Category)
-		}
-		if !j.isLastAttempt(ctx, job) {
-			return fmt.Errorf("openwebui: turn: stream: %s", pe.Category)
-		}
-		return j.failPermanent(ctx, turn, link, streamExhaustionCategory(pe.Category), "stream turn exhausted its retry budget")
-	}
-}
-
-// streamExhaustionCategory maps a transient openwebui.Category onto the
-// domain.FailureCategory recorded once a StreamTurn's retries are
-// exhausted (ADR-0005 D25: always a definitive failure, never
-// ambiguous — unlike handleTurnError's identically-shaped default case,
-// which has GET-based confirmation to fall back to instead and so
-// freezes ambiguous, with no category, rather than ever recording one of
-// these on a turn).
-func streamExhaustionCategory(cat Category) string {
-	switch cat {
-	case CategoryRateLimited:
-		return domain.FailureCategoryRateLimited
-	case CategoryServerError:
-		return domain.FailureCategoryServerError
-	case CategoryTimeout:
-		return domain.FailureCategoryTimeout
-	default: // transport, turn_failed, ambiguous
-		return domain.FailureCategoryTransport
-	}
-}
-
 // handleReady dispatches a turn on an already-confirmed remote chat:
 // either its first ContinueTurn, or — if a previous attempt's outcome is
 // unknown — a lookup-first retry (ADR-0005 D7's addendum).
 //
-// Unlike handleCreationPending, this never checks the turn's own
-// resolved tool_ids/web_search to consider StreamTurn (ADR-0005 D24,
-// Issue #93): a link only ever reaches LinkReady through a chat-managed
-// StartChat, so by construction its first turn already resolved no tool
-// use, and every later turn on the same link keeps talking to that same
-// established remote chat via the legacy function_calling path (D16/D17)
-// regardless of what a later turn's own tool config would resolve to —
-// there is no remote-chat-preserving way to switch a link that already
-// has one onto the chat-less streaming path mid-conversation. This is a
-// known, documented limitation (docs/operations/configuration.md), not
-// an oversight: a reply that SelectBranch routes here as a continuation
-// stays on legacy tool handling for as long as that branch lives; only a
-// reply SelectBranch treats as starting a brand new branch (a different
-// position, a different model, or simply the branch's very first turn)
-// is ever free to go stateless, in handleCreationPending above.
+// This turn's own resolved tool_ids/web_search (below) are passed to
+// ContinueTurn exactly as handleCreationPending's StartChat call passes
+// them, so a continuation gets native tool execution too whenever its own
+// turn calls for it (ADR-0005 D27, Issue #123) — Client.runTurn decides
+// the request shape and confirmation strategy per turn, not per link.
+// Before D27, a link that already reached LinkReady through a chat-
+// managed StartChat could never switch a later turn onto Issue #93's
+// chat-less streaming mode (there was no remote-chat-preserving way to
+// do so), so every continuation stayed on the legacy function_calling
+// path (D16/D17) regardless of its own tool config — a known, documented
+// limitation this decision resolves rather than merely obsoletes.
 func (j *TurnJob) handleReady(
 	ctx context.Context, job domain.Job, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
 	model domain.OpenWebUIModel, entry domain.Entry, path TurnPath,
@@ -566,7 +449,7 @@ func (j *TurnJob) handleReady(
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, model, entry, result, true, false)
+	return j.complete(ctx, turn, link, model, entry, result, true)
 }
 
 // handleReadyRetry resolves a continuation whose previous attempt's
@@ -598,7 +481,7 @@ func (j *TurnJob) handleReadyRetry(
 			// TurnOutcome.Sources's absence, documented on TurnOutcome
 			// itself, for why.
 			Title: outcome.Title,
-		}, true, false)
+		}, true)
 	case outcome.HasError || !outcome.Found || (outcome.Done && outcome.Content == ""):
 		return j.resendContinue(ctx, job, turn, link, model, entry, path)
 	default: // Found && !Done && !HasError: still generating.
@@ -671,7 +554,7 @@ func (j *TurnJob) resendContinue(
 	if err != nil {
 		return j.handleTurnError(ctx, job, turn, link, err)
 	}
-	return j.complete(ctx, turn, link, model, entry, result, true, false)
+	return j.complete(ctx, turn, link, model, entry, result, true)
 }
 
 // handleTurnError classifies a ContinueTurn failure per the plan's
@@ -736,23 +619,14 @@ func (j *TurnJob) handleLookupError(ctx context.Context, job domain.Job, turn do
 // records chat_create) — plan §5.4 step 7's "初回なら
 // SetCapabilityStatus(chatContinue=verified)".
 //
-// stateless marks a turn that succeeded through StreamTurn (ADR-0005
-// D24/D25, Issue #93, handleCreationPendingStateless) instead of any
-// chat-managed call: isContinuation is always false alongside it (no
-// such turn is ever a continuation — see handleReady's own doc comment),
-// and complete records the link's terminal LinkStateless transition
-// (MarkStateless) here, inside this same transaction, in place of
-// SetRemoteCurrent — the latter's own WHERE state = 'ready' guard would
-// otherwise turn this write into a spurious domain.ErrConflict, since a
-// stateless link never becomes ready. Doing the transition here, not as
-// an earlier separate write the way OnChatCreated's MarkReady call is,
-// is required for D25's own guarantee to actually hold: a crash between
-// an earlier write and this transaction would otherwise leave the link
-// looking unresolved with no lookup able to recover it, exactly the gap
-// D25 exists to rule out.
+// Every completed turn now reaches this through a chat-managed call
+// (StartChat or ContinueTurn — ADR-0005 D27, Issue #123, retired the
+// separate chat-less StreamTurn path complete once also handled, and
+// with it the isContinuation-always-false "stateless" case that wrote
+// MarkStateless in place of SetRemoteCurrent below).
 func (j *TurnJob) complete(
 	ctx context.Context, turn domain.OpenWebUITurnLink, link domain.OpenWebUIConversationLink,
-	model domain.OpenWebUIModel, entry domain.Entry, result TurnResult, isContinuation, stateless bool,
+	model domain.OpenWebUIModel, entry domain.Entry, result TurnResult, isContinuation bool,
 ) error {
 	now := j.clock.Now().UTC()
 	_, err := j.timeline.CreateGeneratedReplyBy(ctx, model.ActorID, entry.ID, result.Content,
@@ -784,23 +658,17 @@ func (j *TurnJob) complete(
 			}, now); err != nil {
 				return fmt.Errorf("set remote correlation: %w", err)
 			}
-			if stateless {
-				if err := repos.OpenWebUILinks.MarkStateless(cctx, link.ID, now); err != nil && !errors.Is(err, domain.ErrConflict) {
-					return fmt.Errorf("mark link stateless: %w", err)
+			if err := repos.OpenWebUILinks.SetRemoteCurrent(cctx, link.ID, result.RemoteCurrentID, now); err != nil {
+				return fmt.Errorf("set remote current: %w", err)
+			}
+			if isContinuation {
+				workspace, err := repos.OpenWebUIWorkspaces.Get(cctx, link.WorkspaceID)
+				if err != nil {
+					return fmt.Errorf("get workspace: %w", err)
 				}
-			} else {
-				if err := repos.OpenWebUILinks.SetRemoteCurrent(cctx, link.ID, result.RemoteCurrentID, now); err != nil {
-					return fmt.Errorf("set remote current: %w", err)
-				}
-				if isContinuation {
-					workspace, err := repos.OpenWebUIWorkspaces.Get(cctx, link.WorkspaceID)
-					if err != nil {
-						return fmt.Errorf("get workspace: %w", err)
-					}
-					if workspace.ChatContinueStatus != domain.CapabilityVerified {
-						if err := repos.OpenWebUIWorkspaces.SetCapabilityStatus(cctx, workspace.ID, workspace.ChatCreateStatus, domain.CapabilityVerified, now); err != nil {
-							return fmt.Errorf("record chat-continue capability: %w", err)
-						}
+				if workspace.ChatContinueStatus != domain.CapabilityVerified {
+					if err := repos.OpenWebUIWorkspaces.SetCapabilityStatus(cctx, workspace.ID, workspace.ChatCreateStatus, domain.CapabilityVerified, now); err != nil {
+						return fmt.Errorf("record chat-continue capability: %w", err)
 					}
 				}
 			}
