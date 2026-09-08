@@ -103,10 +103,9 @@ const (
 	// OPENWEBUI_TIMEOUT because a StreamTurn connection stays open for
 	// Open WebUI's whole native tool-call loop, potentially several
 	// rounds, not one buffered call. Consumed by
-	// internal/provider/openwebui.Client.StreamTurn from this PR on, but
-	// nothing dispatches a turn job to StreamTurn yet — see Issue #93's
-	// own staged-migration plan (streaming mechanism first, tool/
-	// web-search dispatch switched over in a follow-up PR).
+	// internal/provider/openwebui.Client.StreamTurn, and — since D26's
+	// dispatch wiring (TurnJob.handleCreationPending) — reached whenever
+	// a branch's first turn resolves a non-empty tool_ids/web_search.
 	KeyOpenWebUIToolTurnTimeout = "OPENWEBUI_TOOL_TURN_TIMEOUT"
 
 	// KeyOpenWebUIWebSearchEnabled is Issue #72's opt-in web-search flag
