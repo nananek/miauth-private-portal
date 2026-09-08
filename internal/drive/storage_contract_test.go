@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
+	"sort"
 	"testing"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -91,6 +93,58 @@ func testStorageContract(t *testing.T, newStorage func(t *testing.T) Storage) {
 		s := newStorage(t)
 		if err := s.Delete(context.Background(), "never-existed"); err != nil {
 			t.Errorf("Delete of a missing key should be a no-op, got: %v", err)
+		}
+	})
+
+	t.Run("ListReturnsEveryPutKey", func(t *testing.T) {
+		s := newStorage(t)
+		ctx := context.Background()
+		want := []string{"a.bin", "dir/b.bin", "dir/nested/c.bin"}
+		for _, k := range want {
+			if err := s.Put(ctx, k, bytes.NewReader([]byte("x")), 1); err != nil {
+				t.Fatalf("Put %q: %v", k, err)
+			}
+		}
+		got, err := s.List(ctx)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("List = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ListEmptyStorageReturnsEmpty", func(t *testing.T) {
+		s := newStorage(t)
+		got, err := s.List(context.Background())
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("List = %v, want empty", got)
+		}
+	})
+
+	t.Run("ListExcludesDeletedKeys", func(t *testing.T) {
+		s := newStorage(t)
+		ctx := context.Background()
+		if err := s.Put(ctx, "keep", bytes.NewReader([]byte("x")), 1); err != nil {
+			t.Fatalf("Put keep: %v", err)
+		}
+		if err := s.Put(ctx, "gone", bytes.NewReader([]byte("x")), 1); err != nil {
+			t.Fatalf("Put gone: %v", err)
+		}
+		if err := s.Delete(ctx, "gone"); err != nil {
+			t.Fatalf("Delete gone: %v", err)
+		}
+		got, err := s.List(ctx)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 1 || got[0] != "keep" {
+			t.Errorf("List = %v, want [keep]", got)
 		}
 	})
 }

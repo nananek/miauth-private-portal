@@ -1,14 +1,12 @@
 # Drive-backed media storage, Misskey Drive API, and attachments roadmap
 
-- Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
-  icons), PR3 (Misskey-compatible Drive API), PR5 (profile images +
-  favicon fetching), and PR6 (post attachments) complete. PR4
-  (RSS/external-source icons and attribution)'s identity/host mechanism
-  (ADR-0008) was done in its own commit; favicon fetching/storage — left
-  open at the end of PR4 as an explicit owner decision — was folded into
-  PR5 rather than a PR4 follow-up, since both need the same Drive-backed
-  image storage infrastructure (owner decision, 2026-09-08). PR7 not
-  started.
+- Status: **every PR0–PR7 complete — Issue #77's full scope has
+  shipped.** PR4 (RSS/external-source icons and attribution)'s
+  identity/host mechanism (ADR-0008) was done in its own commit; favicon
+  fetching/storage — left open at the end of PR4 as an explicit owner
+  decision — was folded into PR5 rather than a PR4 follow-up, since both
+  need the same Drive-backed image storage infrastructure (owner
+  decision, 2026-09-08).
 - Tracker issue: [Issue #77](https://github.com/nananek/miauth-private-portal/issues/77)
   — "Add app/source icons, RSS attribution, profile images, and
   Drive-backed media storage" (P1)
@@ -442,19 +440,81 @@ Favicon fetching:
 
 ## PR7: Operational hardening
 
-**Status: not started.** Last PR; depends on the full stack above.
+**Status: complete.** Last PR; depended on the full stack above. Issue
+#77's final PR — every acceptance criterion is now implemented.
 
-- Orphaned-file GC via the existing `internal/jobs` durable-job
-  infrastructure, backend-agnostic (keys off the `files` table regardless
-  of `localdisk`/`s3compat`).
-- Backup/restore: local disk gets a `cmd/backupctl` extension or
-  documented directory-level backup; S3 backend backup is documented as
-  "delegate to the object store's own versioning/replication," not
-  reimplemented in this repository.
-- Storage-failure-path tests and dedicated image-validation tests (SVG
-  rejection included). SSRF/oversized-response tests for favicon
-  fetching landed already, in PR5 (`internal/ingest/favicon`'s own test
-  file).
+- **Orphaned-file GC**, backend-agnostic by construction: `internal/drive.
+  Storage` gained a `List` method (implemented for both `Local` and `S3`,
+  the latter through minio-go's `ListObjects`), and `Service.RunOrphanGC`
+  cross-references its output against the new
+  `FileRepository.ListStorageKeys` to delete any object no `files` row
+  references — the safety net for `storeValidatedImage`'s and
+  `DeleteFile`'s own documented best-effort-cleanup failure paths. A new
+  `internal/drive.OrphanGCJob`/`GCScheduler` pair (mirroring
+  `internal/openwebui.CatalogSyncJob`/`CatalogScheduler`'s "one global
+  sweep per tick" shape) runs it on `DRIVE_ORPHAN_GC_INTERVAL` (default
+  `24h`) through the existing `internal/jobs` durable-job infrastructure,
+  registered and scheduled unconditionally in `cmd/server` — Drive has no
+  "off" state, so this sweep always runs regardless of `DRIVE_BACKEND` or
+  how many files exist.
+- **Backup/restore**: `cmd/backupctl`'s row-count summary (`backupTables`)
+  now includes `files`, so `backupctl verify` reports Drive metadata
+  alongside every other core table. The actual object bytes are
+  documented, not reimplemented: `docs/operations/backup-restore.md`'s
+  new "Drive-backed media" section covers `localdisk` (an ordinary
+  directory tree — back it up with any general-purpose tool, ideally on
+  the same schedule/destination as the database) and `s3compat`
+  ("delegate to the object store's own versioning/replication," per
+  plan-77 v2 §2.7's own framing), plus the operational implication of a
+  restore where the database and object storage snapshots come from
+  different points in time (a `files` row whose object went missing —
+  the opposite direction from what orphan GC cleans up).
+- **VirtualActor avatar management** (plan-77 v2 §2.5's explicit "モデル
+  ごとに専用の管理コマンドをopenwebuictlに追加する程度で足りる"
+  recommendation, deferred from PR5): new `openwebuictl avatar-set
+  <model-slug> <image-path>` / `avatar-clear <model-slug>` subcommands,
+  closing Issue #77's own acceptance criterion that both users *and*
+  VirtualActors can set/change/delete a profile image — PR5 only ever
+  covered the user half. Reuses `domain.FilePurposeAvatar` (declared
+  since PR1's migration, never actually assigned by any code path until
+  now — the owner's own avatar reuses an ordinary
+  `FilePurposeAttachment` file already uploaded through the Drive API,
+  matching Aria's real upload-then-set-avatarId sequence, so this is
+  genuinely the first caller `FilePurposeAvatar` existed for) via
+  `drive.Service.CreateSystemFile`.
+- **A genuine bug found and fixed while writing this PR's SSRF regression
+  test**: `drive.Service.UploadFromURL`'s own error wrapping used
+  `fmt.Errorf("%w: %v", ErrUploadFromURLFailed, err)` — a single `%w`
+  verb wraps only `ErrUploadFromURLFailed`, silently dropping the
+  underlying `err` (frequently `safehttp.ErrPolicyViolation`, an SSRF
+  policy rejection) from the resulting error chain, contradicting
+  `ErrUploadFromURLFailed`'s own doc comment's promise that
+  `errors.Is(err, safehttp.ErrPolicyViolation)` would work. Fixed to
+  `fmt.Errorf("%w: %w", ...)` (Go 1.20+'s multi-`%w` support); locked in
+  by `TestService_UploadFromURL_PreservesPolicyViolationInErrorChain`.
+  `internal/ingest/rss`'s own SSRF classification (`classifyDoError`) was
+  checked and found unaffected — it inspects the raw transport error
+  before any re-wrapping, unlike `UploadFromURL`.
+- **Storage-failure-path tests** (new): a working `files` row whose
+  backing object errors out on the storage backend must never be
+  confused with the row not existing at all
+  (`TestService_OpenFile_StorageBackendFailureIsNotConfusedWithNotFound`);
+  a row-insert failure after the object was already stored must clean
+  the object back up
+  (`TestService_CreateFile_CleansUpStorageObjectWhenRowInsertFails`); a
+  failing storage-side delete must not block the row itself from being
+  removed
+  (`TestService_DeleteFile_SucceedsEvenWhenStorageDeleteFails`) — all
+  three exercised through a new `failingStorage` test fixture
+  (`internal/drive/service_test.go`) rather than real backend outages.
+- **Dedicated image-validation tests** (SVG rejection was already
+  covered, from PR1): added an exact dimension-limit boundary test
+  (`TestValidateImage_DimensionLimitIsInclusive`, pinning `>` not `>=`)
+  and an empty-input rejection test. SSRF/oversized-response tests for
+  favicon fetching landed already, in PR5 (`internal/ingest/favicon`'s
+  own test file). (The `entry_files` delete-while-attached edge case
+  PR0 originally left open was already resolved in PR6 itself, not
+  deferred here — see PR6's own entry above for `ErrFileAttached`.)
 
 ## Documentation follow-ups tracked across this feature
 
@@ -472,11 +532,66 @@ Favicon fetching:
   composition (done).
 - New `docs/decisions/000X-drive-storage-boundary.md` ADR (PR1).
 - `docs/operations/configuration.md`: new Drive-related configuration keys
-  (PR1).
-- `docs/operations/backup-restore.md`: local-disk and S3 backup guidance
-  (PR7).
+  (PR1, PR7's `DRIVE_ORPHAN_GC_INTERVAL`) (done).
+- `docs/operations/backup-restore.md`: local-disk and S3 backup guidance,
+  plus `backupctl verify`'s new `files` row count (done, PR7).
 - `docs/operations/runbook.md`: storage failure / orphan GC / Drive
-  incident procedures (PR7).
+  incident procedures (done, PR7).
+
+## Issue #77 acceptance criteria — final cross-check (PR7)
+
+Checked against the tracker issue's own 受け入れ条件 list at the close of
+PR7, the last PR in this roadmap:
+
+1. **新規インストール直後でもfavicon・アプリアイコン・デフォルトアバターが
+   表示される** — ✅ favicon/app icon: PR2's static asset set. Default
+   avatar: `avatarUrl` is correctly `null` until set (PR5); rendering a
+   placeholder for that `null` is Aria's own baseline client
+   responsibility for any Misskey-compatible server, not something this
+   service hosts or generates — see docs/compat/aria-v1.5.11.md's newly
+   added note on this (要実機確認, consistent with this document's
+   existing convention for unverified client-rendering claims).
+2. **RSSソースごとにアイコンと帰属が表示され、system固定ではない** — ✅
+   PR4 (`ActorExternalSource`, host = real feed domain, ADR-0008) + PR5
+   (favicon fetch → actor avatar).
+3. **RSS投稿から元記事とソース情報を確認できる** — ✅ PR4's `note.url` =
+   `ProvenanceURL`; the pre-existing `[news: DisplayName] ...` body
+   marker.
+4. **ユーザーとVirtualActorがプロフィール画像を設定・変更・削除できる** —
+   ✅ User: PR5's `POST /api/i/update {avatarId}` (set/change, explicit
+   `null` to delete). VirtualActor: **closed in this PR** —
+   `openwebuictl avatar-set`/`avatar-clear` (see PR7's own entry above);
+   PR5 had deliberately deferred this half, and it was not picked up
+   again until this final cross-check caught it.
+5. **画像アップロードにサイズ／形式／認可の検証がある** — ✅
+   `DRIVE_MAX_FILE_BYTES`/`ValidateImage` (format + pixel dimensions,
+   SVG rejected) + `ScopeReadDrive`/`ScopeWriteDrive` + per-request
+   ownership checks (PR3).
+6. **Drive API／CLIの設計とDBスキーマ、ローカル保存の実装がある** — ✅
+   PR1 (schema, `Local`/`S3` backends) + PR3 (the Drive API itself). The
+   plan's own §2.5 framed a CLI avatar path as an optional emergency
+   fallback for the owner (Drive API + `i/update` is the primary path),
+   not a required deliverable on its own; PR7 adds one for VirtualActors
+   specifically because, unlike the owner, a model has no other write
+   path to its own avatar at all.
+7. **バックアップ／リストア、孤児GC、ストレージ障害時の挙動をテストする**
+   — ✅ All three landed in this PR: `RunOrphanGC` + `GCScheduler`/
+   `OrphanGCJob`, `backupctl`'s `files` row count, and the new
+   `failingStorage`-based storage-failure-path tests.
+8. **favicon自動取得のSSRF・過大レスポンス・外部追跡リスクをテストする**
+   — ✅ SSRF and oversized-response: `internal/ingest/favicon`'s own test
+   file (PR5). External tracking risk: structurally eliminated by
+   design, not merely tested — `favicon.Fetch` only ever requests a
+   fixed, self-derived `https://<host>/favicon.ico` path; it does not
+   parse or follow any feed-supplied `<icon>`/`<logo>` URL at all
+   (confirmed: `internal/ingest/rss` never parses either field), so
+   there is no arbitrary/tracking URL this service could be tricked into
+   fetching in the first place.
+
+Every acceptance criterion is satisfied; item 4's VirtualActor gap is
+the only one that required new work discovered specifically by this
+final cross-check (rather than mid-PR review), and it is closed in this
+PR's own commit.
 
 ## References
 

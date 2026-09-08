@@ -202,6 +202,16 @@ func run() error {
 	}
 	jobsManager := jobs.NewManager(db.Jobs, jobsCfg, logger)
 
+	// Registered and scheduled unconditionally, like driveSvc itself
+	// above (Drive has no "off" state): Issue #77 PR7's orphan-file GC
+	// sweep reconciles the configured Storage backend against every
+	// files.storage_key on a fixed interval, regardless of which backend
+	// or how many files this deployment currently has.
+	jobsManager.Register(drive.JobTypeOrphanGC, drive.NewOrphanGCJob(driveSvc, logger).Handle)
+	driveGCScheduler := drive.NewGCScheduler(db.Jobs, drive.GCSchedulerConfig{
+		Interval: cfg.Drive.OrphanGCInterval,
+	}, logger)
+
 	// Constructed and seeded only when the feature is on: no
 	// openwebui_workspaces/openwebui_models row is ever written, and
 	// httpserver's VirtualActors resolver stays nil (its safe default),
@@ -568,8 +578,8 @@ func run() error {
 	serviceCtx, cancelServices := context.WithCancel(ctx)
 	defer cancelServices()
 	var wg sync.WaitGroup
-	errCh := make(chan error, 5)
-	wg.Add(2)
+	errCh := make(chan error, 6)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		errCh <- httpserver.Run(serviceCtx, opts, logger, reg)
@@ -578,6 +588,13 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		errCh <- jobsManager.Run(serviceCtx)
+		cancelServices()
+	}()
+	// Unconditional, like driveSvc/driveGCScheduler's own construction
+	// above: Drive has no "off" state to gate this behind.
+	go func() {
+		defer wg.Done()
+		errCh <- driveGCScheduler.Run(serviceCtx)
 		cancelServices()
 	}()
 	if rssScheduler != nil {

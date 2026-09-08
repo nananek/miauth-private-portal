@@ -56,9 +56,11 @@ Opens the file read-only (it is never written to) and reports:
   `internal/storage/sqlite.Migrate` enforces on every server startup (see
   [configuration.md](configuration.md)), so a backup that fails this
   check would also fail to start a server.
-- **Row counts** for `actors`, `entries`, `jobs`, and `external_sources` —
-  enough for an operator to sanity-check the backup contains the data
-  they expect.
+- **Row counts** for `actors`, `entries`, `jobs`, `external_sources`, and
+  (Issue #77 PR7) `files` — enough for an operator to sanity-check the
+  backup contains the data they expect. `files`' row count is Drive
+  *metadata* only (see "Drive-backed media" below for the actual object
+  bytes, which live outside this database).
 
 Add `--deep` to additionally run SQLite's `PRAGMA integrity_check`, a
 full scan of every table and index:
@@ -95,6 +97,58 @@ survive intact — is covered by an automated restore-drill integration
 test (`cmd/backupctl`'s
 `TestRestoreDrill_BackupSurvivesSourceDestructionAndRestoresRelationships`),
 not just documentation.
+
+## Drive-backed media (Issue #77 PR7)
+
+Everything above backs up and restores this database — including the
+`files` table, one row of Drive metadata (owner, purpose, MIME, size,
+`storage_key`, ...) per stored object. **It never touches the actual
+object bytes** a `files` row's `storage_key` points at: those live in
+whichever `internal/drive.Storage` backend `DRIVE_BACKEND` selects
+(see [configuration.md](configuration.md)), entirely outside `DB_PATH`.
+Restoring only the database without also restoring the matching object
+bytes leaves every `files` row pointing at content that may no longer
+exist — plan-77 v2 §2.7's own framing is that reconciling this
+(`internal/drive.Service.RunOrphanGC`, `DRIVE_ORPHAN_GC_INTERVAL`) only
+ever cleans up an object no row references, the opposite direction from
+a row whose object is missing, which is instead a sign a restore's two
+halves (database and object storage) came from different points in
+time and should be redone together from backups taken at the same
+moment.
+
+The right way to back up the object bytes themselves depends on
+`DRIVE_BACKEND`:
+
+- **`localdisk`** (the default): `DRIVE_DATA_DIR` is an ordinary
+  directory tree keyed by `storage_key` — back it up the same way you
+  would any other directory of files on this host (`rsync`, `tar`, a
+  filesystem/volume snapshot, ...) on the same schedule as the database
+  backup above, ideally to the same off-host destination so a restore
+  always pairs a database snapshot with the object tree taken at the
+  same time. This repository does not provide a dedicated tool for this
+  step — it is a plain directory, and every general-purpose backup tool
+  already handles that well.
+- **`s3compat`**: back up the bucket itself by enabling the object
+  store's own versioning and (if it supports it) cross-region or
+  cross-account replication, rather than pulling every object through
+  this service to copy it elsewhere. Real Misskey-shaped deployments at
+  any scale already lean on the object store's own durability/backup
+  story for exactly this reason, and reimplementing bucket-level backup
+  in this repository would duplicate infrastructure the object store
+  already provides more robustly. Recommended, at minimum: enable
+  bucket versioning so an accidental overwrite or delete
+  (`drive/files/delete`, or a bug) can be undone from a previous
+  version rather than being unrecoverable.
+
+Restoring a Drive-backed deployment therefore has one extra step beyond
+"Restoring" above: before starting `bin/server` again, also restore
+`DRIVE_DATA_DIR` (localdisk) or confirm the S3 bucket's current state
+(S3-compat) to the same point in time as the database snapshot you
+restored. A database restored to a point in time when a file existed,
+paired with object storage that already lost that object (or vice
+versa), is exactly the metadata/object mismatch the previous paragraph
+describes — it will not crash the server, but `GET /files/{id}` for that
+file will 404 (localdisk) or fail (S3) until the mismatch is corrected.
 
 ## Known limitation
 

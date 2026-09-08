@@ -161,6 +161,41 @@ rotation" below.
   `mailfetch` process/container is actually running and that
   `IMAP_MAILFETCH_SOCKET` (server side) and `MAILFETCH_SOCKET_PATH`
   (`cmd/mailfetch` side) resolve to the same socket path/volume.
+- **Drive storage backend outage** (`GET /files/{id}` returning 500,
+  `drive/files/create`/`show`/`upload-from-url` failing with a generic
+  server error rather than a client-facing wire error): the `files`
+  table row exists and is intact — this service is not distinguishing "a
+  file that never existed" (404) from "a backend it currently cannot
+  reach" (500) as the same failure — but the storage backend
+  `DRIVE_BACKEND` selects (local disk or S3-compatible) is not answering.
+  For `localdisk`, check `DRIVE_DATA_DIR` is mounted, writable, and has
+  free space; for `s3compat`, check `DRIVE_S3_ENDPOINT` connectivity and
+  that the configured credentials/bucket are still valid. No durable job
+  or retry is involved in the request path itself (Drive routes are
+  synchronous, per docs/compat/aria-v1.5.11.md's Drive API section) —
+  once the backend is reachable again, the very next request succeeds
+  with no operator action needed to "unstick" anything.
+- **Orphaned Drive objects** (Issue #77 PR7): a rare best-effort-cleanup
+  failure in the upload or delete path (see
+  `internal/drive.Service.RunOrphanGC`'s own doc comment for the two
+  documented failure paths that can cause this) can leave a Storage
+  object with no `files` row referencing it — wasted space, not a
+  correctness or availability problem; nothing serves or links to an
+  orphaned object. `internal/drive.GCScheduler` reconciles this
+  automatically every `DRIVE_ORPHAN_GC_INTERVAL` (default `24h`, see
+  [configuration.md](configuration.md)) with no operator action required.
+  To confirm it is running and check its outcome, look for
+  `"drive orphan gc succeeded"` / `"drive orphan gc completed with
+  errors"` log lines (`internal/drive.OrphanGCJob`), or inspect the
+  `drive_orphan_gc` job type directly:
+
+  ```sh
+  go run ./cmd/jobsctl list --type=drive_orphan_gc --limit=10
+  ```
+
+  A sweep completing with `deleted: 0` every time is the expected steady
+  state, not a sign anything is broken — it only ever finds work after
+  one of the rare failure paths above actually occurs.
 - **Suspected database corruption, or before relying on any backup**: see
   `cmd/backupctl`'s `verify` subcommand (see "Backup and restore" below)
   for a read-only schema/row-count check, and its `backup` subcommand for

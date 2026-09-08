@@ -1186,6 +1186,25 @@ opts out of this document's usual null-field-omission rule for this one
 field. PR5 accepts an explicit-null `avatarId` as "remove avatar,"
 per this finding, rather than rejecting it as a validation error.
 
+**A null `avatarUrl`'s own default/placeholder rendering is Aria's
+responsibility, not this service's** (Issue #77 AC: "新規インストール
+直後でもfavicon・アプリアイコン・デフォルトアバターが表示される"). This
+service's obligation is exactly what `userLite`/`userDetailedNotMe`
+already do — the `avatarUrl` key is always present and correctly `null`
+until an owner/model actor's `avatar_file_id` is set (Issue #77 PR5) —
+never to synthesize or host a fallback image of its own. Every
+Misskey-compatible client, Aria included, is expected to render its own
+placeholder (an initial, a generic silhouette, ...) for a `null`
+`avatarUrl`, the same baseline behavior any Misskey server's client
+already needs regardless of this deployment; no traced Aria source
+confirms this specifically (**要実機確認**, this document's existing
+convention for an unverified real-client-rendering claim), but there is
+no `User`/`UserLite` wire field this service could populate instead —
+misskey_dart's schema has no separate "default avatar URL" concept to
+project. The app's *own* favicon/OGP/PWA icons (Issue #77 PR2) are a
+different, already-fully-implemented case: those are this service's own
+static assets with no per-user null state to consider.
+
 **`POST /api/notes/timeline`'s `withFiles` flag is still accepted and
 ignored even after PR6** (`internal/httpserver/noteapi_handlers.go`'s
 `WithFiles *bool` field, per its own comment) — PR6 makes

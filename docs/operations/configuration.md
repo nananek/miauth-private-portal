@@ -154,6 +154,7 @@ catch that class of mistake during local development.
 | `DRIVE_S3_REGION` | no | `""` | Passed to the S3 client when non-empty; most S3-compatible servers (MinIO included) do not require it. |
 | `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. Issue #77 PR5: also bounds an RSS source's favicon fetch (`internal/ingest/favicon.Fetch`'s `maxBytes`) — no separate favicon-specific size configuration key exists. |
 | `DRIVE_MAX_IMAGE_WIDTH` / `DRIVE_MAX_IMAGE_HEIGHT` | no | `8000` | Bounds a raster image's decoded pixel dimensions (`internal/drive.ValidateImage`), independent of `DRIVE_MAX_FILE_BYTES` — a small but pathologically large-dimension image ("decompression bomb") is rejected by this check even when it fits comfortably under the byte-size bound. 1-100000. |
+| `DRIVE_ORPHAN_GC_INTERVAL` | no | `24h` | Issue #77 PR7: how often `internal/drive.GCScheduler` enqueues an orphan-file GC sweep (`RunOrphanGC`), which deletes any object the configured `Storage` backend holds that no `files` row references — the safety net for a rare best-effort-cleanup failure in the upload/delete paths, not a correctness-critical process, hence the deliberately infrequent default. Positive duration. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1211,6 +1212,18 @@ VirtualActor:
   `resolveUserLite` falls back to the same actor-ID-as-username
   projection any other unresolvable author gets, rather than presenting
   a stale or partially-filled remote identity.
+- **its avatar is set only through the CLI, never a wire endpoint**
+  (Issue #77 PR7): a model is never a Drive API caller (it cannot
+  authenticate at all — see the login-capability bullet above), so it
+  has no `POST /api/i/update`-shaped path to its own `avatar_file_id`.
+  `go run ./cmd/openwebuictl avatar-set <model-slug> <local-image-path>`
+  validates and stores the image exactly like a Drive upload
+  (`internal/drive.ValidateImage`, `DRIVE_MAX_FILE_BYTES`/
+  `DRIVE_MAX_IMAGE_WIDTH`/`DRIVE_MAX_IMAGE_HEIGHT`, whichever
+  `DRIVE_BACKEND` this deployment already uses) and points the model's
+  actor at it; `avatar-clear <model-slug>` removes it. `<model-slug>` is
+  the same handle Aria's own `@<slug>@<presentation host>` projection
+  above already shows the owner.
 
 ### Conversation-link state machine (for Issue #53)
 

@@ -139,6 +139,11 @@ const (
 	KeyDriveMaxFileBytes      = "DRIVE_MAX_FILE_BYTES"
 	KeyDriveMaxImageWidth     = "DRIVE_MAX_IMAGE_WIDTH"
 	KeyDriveMaxImageHeight    = "DRIVE_MAX_IMAGE_HEIGHT"
+	// KeyDriveOrphanGCInterval is Issue #77 PR7's orphan-file GC sweep
+	// interval (internal/drive.GCScheduler/RunOrphanGC): how often this
+	// deployment reconciles the configured Storage backend against every
+	// files.storage_key, deleting any object no row references.
+	KeyDriveOrphanGCInterval = "DRIVE_ORPHAN_GC_INTERVAL"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -233,6 +238,7 @@ var knownKeyOrder = []string{
 	KeyDriveMaxFileBytes,
 	KeyDriveMaxImageWidth,
 	KeyDriveMaxImageHeight,
+	KeyDriveOrphanGCInterval,
 }
 
 func isKnownKey(key string) bool {

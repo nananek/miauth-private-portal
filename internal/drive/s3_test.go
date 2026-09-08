@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,16 @@ func (f *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
 				`<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></LocationConstraint>`))
+			return
+		}
+		// ListObjectsV2 (Storage.List's only caller — Issue #77 PR7's
+		// orphan GC): a bucket-root GET carrying ?list-type=2, distinct
+		// from the per-object GET handled below. Every List call in this
+		// package's tests fits in one page, so IsTruncated is always
+		// false here — no pagination support is needed for a fake this
+		// narrow.
+		if r.URL.Query().Get("list-type") == "2" {
+			f.writeListObjectsV2(w, r)
 			return
 		}
 	}
@@ -98,6 +109,40 @@ func (f *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// writeListObjectsV2 serves a single-page ListObjectsV2 response
+// listing every object currently stored under the request's own bucket
+// path prefix ("/<bucket>/"). Fields left at their Go zero value (no
+// xml tag on minio-go's ListBucketV2Result/ObjectInfo means the element
+// name matches the field name exactly) are omitted here since minio-go
+// never reads them for a plain List call: Delimiter, EncodingType,
+// MaxKeys, NextContinuationToken, ContinuationToken, FetchOwner,
+// StartAfter, CommonPrefixes.
+func (f *fakeS3Server) writeListObjectsV2(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	prefix := strings.TrimSuffix(r.URL.Path, "/") + "/"
+	var sb strings.Builder
+	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>`)
+	sb.WriteString("<Name>" + strings.TrimPrefix(prefix, "/") + "</Name><IsTruncated>false</IsTruncated>")
+	for key, body := range f.objects {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		objectKey := strings.TrimPrefix(key, prefix)
+		sb.WriteString("<Contents><Key>" + objectKey + "</Key>" +
+			"<LastModified>2024-01-01T00:00:00.000Z</LastModified>" +
+			`<ETag>&quot;fake-etag&quot;</ETag>` +
+			"<Size>" + strconv.Itoa(len(body)) + "</Size>" +
+			"<StorageClass>STANDARD</StorageClass></Contents>")
+	}
+	sb.WriteString(`</ListBucketResult>`)
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(sb.String()))
 }
 
 func writeS3NotFound(w http.ResponseWriter, key string) {

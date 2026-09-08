@@ -307,11 +307,21 @@ func (s *Service) UploadFromURL(ctx context.Context, in UploadFromURLInput) (dom
 
 	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, in.URL, nil)
 	if err != nil {
-		return domain.File{}, fmt.Errorf("%w: %v", ErrInvalidUploadURL, err)
+		return domain.File{}, fmt.Errorf("%w: %w", ErrInvalidUploadURL, err)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return domain.File{}, fmt.Errorf("%w: %v", ErrUploadFromURLFailed, err)
+		// %w twice (not %w: %v) is required here: err is frequently
+		// safehttp.ErrPolicyViolation (an SSRF-policy rejection — a
+		// redirect into a private/loopback address, a downgraded
+		// scheme, ...), and this type's own doc comment on
+		// ErrUploadFromURLFailed promises callers can distinguish that
+		// case with errors.Is(err, safehttp.ErrPolicyViolation). A
+		// single %w only wraps ErrUploadFromURLFailed, silently
+		// dropping err from the resulting chain and breaking that
+		// promise — caught by
+		// TestService_UploadFromURL_PreservesPolicyViolationInErrorChain.
+		return domain.File{}, fmt.Errorf("%w: %w", ErrUploadFromURLFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -319,7 +329,7 @@ func (s *Service) UploadFromURL(ctx context.Context, in UploadFromURLInput) (dom
 	}
 	data, err := safehttp.ReadLimited(resp.Body, s.cfg.MaxFileBytes)
 	if err != nil {
-		return domain.File{}, fmt.Errorf("%w: %v", ErrUploadFromURLFailed, err)
+		return domain.File{}, fmt.Errorf("%w: %w", ErrUploadFromURLFailed, err)
 	}
 
 	return s.CreateFile(ctx, CreateFileInput{
@@ -453,6 +463,43 @@ func (s *Service) ValidateAttachmentFiles(ctx context.Context, ownerActorID stri
 		}
 	}
 	return nil
+}
+
+// RunOrphanGC deletes every Storage object no files row references
+// (Issue #77 PR7): the safety net for storeValidatedImage's and
+// DeleteFile's own best-effort cleanup comments, either of which can
+// leave a stored object behind with no row pointing at its key if the
+// paired database operation fails at just the wrong moment. It returns
+// how many objects were deleted; a failure deleting one particular key
+// is collected (errors.Join) rather than aborting the sweep, so one bad
+// key never stops every other genuine orphan from being reclaimed.
+//
+// This is backend-agnostic by construction: it only ever compares
+// Storage.List's own key enumeration against
+// FileRepository.ListStorageKeys, so it costs no extra design for
+// S3 versus localdisk (plan-77 v2 §2.7's own framing).
+func (s *Service) RunOrphanGC(ctx context.Context) (deleted int, err error) {
+	keys, err := s.storage.List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("drive: list storage objects: %w", err)
+	}
+	referenced, err := s.repos.Files.ListStorageKeys(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("drive: list referenced storage keys: %w", err)
+	}
+
+	var errs []error
+	for _, key := range keys {
+		if referenced[key] {
+			continue
+		}
+		if delErr := s.storage.Delete(ctx, key); delErr != nil {
+			errs = append(errs, fmt.Errorf("delete orphaned key %q: %w", key, delErr))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errors.Join(errs...)
 }
 
 // OpenFile opens fileID for the anonymous, unauthenticated GET /files/

@@ -13,7 +13,12 @@ import (
 // This is deliberately a small, fixed set (not every table in the
 // schema): enough for an operator to sanity-check that a backup or
 // restored database has the data they expect, not a full schema dump.
-var backupTables = []string{"actors", "entries", "jobs", "external_sources"}
+// "files" was added by Issue #77 PR7: the files table is Drive's own
+// metadata (see docs/operations/backup-restore.md's Drive section) —
+// its row count matters to a Drive-using operator the same way
+// "entries" already does for the timeline, even though the actual
+// object bytes it references live outside this database entirely.
+var backupTables = []string{"actors", "entries", "jobs", "external_sources", "files"}
 
 // Backup writes a consistent, point-in-time snapshot of this database to
 // destPath using SQLite's VACUUM INTO. Unlike copying the underlying

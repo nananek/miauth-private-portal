@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,6 +108,159 @@ func seedOpenwebuictlLink(t *testing.T, dbPath, body string) (linkID string) {
 		t.Fatal(err)
 	}
 	return link.ID
+}
+
+// seedOpenwebuictlModel seeds a workspace and its default model (the
+// same Registry.Seed path seedOpenwebuictlLink uses) without the
+// link/turn scaffolding that helper also builds — Issue #77 PR7's
+// avatar-set/avatar-clear tests only need a model actor to exist.
+// Returns the seeded model's actor slug, the argument these subcommands
+// take.
+func seedOpenwebuictlModel(t *testing.T, dbPath string) (slug string) {
+	t.Helper()
+	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: dbPath, BusyTimeout: 5 * time.Second, MaxOpenConns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Actors.EnsureReservedActors(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := openwebui.NewRegistry(db, db.Repos, openwebui.RegistryConfig{
+		Enabled:          true,
+		BaseURL:          "https://openwebui.example.net",
+		SecretRef:        openwebui.SecretRefAPIKey,
+		WorkspaceName:    "Open WebUI",
+		PresentationHost: "openwebui.example.net",
+		DefaultModelID:   "gpt-oss:20b",
+		OwnerUsername:    "owner",
+	}, nil, nil, nil)
+	if err := registry.Seed(t.Context()); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	workspace, err := db.OpenWebUIWorkspaces.GetEnabled(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := db.OpenWebUIModels.GetByExternalID(t.Context(), workspace.ID, "gpt-oss:20b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.ActorSlug
+}
+
+// writeTestPNG writes a small valid PNG to path, for avatar-set tests
+// that need a real raster image file on disk (internal/drive.
+// ValidateImage rejects anything else).
+func writeTestPNG(t *testing.T, path string) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.Set(x, y, color.RGBA{R: 100, G: 150, B: 200, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode test PNG: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write test PNG: %v", err)
+	}
+}
+
+func TestRunAvatarSet_SetsAndClearsModelAvatar(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "owui.db")
+	setOpenwebuictlTestEnv(t, dbPath)
+	t.Setenv("DRIVE_DATA_DIR", t.TempDir())
+	slug := seedOpenwebuictlModel(t, dbPath)
+
+	imagePath := filepath.Join(t.TempDir(), "avatar.png")
+	writeTestPNG(t, imagePath)
+
+	var out bytes.Buffer
+	if err := run([]string{"avatar-set", slug, imagePath}, &out); err != nil {
+		t.Fatalf("run(avatar-set): %v", err)
+	}
+	if !strings.Contains(out.String(), "set avatar for model "+slug) {
+		t.Errorf("avatar-set output = %q", out.String())
+	}
+
+	db, err := sqlite.Open(t.Context(), sqlite.Config{Path: dbPath, BusyTimeout: 5 * time.Second, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	workspace, err := db.OpenWebUIWorkspaces.GetEnabled(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := db.OpenWebUIModels.GetByActorSlug(t.Context(), workspace.ID, slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := db.Actors.Get(t.Context(), model.ActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actor.AvatarFileID == nil {
+		t.Fatal("actor.AvatarFileID is nil after avatar-set, want it set")
+	}
+	file, err := db.Files.Get(t.Context(), *actor.AvatarFileID)
+	if err != nil {
+		t.Fatalf("Files.Get avatar file: %v", err)
+	}
+	if file.Purpose != domain.FilePurposeAvatar {
+		t.Errorf("stored file purpose = %q, want %q", file.Purpose, domain.FilePurposeAvatar)
+	}
+	if file.OwnerActorID != nil {
+		t.Errorf("stored file OwnerActorID = %v, want nil (a model has no Drive owner)", *file.OwnerActorID)
+	}
+
+	out.Reset()
+	if err := run([]string{"avatar-clear", slug}, &out); err != nil {
+		t.Fatalf("run(avatar-clear): %v", err)
+	}
+	if !strings.Contains(out.String(), "cleared avatar for model "+slug) {
+		t.Errorf("avatar-clear output = %q", out.String())
+	}
+	actorAfterClear, err := db.Actors.Get(t.Context(), model.ActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actorAfterClear.AvatarFileID != nil {
+		t.Errorf("actor.AvatarFileID = %v after avatar-clear, want nil", *actorAfterClear.AvatarFileID)
+	}
+}
+
+func TestRunAvatarSet_UnknownSlugFails(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "owui.db")
+	setOpenwebuictlTestEnv(t, dbPath)
+	t.Setenv("DRIVE_DATA_DIR", t.TempDir())
+	seedOpenwebuictlModel(t, dbPath)
+
+	imagePath := filepath.Join(t.TempDir(), "avatar.png")
+	writeTestPNG(t, imagePath)
+
+	err := run([]string{"avatar-set", "no-such-model", imagePath}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "resolve model") {
+		t.Fatalf("run(avatar-set, unknown slug) error = %v, want a resolve-model complaint", err)
+	}
+}
+
+func TestRunAvatarSet_UsageErrorOnMissingArguments(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "owui.db")
+	setOpenwebuictlTestEnv(t, dbPath)
+	if err := run([]string{"avatar-set", "slug-only"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("run(avatar-set, missing image path) error = %v, want usage", err)
+	}
+	if err := run([]string{"avatar-clear"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("run(avatar-clear, missing slug) error = %v, want usage", err)
+	}
 }
 
 func TestRunValidatesArguments(t *testing.T) {
