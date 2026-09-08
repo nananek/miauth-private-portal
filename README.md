@@ -198,7 +198,12 @@ work:
   Issue #23; the Drive API shipped in Issue #77 PR3, profile avatars +
   RSS source favicons in Issue #77 PR5, and post attachments in Issue #77
   PR6 — see [docs/compat/aria-v1.5.11.md](docs/compat/aria-v1.5.11.md)'s
-  "Drive API and note attachments" section.)
+  "Drive API and note attachments" section; another actor's profile
+  view and notes list shipped in Issue #114 — see that document's
+  "POST /api/users/show and POST /api/users/notes" section. Starting an
+  actual Open WebUI/Misskey "Chat" conversation from a viewed profile
+  still ends at the same `/api/chat/*` non-goal — Issue #114 makes the
+  profile and its notes viewable, not Chat itself.)
 - **No note editing**: `notes/update` is not implemented.
 - **Single-process, single-writer SQLite only**: there is no horizontal
   scaling and no PostgreSQL backend; this is a single-owner deployment
