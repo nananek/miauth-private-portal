@@ -145,6 +145,15 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 | `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
+| `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0007): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
+| `DRIVE_DATA_DIR` | no | `./data/drive` | The `localdisk` backend's root directory (`internal/drive.Local`). Must not be empty when `DRIVE_BACKEND=localdisk`; this package does not check it exists on disk — `internal/drive.Local` fails closed at first use (`Put`/`Get`/`Delete`) if it does not, the same "config validates shape, the consumer validates reachability" split `DB_PATH` already has. |
+| `DRIVE_S3_ENDPOINT` | required if `DRIVE_BACKEND=s3compat` | `""` | The S3-compatible API's `host[:port]`, no scheme (`minio-go`'s own convention) — for example `minio.internal:9000`, or an AWS S3 regional endpoint. |
+| `DRIVE_S3_BUCKET` | required if `DRIVE_BACKEND=s3compat` | `""` | The single bucket every Drive file is stored under. `internal/drive.S3` never creates or configures it; it must already exist. |
+| `DRIVE_S3_ACCESS_KEY_ID` / `DRIVE_S3_SECRET_ACCESS_KEY` | required if `DRIVE_BACKEND=s3compat` | `""` | S3 credentials. Never logged or returned to a client; `Config.Redacted()` shows only whether each is set. Unlike `OPENWEBUI_API_KEY`, these are not stored via the `secret_ref` indirection (`internal/openwebui/registry.go`'s pattern of persisting only a configuration key's *name* to a database row) — this PR persists no Drive configuration to any database row for a `secret_ref` to name. A future PR that does add one should reuse that same indirection rather than storing a raw credential a second time. |
+| `DRIVE_S3_USE_SSL` | no | `true` | Selects `https` (default) or `http` against `DRIVE_S3_ENDPOINT`. |
+| `DRIVE_S3_REGION` | no | `""` | Passed to the S3 client when non-empty; most S3-compatible servers (MinIO included) do not require it. |
+| `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. |
+| `DRIVE_MAX_IMAGE_WIDTH` / `DRIVE_MAX_IMAGE_HEIGHT` | no | `8000` | Bounds a raster image's decoded pixel dimensions (`internal/drive.ValidateImage`), independent of `DRIVE_MAX_FILE_BYTES` — a small but pathologically large-dimension image ("decompression bomb") is rejected by this check even when it fits comfortably under the byte-size bound. 1-100000. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -1409,6 +1418,48 @@ Migration `0016` (widening `actors.actor_type` to admit
 `-- migrate:rebuild` directive documented under "Migrations" above; read
 that subsection for what the directive does and why it was necessary
 here specifically.
+
+## Drive storage foundation (Issue #77 PR1)
+
+`internal/drive` is the storage foundation for Issue #77's Misskey-compatible
+Drive API, profile avatars, external-source favicons, and post attachments
+(PR3-PR6). This PR (PR1) adds only the foundation — no HTTP endpoint, job, or
+repository reads or writes through it yet.
+
+- `Storage` (`internal/drive/storage.go`) is a narrow `Put`/`Get`/`Delete`
+  interface over opaque byte blobs, keyed by a caller-assigned string. It
+  knows nothing about HTTP, the Misskey wire format, or the `files` table's
+  metadata — persistence and provider boundaries stay behind this narrow
+  interface (AGENTS.md), matching how `internal/ingest/safehttp` stays
+  ignorant of any specific feed adapter.
+- Two implementations exist from this PR, selected once for a deployment's
+  whole lifetime by `DRIVE_BACKEND` (see "Known configuration keys" above):
+  `Local` (`internal/drive/localdisk.go`), storing each key as a file under
+  `DRIVE_DATA_DIR` with intermediate directories created on demand and
+  every key checked against `filepath.IsLocal` before touching the
+  filesystem (rejecting a traversal attempt rather than silently
+  renormalizing it into a different, still-safe path); and `S3`
+  (`internal/drive/s3.go`), reaching an S3-compatible store (AWS S3 or a
+  self-hosted MinIO) through `minio-go` — chosen over the full AWS SDK for
+  Go v2 because this deployment targets "some S3-compatible object store,"
+  not AWS-specific features (see ADR-0007).
+- `ValidateImage` (`internal/drive/validate.go`) decodes an upload's
+  claimed image structure with `image.DecodeConfig` against an allowlist
+  (PNG, JPEG, WebP) — never trusting a client-declared `Content-Type` or
+  file extension. SVG is rejected by this same fails-to-decode path: it is
+  XML, not any of these formats' binary header, so no dedicated
+  SVG-detection code exists or is needed (ADR-0007).
+- The `files` table (migration `0024_files.sql`) holds one row per stored
+  object's metadata (`purpose`, `mime`, `byte_size`, `sha256`,
+  `storage_key`, optional `width`/`height`, optional `owner_actor_id`). No
+  repository reads or writes it yet; PR3/PR4/PR5/PR6 add the use case that
+  populates it, each through its own repository added when that use case
+  exists, rather than this PR guessing at an interface nothing calls yet.
+- See [ADR-0007](../decisions/0007-drive-storage-boundary.md) for the
+  backend-selection, credential, and image-validation design decisions,
+  and [`docs/roadmap/media-drive.md`](../roadmap/media-drive.md) for the
+  full PR0-PR7 breakdown this foundation is the second step of (after
+  PR0's Aria/misskey_dart contract investigation).
 
 ## Adding a source adapter
 
