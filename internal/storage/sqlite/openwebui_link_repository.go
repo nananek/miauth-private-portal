@@ -238,6 +238,26 @@ func (r *openWebUIConversationLinkRepository) SetRemoteCurrent(ctx context.Conte
 	return requireRowAffectedConflict(res)
 }
 
+// MarkStateless records that a creation_pending link's turn completed
+// through StreamTurn (ADR-0005 D24/D25, Issue #93) rather than
+// StartChat. It carries no failure category — unlike MarkFailed/MarkDead
+// via markTerminal, this terminal state records success, not failure —
+// so it is not built on that shared helper. TurnJob.complete is its only
+// caller, from inside the same transaction that records the turn's own
+// domain.TurnSucceeded outcome.
+func (r *openWebUIConversationLinkRepository) MarkStateless(ctx context.Context, id string, at time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE openwebui_conversation_links
+		 SET state = 'stateless', last_transition_at = ?, updated_at = ?
+		 WHERE id = ? AND state = 'creation_pending'`,
+		formatTime(at), formatTime(at), id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
 func scanOpenWebUIConversationLink(row rowScanner) (domain.OpenWebUIConversationLink, error) {
 	var l domain.OpenWebUIConversationLink
 	var state, claimedAt, lastTransitionAt, createdAt, updatedAt string

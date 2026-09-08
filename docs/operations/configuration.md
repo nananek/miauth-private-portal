@@ -145,7 +145,7 @@ catch that class of mistake during local development.
 | `OPENWEBUI_MAX_CONTEXT_MESSAGES` | no | `100` | Issue #53's bound on how many prior-turn messages (including the new one) a single request may carry, independent of `OPENWEBUI_MAX_REQUEST_BYTES` — a byte bound alone would let a thread of many short messages slip through uncapped. 1-1000. Not yet consumed by anything. |
 | `OPENWEBUI_WEB_SEARCH_ENABLED` | no | unset | Issue #72's opt-in, made tri-state by Issue #75 AC#11 (ADR-0005 D21): unset (the default) resolves `features.web_search` per model, from that model's own most recently synced `GET /api/models` `info.meta.defaultFeatureIds`; `true`/`false` overrides every model uniformly regardless of its own default. Independent of, and never inferred from, any per-model web-search setting configured in the Open WebUI instance's own admin/web UI — Open WebUI does not apply a model's web-UI tool/web-search configuration to API-key-authenticated callers (only requests carrying a UI session id get that auto-injection; an API caller must ask explicitly); `defaultFeatureIds` is a separate value the same `GET /api/models` response already returns to any caller. The target Open WebUI instance must also have its own `web.search.enable` admin setting and an actual search backend configured — this key alone does not make web search work end to end. |
 | `OPENWEBUI_VIEWER_BASE_URL` | no | unset | Issues #81+#84's one new key (ADR-0005 D23): a browser-reachable HTTPS origin for the *same* instance `OPENWEBUI_BASE_URL` names (they may differ — a tailnet hostname this server dials vs. one a browser resolves). When set, a generated reply's text gains an owner-only "view in Open WebUI" link (`<value>/c/<remote_chat_id>`) and this deployment starts requesting `background_tasks.title_generation` on each new chat's first turn, so a generated title can be shown too (subject to a **要実機確認** synchronous/asynchronous timing gap — see `docs/compat/openwebui-0.11.3.md`'s point (i) and ADR-0005 D23: a title that has not appeared yet by the time this adapter checks is simply not shown, never wrong). Unlike `OPENWEBUI_BASE_URL`, it is **not** required to appear in `OPENWEBUI_ALLOWED_ORIGINS` — this server never makes a request to it, so D11's SSRF policy does not apply; validation only checks its shape (HTTPS origin, no userinfo/path/query/fragment). Leaving it unset reproduces pre-#84 behavior exactly: no link, no title-generation request. |
-| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Issue #93's own per-HTTP-call bound for `internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24) — kept separate from `OPENWEBUI_TIMEOUT` because a `StreamTurn` connection stays open for Open WebUI's whole native tool-call loop (potentially several rounds), not one buffered call. Must be a positive duration. Consumed by `Client.StreamTurn` from this PR on, but nothing dispatches a turn job to it yet — see Issue #93's own staged-migration plan: this PR ships the streaming mechanism, and a follow-up PR switches tool/web-search-using turns over to it. |
+| `OPENWEBUI_TOOL_TURN_TIMEOUT` | no | `10m` | Issue #93's own per-HTTP-call bound for `internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24) — kept separate from `OPENWEBUI_TIMEOUT` because a `StreamTurn` connection stays open for Open WebUI's whole native tool-call loop (potentially several rounds), not one buffered call. Must be a positive duration. `TurnJob` dispatches a branch's first turn to `StreamTurn` (ADR-0005 D26) whenever that turn's own resolved `tool_ids`/`web_search` is non-empty — see "Native multi-round tool execution (Issue #93)" below for the full dispatch rule. |
 | `DRIVE_BACKEND` | no | `localdisk` | Issue #77 PR1 (ADR-0007): selects the `internal/drive.Storage` implementation, `localdisk` or `s3compat`. Unlike `RSS_ENABLED`/`OPENWEBUI_ENABLED` there is no separate feature-flag key — Drive has no "off" state, only a choice of backend — so every field below is validated on every startup, not gated behind an enable flag. A deployment picks exactly one backend for its whole lifetime; there is no per-file/per-request switch and no migration tooling between backends. Nothing reads through this configuration yet (no HTTP endpoint, job, or repository exists until PR3/PR4/PR5/PR6 build one). |
 | `DRIVE_DATA_DIR` | no | `./data/drive` | The `localdisk` backend's root directory (`internal/drive.Local`). Must not be empty when `DRIVE_BACKEND=localdisk`; this package does not check it exists on disk — `internal/drive.Local` fails closed at first use (`Put`/`Get`/`Delete`) if it does not, the same "config validates shape, the consumer validates reachability" split `DB_PATH` already has. |
 | `DRIVE_S3_ENDPOINT` | required if `DRIVE_BACKEND=s3compat` | `""` | The S3-compatible API's `host[:port]`, no scheme (`minio-go`'s own convention) — for example `minio.internal:9000`, or an AWS S3 regional endpoint. |
@@ -554,11 +554,18 @@ rather than proceeding on a corrupt schema.
 
 Use the directive only when a rebuild is genuinely required; adding a
 table or a nullable column never needs it. `0016_actors_virtual_model.sql`
-is the first and so far only migration that does: it widened
-`actors.actor_type`'s `CHECK` and replaced `UNIQUE(actor_type)` with a
-partial unique index over the singleton types, so an Open WebUI model's
-VirtualActor row (Issue #52) can exist alongside the owner, assistant,
-and system actors.
+is the first migration that does: it widened `actors.actor_type`'s
+`CHECK` and replaced `UNIQUE(actor_type)` with a partial unique index
+over the singleton types, so an Open WebUI model's VirtualActor row
+(Issue #52) can exist alongside the owner, assistant, and system actors.
+`0027_actors_external_source_type.sql` (Issue #77 PR4) widens the same
+`CHECK` list again, for RSS-kind `external_sources` actors.
+`0032_openwebui_links_stateless.sql` (Issue #93 PR2, ADR-0005 D24/D25)
+is the first to rebuild a *different* table: it widens
+`openwebui_conversation_links.state`'s `CHECK` list to admit
+`'stateless'`, the terminal state a branch reaches when its turn was
+served through the native multi-round tool-execution path instead of a
+chat-managed one.
 
 ## Durable jobs
 
@@ -1455,18 +1462,38 @@ rather than dropped, the same unregistered-job-type recovery path
 `LLM_ENABLED` already relies on — `jobsctl` can list and requeue it once
 generation is turned back on.
 
-### Native multi-round tool execution mechanism (Issue #93, mechanism only)
+### Native multi-round tool execution (Issue #93)
 
 `internal/provider/openwebui.Client.StreamTurn` (ADR-0005 D24/D25) is a
-second, independent turn method the adapter now has, alongside the
+second, independent turn method the adapter has, alongside the
 `StartChat`/`ContinueTurn` path the "Outbound turn bridge" section above
-describes in full. **`TurnJob` does not call it yet** — every turn,
-including a tool/web-search-using one, still goes through the
-chat-managed path unchanged, per Issue #93's own staged migration plan
-(implement the streaming mechanism first, switch tool/web-search
-dispatch over in a follow-up PR). This section exists only so an operator
-reading `OPENWEBUI_TOOL_TURN_TIMEOUT`'s own table row above is not left
-wondering what reads it.
+describes in full. **`TurnJob.handleCreationPending` dispatches to it
+(ADR-0005 D26)**, instead of `StartChat`, whenever a branch's first
+turn's own resolved `tool_ids`/`web_search` (the same per-model
+resolution the "Outbound turn bridge" section's model-selection table
+already reads from `ToolConfigCache`/`FeatureDefaultCache`) is non-empty
+— tool/web-search-using turns no longer force `params.function_calling=
+legacy` (D17) once they take this path. **Scoped to a branch's first
+turn only**: a continuation on an already-`ready` link (a reply that
+`SelectBranch` routes onto an existing chat) always stays on
+`ContinueTurn`, even if that specific turn's own resolved config would
+now call for tool use — there is no remote-chat-preserving way to move
+an established chat-managed link onto the chat-less streaming path
+mid-conversation. A reply wanting native tool execution that is not
+itself continuing such a link (a different position, a different model,
+or simply a branch's own first message) is unaffected and free to go
+stateless on its own first turn.
+
+A successful stateless turn's link lands in a new terminal state,
+`LinkStateless` (migration `0032`), never `LinkReady`: no remote chat
+was ever created, so nothing exists for a later reply to continue —
+`AllowsContinue`'s existing `state == LinkReady` check already routes
+any such reply to a brand new branch, the same as a reply to a failed or
+dead link would. `go run ./cmd/openwebuictl links --state=stateless`
+lists these for operator visibility; there is nothing to recover on them
+(D25: the outcome — success or failure — is already fully known by the
+time the link reaches a terminal state at all), so none of the owner
+recovery subcommands (`confirm`/`abandon`/`freeze`) apply.
 
 `StreamTurn` sends `stream:true` with **no** `chat_id`/`parent_id`/`id`/
 `user_message`/`background_tasks`/`params` key — this mode manages no

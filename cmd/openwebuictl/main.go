@@ -394,7 +394,7 @@ func runAvatarClear(ctx context.Context, db *sqlite.DB, _ *config.Config, args [
 
 func validLinkState(state domain.LinkState) bool {
 	switch state {
-	case domain.LinkCreationPending, domain.LinkReady, domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead:
+	case domain.LinkCreationPending, domain.LinkReady, domain.LinkAmbiguous, domain.LinkFailed, domain.LinkDead, domain.LinkStateless:
 		return true
 	default:
 		return false

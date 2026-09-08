@@ -232,6 +232,20 @@ const (
 	LinkFailed LinkState = "failed"
 	// LinkDead is a terminal owner decision to abandon the branch.
 	LinkDead LinkState = "dead"
+	// LinkStateless is a branch whose single turn was served through
+	// Client.StreamTurn (ADR-0005 D24/D25, Issue #93) instead of
+	// StartChat: no remote chat was ever created, by design, so there is
+	// nothing for a continuation to attach to and nothing an owner could
+	// recover — the turn's own success or failure is already known and
+	// final (D25's "no ambiguous outcome" guarantee). Reached only from
+	// LinkCreationPending, and never left: AllowsContinue's LinkReady-only
+	// check already excludes it, so SelectBranch treats any later reply
+	// to this branch as starting a brand new one, exactly like a reply to
+	// a failed or dead link would. Unlike LinkFailed/LinkDead, reaching
+	// this state is success, not failure — the turn's own
+	// domain.TurnSucceeded status (recorded in the same transaction, see
+	// TurnJob.complete) is what actually says so.
+	LinkStateless LinkState = "stateless"
 )
 
 // LinkEvent names one thing that can happen to a conversation link.
@@ -263,6 +277,11 @@ const (
 	// LinkEventOwnerAbandoned is an explicit owner decision to abandon
 	// the branch rather than adopt an uncertain remote chat.
 	LinkEventOwnerAbandoned LinkEvent = "owner_abandoned"
+	// LinkEventServedStateless reports that the claimed branch's turn
+	// completed through StreamTurn (ADR-0005 D24/D25, Issue #93) rather
+	// than StartChat — success or failure both already fully known, with
+	// no remote chat ever created for either outcome to attach to.
+	LinkEventServedStateless LinkEvent = "served_stateless"
 )
 
 // linkTransitions is the whole state machine, written out so that
@@ -274,6 +293,7 @@ var linkTransitions = map[LinkState]map[LinkEvent]LinkState{
 		LinkEventConfirmed:         LinkReady,
 		LinkEventDefinitiveFailure: LinkFailed,
 		LinkEventUncertainCreation: LinkAmbiguous,
+		LinkEventServedStateless:   LinkStateless,
 	},
 	LinkReady: {
 		LinkEventUncertainContinuation: LinkAmbiguous,
@@ -365,8 +385,12 @@ func (l OpenWebUIConversationLink) AllowsContinue() bool { return l.State == Lin
 func (l OpenWebUIConversationLink) AllowsAutoRetry() bool { return false }
 
 // IsTerminal reports whether the link can no longer change state.
+// LinkStateless is terminal in exactly this structural sense — absent
+// from linkTransitions' map, like LinkFailed/LinkDead — even though,
+// unlike them, reaching it is success rather than failure (see
+// LinkStateless's own doc comment).
 func (l OpenWebUIConversationLink) IsTerminal() bool {
-	return l.State == LinkFailed || l.State == LinkDead
+	return l.State == LinkFailed || l.State == LinkDead || l.State == LinkStateless
 }
 
 // TurnProviderStatus is one turn's outcome. Unlike LinkState it is a
@@ -787,6 +811,22 @@ type OpenWebUIConversationLinkRepository interface {
 	// pointer. Callers record it only once the provider reports the turn
 	// done (ADR-0005 D3).
 	SetRemoteCurrent(ctx context.Context, id string, remoteCurrentID *string, at time.Time) error
+	// MarkStateless records that a creation_pending link's turn completed
+	// through StreamTurn rather than StartChat (ADR-0005 D24/D25, Issue
+	// #93): a terminal transition reached only from creation_pending,
+	// with no failure category (like MarkReady, this is the record of a
+	// definite, known outcome — here always success, since a StreamTurn
+	// failure goes through MarkFailed via TurnJob.failPermanent instead,
+	// unchanged from the chat-managed path). Called from inside the same
+	// transaction that creates the turn's own generated reply
+	// (TurnJob.complete), never as a separate earlier write the way
+	// OnChatCreated's MarkReady call is: unlike chat creation, a
+	// StreamTurn call has no earlier "the remote side effect definitely
+	// happened" checkpoint to record ahead of the turn's own outcome, so
+	// there is nothing to gain from writing it any earlier — and D25's
+	// whole point is that no crash window may ever leave this link
+	// looking unresolved.
+	MarkStateless(ctx context.Context, id string, at time.Time) error
 }
 
 // OpenWebUITurnLinkRepository persists per-turn correlation rows.

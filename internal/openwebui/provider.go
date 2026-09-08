@@ -283,6 +283,17 @@ type Provider interface {
 	// before ever retrying a continuation whose previous attempt's
 	// outcome is unknown.
 	LookupTurnOutcome(ctx context.Context, remoteChatID, assistantMessageID string) (TurnOutcome, error)
+	// StreamTurn runs a turn over Open WebUI's native, multi-round
+	// tool-execution path (ADR-0005 D24/D25, Issue #93) instead of the
+	// chat-managed path the three methods above use: no remote chat is
+	// ever created, so there is no OnChatCreated hook and nothing for a
+	// later LookupTurnOutcome to confirm. TurnJob.handleCreationPending
+	// calls it, instead of StartChat, only for a branch's first turn when
+	// this turn's own resolved tool_ids/web_search indicate tool use —
+	// never for a continuation on an already-ready link (see
+	// TurnJob.handleReady's own doc comment for why that stays on the
+	// chat-managed path unconditionally).
+	StreamTurn(ctx context.Context, req StreamTurnRequest) (TurnResult, error)
 }
 
 // Phase names which of Provider's three calls a ProviderError came

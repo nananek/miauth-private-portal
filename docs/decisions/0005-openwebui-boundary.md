@@ -898,19 +898,18 @@ hanging on an empty `content`.
 
 **Decision: a new method, `internal/provider/openwebui.Client.StreamTurn`
 (`openwebui.StreamTurnRequest`/reuses `openwebui.TurnResult`), implements
-this path as a second, independent turn mode — mechanism only, in this
-PR. Nothing dispatches a tool/web-search-using turn to it yet.** Issue
-#93's own write-up frames the migration as staged ("streaming を実装し、
-tool/web-search を使う呼び出しだけ native へ切り替え、問題があれば legacy
-へ戻せるようにする" — implement streaming first, then switch only tool/
+this path as a second, independent turn mode.** Issue #93's own
+write-up frames the migration as staged ("streaming を実装し、tool/
+web-search を使う呼び出しだけ native へ切り替え、問題があれば legacy へ戻
+せるようにする" — implement streaming first, then switch only tool/
 web-search calls over, with a way back to legacy if it misbehaves); this
-PR is stage one. `TurnJob` (`internal/openwebui/turnjob.go`) keeps
-sending every turn — tool/web-search-using ones included — through
-`StartChat`/`ContinueTurn` exactly as D16/D17 describe, unchanged, until
-a follow-up PR wires the dispatch switch. Declaring the mechanism inside
-this same ADR now, ahead of that wiring, follows the pattern D22/D23
-already set (a decision recorded and shipped as soon as its own scope is
-settled, not held back to be bundled with a later PR's).
+section (D24) is stage one, the mechanism itself. **Amended by D26
+(Issue #93, same PR series): stage two — `TurnJob` actually dispatching
+tool/web-search-using turns to this mechanism — followed immediately
+after, on a new branch's first turn only.** Declaring the mechanism
+inside this same ADR ahead of D26's own wiring follows the pattern
+D22/D23 already set (a decision recorded and shipped as soon as its own
+scope is settled, not held back to be bundled with a later section's).
 
 The new mode's request shape is deliberately minimal, not merely
 `completionsRequestBody` with `stream:true`: it sends `model`, `stream:
@@ -1014,6 +1013,96 @@ purchase, a message send) is ever added to this deployment's tool_ids**,
 since D25's safety argument depends specifically on every currently
 configured tool being idempotent-enough to re-run for free.
 
+### D26. `TurnJob` dispatches a branch's first turn to StreamTurn when its resolved tool config calls for it — and never a continuation
+
+D24 built the mechanism; this is Issue #93's own "switch tool/web-search
+calls over" stage. `TurnJob.handleCreationPending`
+(`internal/openwebui/turnjob.go`) now resolves `tool_ids`/`web_search`
+(the same `resolveToolIDs`/`resolveWebSearchEnabled` calls D20/D21
+already made) *before* deciding which provider call to make: a non-empty
+resolution hands off to `handleCreationPendingStateless`, which calls
+`StreamTurn` instead of `StartChat`. Everything else about
+`handleCreationPending` — the `AllowsInitialStartChat` claim check, the
+per-thread lock `Handle` already took, path (re)validation — is
+unchanged and shared by both branches, so the split is purely about
+which provider method eventually gets called and what the link records
+about the outcome.
+
+**Scope: only a branch's first turn ever considers this switch.** A
+continuation on an already-`ready` link (`handleReady`,
+`resendContinue`, `handleReadyRetry`) never re-resolves the question and
+always stays on `ContinueTurn`, even if that specific turn's own tool
+config would now resolve to tool use. This is a deliberate, documented
+limitation, not an oversight: a link only ever reaches `LinkReady`
+through a chat-managed `StartChat`, and there is no remote-chat-
+preserving way to move a link that already has one onto the chat-less
+streaming path mid-conversation — StreamTurn creates no chat for a
+continuation to attach to in the first place. A reply that wants native
+tool execution and is *not* eligible to continue an existing ready link
+(a different position, a different model, or simply a branch's first
+message) is unaffected: it starts a new branch through
+`handleCreationPending` exactly as before, free to go stateless there.
+
+**A successful stateless turn reaches a new terminal `LinkState`,
+`LinkStateless` (migration `0032`, a `-- migrate:rebuild` widening the
+`state` `CHECK` list the same way `0016`/`0027` did for
+`actors.actor_type`), never `LinkReady`.** Nothing in this state was
+available to D5/D19's branch rule before Issue #93; `AllowsContinue`'s
+existing `state == LinkReady` check already excludes it with no change
+needed there, so `SelectBranch` treats any later reply to a stateless
+branch exactly like a reply to a failed or dead one: it always starts a
+new branch, free to go stateless again on its own first turn. The
+transition is written by a new repository method, `MarkStateless`, whose
+one caller is `TurnJob.complete` — inside the *same* transaction that
+records the turn's own `succeeded` outcome and creates its generated
+reply, never as an earlier separate write the way `OnChatCreated`'s
+`MarkReady` call is for the chat-managed path. This placement is load-
+bearing, not a style choice: a `StreamTurn` call has no earlier "the
+remote side effect definitely happened" checkpoint the way chat creation
+does (there is no remote side effect at all), so there is nothing to
+gain from writing the transition any earlier — and D25's own "no
+`ambiguous` outcome, ever" guarantee would not actually hold if a crash
+between an earlier write and this transaction could leave a link stuck
+looking unresolved with no lookup able to recover it. `complete` takes a
+new `stateless bool` parameter for this: when true, it writes
+`MarkStateless` in place of `SetRemoteCurrent` (whose own `WHERE state =
+'ready'` guard would otherwise turn every stateless completion into a
+spurious `ErrConflict`, since a stateless link never becomes ready) and
+skips the `isContinuation` capability-verification block, which only
+ever applies to the chat-managed path.
+
+**A StreamTurn failure classifies through a new function,
+`handleStreamTurnError`, structurally simpler than `handleCreateError`/
+`handleTurnError`: there is no `ambiguous` branch anywhere in it (D25).**
+A definitive category (`auth_failed`, `client_rejected`,
+`contract_failed`, `policy_violation`) fails the turn and freezes the
+link `failed` on the very first attempt, the same as a StartChat
+creation failure — even though, unlike chat creation, a stateless call
+could safely have been retried; these categories simply are not worth
+retrying regardless of path. Every other category is retried up to the
+job's own `MaxAttempts`, exactly like a chat-managed continuation's
+bounded retry — but where that path's exhaustion freezes the link
+`ambiguous` (a GET lookup might still resolve it later), this path's
+exhaustion calls `failPermanent` instead, with the *specific* provider
+category preserved as the turn's own `domain.FailureCategory`
+(`rate_limited`/`server_error`/`timeout` map onto their own
+already-declared-but-previously-unused constants; anything else,
+`transport`) rather than a generic placeholder — there being no
+`ambiguous` state left to absorb the "which kind of transient failure
+was it" detail the way `failAmbiguous`'s nil category currently
+discards it for the chat-managed path.
+
+**Also unlike `handleCreationPending`'s StartChat call, this dispatch
+carries no "already attempted once, freeze ambiguous" guard at all.**
+`StreamTurn` creates nothing remote to duplicate (D25), so every
+delivery of the job — first attempt or last — simply calls it again from
+scratch on a transient failure, the same safe-to-repeat shape
+`resendContinue`'s continuation retries already have; the local
+`turn.attempt` counter still advances via `BeginAttempt` each time, for
+observability, but nothing gates re-entry on its value the way
+`handleCreationPending`'s own `turn.Attempt > 0` check does for
+StartChat.
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and
@@ -1052,16 +1141,19 @@ configured tool being idempotent-enough to re-run for free.
   member (`sources[].document`). D23 is a narrow, named exception to D2 —
   the first ever granted — scoped to exactly one rendered link, gated by one
   new opt-in config key.
-- **#93 (native multi-round tool execution)** gets D24 and D25, on top of
-  #75's per-model `tool_ids`/`features` resolution (D20/D21) and #81's
-  `sources[]` handling (D22), which the new mode's own gaps are defined
-  relative to. Like D22/D23, both decisions carry an explicit
+- **#93 (native multi-round tool execution)** gets D24, D25, and D26, on
+  top of #75's per-model `tool_ids`/`features` resolution (D20/D21) and
+  #81's `sources[]` handling (D22), which the new mode's own gaps are
+  defined relative to. Like D22/D23, D24/D25 carry an explicit
   unverified-assumption note (2026-09-08) rather than blocking on further
-  real-instance access. Unlike every prior amendment in this ADR, D24
-  adds a mechanism nothing dispatches to yet — `TurnJob` still sends every
-  turn through D16/D17's chat-managed path unchanged until a follow-up PR
-  switches tool/web-search-using turns over, per Issue #93's own staged
-  migration plan.
+  real-instance access; D26, the dispatch wiring itself, does not
+  introduce a new such assumption — it only decides *when* the
+  already-recorded uncertainty from D24 is reached. `TurnJob` now sends a
+  branch's first turn through `StreamTurn` whenever its resolved
+  `tool_ids`/`web_search` call for it, and every continuation through
+  D16/D17's chat-managed path unchanged, exactly the split D26 describes
+  — Issue #93's own staged migration plan, both stages landing in the
+  same PR series.
 - Every Open WebUI upgrade is a documentation event, not just a config change.
 - Regeneration, remote branch management, and cancellation each still need
   their own contract work before they can be picked up; none of them is a
