@@ -291,6 +291,111 @@ func TestUsersSearchByUsernameAndHost_UnknownUsernameReturnsEmptyArray(t *testin
 	}
 }
 
+// TestUsersShow_ByUserIDCarriesURLKeyDiscriminator is users/show's
+// counterpart to TestUsersSearch_ResponseCarriesURLKeyDiscriminatorForEveryUser
+// (Issue #114): the same "url" key present / "avatarId","isFollowing"
+// keys absent contract applies here, since users/show's response is the
+// same userDetailedNotMe struct, decoded through the same polymorphic
+// UserDetailed.fromJson discriminator (docs/compat/aria-v1.5.11.md).
+func TestUsersShow_ByUserIDCarriesURLKeyDiscriminator(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	rec := ts.post(t, "/api/users/show", map[string]any{"userId": ts.ownerID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/show: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, ok := raw["url"]; !ok {
+		t.Errorf("response %v missing \"url\" key: would decode as UserLite", raw)
+	}
+	if _, ok := raw["avatarId"]; ok {
+		t.Errorf("response %v has \"avatarId\": would misdecode as MeDetailed", raw)
+	}
+	if _, ok := raw["isFollowing"]; ok {
+		t.Errorf("response %v has \"isFollowing\": would misdecode as UserDetailedNotMeWithRelations", raw)
+	}
+	if raw["id"] != ts.ownerID {
+		t.Errorf("id = %v, want %s", raw["id"], ts.ownerID)
+	}
+}
+
+// TestUsersShow_ByUsername covers the username(+host) dispatch branch
+// against a reserved local actor (host omitted, local-only).
+func TestUsersShow_ByUsername(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+
+	rec := ts.post(t, "/api/users/show", map[string]any{"username": "assistant"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/show: %d %s", rec.Code, rec.Body.String())
+	}
+	var got userDetailedNotMe
+	mustDecode(t, rec, &got)
+	if got.Username != "assistant" {
+		t.Errorf("username = %q, want %q", got.Username, "assistant")
+	}
+}
+
+// TestUsersShow_ByUsernameAndHost_OpenWebUIModel covers the
+// username+host branch against a non-local actor, exercising the same
+// matchesUsernameAndHost helper users/search-by-username-and-host uses.
+func TestUsersShow_ByUsernameAndHost_OpenWebUIModel(t *testing.T) {
+	ts := newNoteAPITestServerOpenWebUIEnabled(t)
+	modelSlug := openWebUITestModelSlug()
+
+	rec := ts.post(t, "/api/users/show", map[string]any{"username": modelSlug, "host": "openwebui.example.net"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/show: %d %s", rec.Code, rec.Body.String())
+	}
+	var got userDetailedNotMe
+	mustDecode(t, rec, &got)
+	if got.Username != modelSlug {
+		t.Errorf("username = %q, want %q", got.Username, modelSlug)
+	}
+	if got.Host == nil || *got.Host != "openwebui.example.net" {
+		t.Errorf("host = %v, want %q", got.Host, "openwebui.example.net")
+	}
+}
+
+// TestUsersShow_UnknownUserIDReturnsNoSuchUser and
+// TestUsersShow_UnknownUsernameReturnsNoSuchUser cover Issue #114's
+// "fail explicitly, never fabricate success" acceptance criterion for
+// both dispatch branches.
+func TestUsersShow_UnknownUserIDReturnsNoSuchUser(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rec := ts.post(t, "/api/users/show", map[string]any{"userId": "no-such-actor-id"})
+	assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_USER")
+}
+
+func TestUsersShow_UnknownUsernameReturnsNoSuchUser(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rec := ts.post(t, "/api/users/show", map[string]any{"username": "no-such-actor"})
+	assertWireError(t, rec, http.StatusBadRequest, "NO_SUCH_USER")
+}
+
+// TestUsersShow_UserIDsIsUnsupportedFeature pins the deliberate
+// non-implementation of UsersShowByIdsRequest's batch lookup (Issue
+// #114 plan §2.3): an explicit, typed rejection, never a fabricated
+// empty or partial result.
+func TestUsersShow_UserIDsIsUnsupportedFeature(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rec := ts.post(t, "/api/users/show", map[string]any{"userIds": []string{ts.ownerID}})
+	assertWireError(t, rec, http.StatusBadRequest, "UNSUPPORTED_FEATURE")
+}
+
+// TestUsersShow_NoFieldsIsInvalidParam covers the request shape with
+// none of userId/userIds/username set.
+func TestUsersShow_NoFieldsIsInvalidParam(t *testing.T) {
+	ts := newNoteAPITestServer(t)
+	rec := ts.post(t, "/api/users/show", map[string]any{})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d %s, want %d", rec.Code, rec.Body.String(), http.StatusBadRequest)
+	}
+}
+
 // sameElements reports whether got and want contain the same strings,
 // ignoring order — origin filtering's own order (candidate-enumeration
 // order) is an implementation detail this test does not pin.

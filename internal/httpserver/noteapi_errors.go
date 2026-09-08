@@ -47,6 +47,16 @@ func writeNoSuchNote(w http.ResponseWriter) {
 	writeWireError(w, http.StatusBadRequest, "no-such-note", "NO_SUCH_NOTE", "No such note.", "client", nil)
 }
 
+// writeNoSuchUser is the uniform response for a userId or username(+host)
+// that does not resolve to any actor in this deployment's known set
+// (users/show, users/notes — Issue #114). Mirrors writeNoSuchNote's
+// generic-denial shape: never distinguishing "no such actor" from any
+// other reason a lookup might fail, so a caller cannot use this to probe
+// which case applies.
+func writeNoSuchUser(w http.ResponseWriter) {
+	writeWireError(w, http.StatusBadRequest, "no-such-user", "NO_SUCH_USER", "No such user.", "client", nil)
+}
+
 func writeUnsupportedFeature(w http.ResponseWriter, field string) {
 	writeWireError(w, http.StatusBadRequest, "unsupported-feature", "UNSUPPORTED_FEATURE",
 		"This field is not supported by this service.", "client", map[string]any{"field": field})
