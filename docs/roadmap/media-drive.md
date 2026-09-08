@@ -552,7 +552,7 @@ PR7, the last PR in this roadmap:
    added note on this (要実機確認, consistent with this document's
    existing convention for unverified client-rendering claims).
 2. **RSSソースごとにアイコンと帰属が表示され、system固定ではない** — ✅
-   PR4 (`ActorExternalSource`, host = real feed domain, ADR-0007) + PR5
+   PR4 (`ActorExternalSource`, host = real feed domain, ADR-0008) + PR5
    (favicon fetch → actor avatar).
 3. **RSS投稿から元記事とソース情報を確認できる** — ✅ PR4's `note.url` =
    `ProvenanceURL`; the pre-existing `[news: DisplayName] ...` body
