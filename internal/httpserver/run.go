@@ -18,6 +18,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
+	"github.com/nananek/miauth-private-portal/internal/userlist"
 )
 
 // Options configures the HTTP server. It intentionally contains only
@@ -49,6 +50,15 @@ type Options struct {
 	// Aria/Misskey-compatible note routes; see NewServer. A nil
 	// TimelineService (or a nil MiAuthService) registers none of them.
 	TimelineService *timeline.Service
+
+	// UserListService additionally configures Issue #115's
+	// Misskey-compatible users/lists/* CRUD and membership push/pull
+	// routes; see NewServer. A nil UserListService (or a nil
+	// MiAuthService/TimelineService) registers none of them —
+	// handleUsersListsPush validates its userId through the same
+	// searchCandidates enumeration users/search uses, which needs
+	// TimelineService.
+	UserListService *userlist.Service
 
 	// LLMEnabled gates Issue #9's notes/create enqueue hook: when false
 	// (LLM_ENABLED's safe default), handleNotesCreate never evaluates the

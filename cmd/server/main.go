@@ -35,6 +35,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
+	"github.com/nananek/miauth-private-portal/internal/userlist"
 )
 
 func main() {
@@ -133,6 +134,10 @@ func run() error {
 		OwnerUsername: cfg.Auth.OwnerUsername,
 		Broadcaster:   streamHub,
 	})
+	// userlistSvc backs Issue #115's users/lists/* CRUD and
+	// notes/user-list-timeline. Built unconditionally, like timelineSvc
+	// above: there is no feature flag gating it off.
+	userlistSvc := userlist.NewService(db.Repos, userlist.Config{})
 
 	// driveSvc backs Issue #77 PR3's Misskey-compatible Drive API. Built
 	// unconditionally, like internal/drive.Local/S3 in PR1: DriveConfig
@@ -354,6 +359,7 @@ func run() error {
 		MiAuthService:            miauthSvc,
 		LocalOrigin:              cfg.Auth.LocalOrigin,
 		TimelineService:          timelineSvc,
+		UserListService:          userlistSvc,
 		StreamHub:                streamHub,
 		LLMEnabled:               cfg.LLM.Enabled,
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,

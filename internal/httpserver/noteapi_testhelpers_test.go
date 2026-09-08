@@ -21,6 +21,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/openwebui"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
+	"github.com/nananek/miauth-private-portal/internal/userlist"
 )
 
 // openWebUITestModelExternalID is every OpenWebUI-enabled test server
@@ -128,6 +129,10 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 	// username DescribeOwner/resolveUserLite project onto note.user in
 	// these contract tests.
 	timelineSvc := timeline.NewService(db, db.Repos, timeline.Config{Clock: clock, OwnerUsername: miauthCfg.OwnerUsername})
+	// userlistSvc backs Issue #115's users/lists/* routes, wired
+	// unconditionally like timelineSvc above: no feature flag gates it
+	// off, and no pre-Issue-#115 test ever calls /api/users/lists/*.
+	userlistSvc := userlist.NewService(db.Repos, userlist.Config{})
 
 	miauthSvc := miauth.NewService(db, db.Repos, miauthCfg)
 
@@ -147,6 +152,7 @@ func newNoteAPITestServerWithOptions(t *testing.T, llmEnabled, llmClassification
 	srv := NewServer(logger, reg, Options{
 		MiAuthService:            miauthSvc,
 		TimelineService:          timelineSvc,
+		UserListService:          userlistSvc,
 		LocalOrigin:              testLocalOrigin,
 		LLMEnabled:               llmEnabled,
 		LLMClassificationEnabled: llmClassificationEnabled,
