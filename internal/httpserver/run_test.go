@@ -74,6 +74,35 @@ func waitForServing(t *testing.T, addr string) {
 	t.Fatalf("server at %s never started accepting connections", addr)
 }
 
+// waitForReady polls GET /readyz until it returns 200 or fails the test
+// after a bounded timeout. A successful dial (waitForServing) only shows
+// the listener is accepting connections — true the instant mustListen
+// creates it, before the Run goroutine is even scheduled — so it is not
+// evidence that reg.MarkReady has run; only an actual 200 is. A single
+// immediate GET /readyz can otherwise observe reg.Ready's pre-MarkReady
+// state and report a spurious failure on a busy/contended scheduler (see
+// the CI failure this fixes, Issue #122: PR #117's -race run flaked here
+// with "/readyz status = 503, want 200" even though the server finished
+// starting up an instant later).
+func waitForReady(t *testing.T, addr string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last int
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr + "/readyz")
+		if err != nil {
+			t.Fatalf("GET /readyz: %v", err)
+		}
+		resp.Body.Close()
+		last = resp.StatusCode
+		if last == http.StatusOK {
+			return last
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return last
+}
+
 // waitForEntered blocks until entered is closed — a Checker has actually
 // been invoked, proving an in-flight /readyz request already passed
 // health.Registry.Ready's startup-complete gate — or fails the test
@@ -133,13 +162,8 @@ func TestRun_ServesHealthzAndReadyzAndMarksReady(t *testing.T) {
 		t.Errorf("/healthz status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	resp, err = http.Get("http://" + addr + "/readyz")
-	if err != nil {
-		t.Fatalf("GET /readyz: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("/readyz status = %d, want %d (Run should MarkReady on startup)", resp.StatusCode, http.StatusOK)
+	if status := waitForReady(t, addr); status != http.StatusOK {
+		t.Errorf("/readyz status = %d, want %d (Run should MarkReady on startup)", status, http.StatusOK)
 	}
 
 	cancel()
