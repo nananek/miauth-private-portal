@@ -63,7 +63,7 @@ type Actor struct {
 	// POST /api/i/update's avatarId field for the owner
 	// (internal/miauth.Service.UpdateOwnerAvatar), or by
 	// cmd/server's favicon fetch for an ActorExternalSource (PR4/
-	// ADR-0007) — nothing yet sets it for assistant/system/
+	// ADR-0008) — nothing yet sets it for assistant/system/
 	// ActorOpenWebUIModel, though the column supports any actor type.
 	AvatarFileID *string
 }

@@ -3,7 +3,7 @@
 - Status: PR0 (investigation), PR1 (Drive foundation), PR2 (static app
   icons), PR3 (Misskey-compatible Drive API), and PR5 (profile images +
   favicon fetching) complete. PR4 (RSS/external-source icons and
-  attribution)'s identity/host mechanism (ADR-0007) was done in its own
+  attribution)'s identity/host mechanism (ADR-0008) was done in its own
   commit; favicon fetching/storage — left open at the end of PR4 as an
   explicit owner decision — was folded into PR5 rather than a PR4
   follow-up, since both need the same Drive-backed image storage
@@ -344,7 +344,7 @@ infrastructure.
 Profile images:
 
 - `actors.avatar_file_id` (nullable FK to `files`, migration
-  `0028_actors_avatar_file_id.sql`), plumbed through
+  `0030_actors_avatar_file_id.sql`), plumbed through
   `ActorRepository.SetAvatarFileID` / `domain.Actor.AvatarFileID` /
   `miauth.Service.UpdateOwnerAvatar` (owner-only; `ErrNotOwner` otherwise)
   and `OwnerProfile.AvatarFileID`.
@@ -352,6 +352,15 @@ Profile images:
   `docs/compat/aria-v1.5.11.md`'s existing `User`/`avatarId` discriminator
   guardrail) on `userLite` and `userDetailedNotMe`, resolved by the shared
   `avatarURLFromFileID` helper to an absolute `GET /files/{id}` URL.
+  **Design decision:** when `AvatarFileID` is nil, `avatarURLFromFileID`
+  returns `nil` and `avatarUrl` is simply `null` on the wire — this
+  service never generates an initials/placeholder image server-side.
+  This matches real Misskey servers, which likewise send `avatarUrl:
+  null` for an unset avatar and leave rendering a fallback (an initial,
+  a gray silhouette, ...) entirely to the client. Issue #77's acceptance
+  criterion "新規インストール直後でもデフォルトアバターが表示される" is
+  therefore satisfied by Aria's own existing null-avatar fallback
+  rendering, not by anything new here.
 - `POST /api/i/update` accepts an optional `avatarId` field alongside the
   pre-existing `name` field — **`name` changed from always-required to
   optional**, a genuine bug fix: PR0's Aria trace found
