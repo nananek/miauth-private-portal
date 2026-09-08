@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
@@ -99,6 +100,46 @@ func (r *entryRepository) ListTimelineDesc(ctx context.Context, before *domain.C
 	rows, err := r.q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list timeline desc: %w", err)
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
+// ListByAuthorsDesc mirrors ListTimelineDesc's row-value cursor and
+// ordering exactly, adding only an author_actor_id IN (...) filter — see
+// EntryRepository.ListByAuthorsDesc's own doc comment for why this takes
+// a slice of authors rather than one.
+func (r *entryRepository) ListByAuthorsDesc(ctx context.Context, authorActorIDs []string, before *domain.Cursor, limit int, includeHidden bool) ([]domain.Entry, error) {
+	if len(authorActorIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(authorActorIDs))
+	args := make([]any, 0, len(authorActorIDs)+3)
+	for i, id := range authorActorIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+
+	query := entrySelectColumns + ` FROM entries WHERE author_actor_id IN (` + strings.Join(placeholders, ",") + `)`
+	if !includeHidden {
+		query += ` AND archived_at IS NULL AND hidden_at IS NULL`
+	}
+	if before != nil {
+		// Mirrors ListTimelineDesc's reversed row-value cursor
+		// comparison: strictly older than before in (created_at, id)
+		// order.
+		query += ` AND (created_at, id) < (?, ?)`
+		args = append(args, formatTime(before.CreatedAt), before.ID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := r.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list entries by authors desc: %w", err)
 	}
 	defer rows.Close()
 	return scanEntries(rows)

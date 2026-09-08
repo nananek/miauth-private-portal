@@ -129,6 +129,17 @@ type EntryRepository interface {
 	// docs/compat/aria-v1.5.11.md's pagination section. When includeHidden
 	// is false, archived and hidden entries are excluded.
 	ListTimelineDesc(ctx context.Context, before *Cursor, limit int, includeHidden bool) ([]Entry, error)
+	// ListByAuthorsDesc returns up to limit entries authored by any actor
+	// in authorActorIDs, newest-first by (created_at, id) — the same
+	// cursor contract as ListTimelineDesc, scoped to a fixed set of
+	// authors instead of every actor. Issue #114's users/notes calls this
+	// with a single-element slice; Issue #115's planned list-timeline
+	// feature is expected to call it directly with a list's full member
+	// set, which is why this takes a slice rather than one actorID up
+	// front. An empty authorActorIDs returns an empty result, never every
+	// entry. When includeHidden is false, archived and hidden entries are
+	// excluded.
+	ListByAuthorsDesc(ctx context.Context, authorActorIDs []string, before *Cursor, limit int, includeHidden bool) ([]Entry, error)
 	// CountByAuthor returns the number of entries authored by actorID,
 	// excluding archived and hidden ones. POST /api/notes/delete (Issue
 	// #23 PR3) maps Misskey-compatible delete onto SetHidden(id, true), so
