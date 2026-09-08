@@ -1399,10 +1399,11 @@ not blocked on it either.)
 ### D28. A native turn's citations are recovered from `GET /api/v1/chats/{id}`'s own `output[]` trace, not `sources[]`
 
 **Decided (Issue #127, 2026-09-08), resolving D27's own "self-review gap"
-and amending D22's "not re-derived from a later GET" premise.** Issue #125's
-own real-instance check (deployed revision `e5039ff`, the same build D27
-shipped) sent the same `chat_id` + `stream:true` + `tool_ids` +
-`features.web_search` shape `runTurn`'s native branch sends, then inspected
+and amending D22's "not re-derived from a later GET" premise.** Issue
+#127's own real-instance check (deployed revision `e5039ff`, PR #125's
+merge commit — the same build D27 shipped) sent the same `chat_id` +
+`stream:true` + `tool_ids` + `features.web_search` shape `runTurn`'s
+native branch sends, then inspected
 the completed turn's `GET /api/v1/chats/{id}` body. The assistant message
 carries no field named `sources`, `citation`, or `tool_result` anywhere —
 D22's "unverified" premise resolves to **no**, not to "unconfirmed" — but it
