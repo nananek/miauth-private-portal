@@ -109,7 +109,7 @@ catch that class of mistake during local development.
 | `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES` | no | `20` | 1-500. Maximum same-thread candidate entries offered as related-post candidates. Independent budget from `LLM_THREAD_CONTEXT_MAX_MESSAGES`. |
 | `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS` | no | `8000` | 1-200000. Maximum combined character length of included candidate entries. Independent budget from `LLM_THREAD_CONTEXT_MAX_CHARS`. |
 | `RSS_ENABLED` | no | `false` | Gates Issue #11's RSS/Atom ingestion entirely. While `false`, no `domain.ExternalSource` row is ever seeded from `RSS_FEED_URLS`, no adapter/scheduler is constructed, and no request ever reaches a configured feed URL. |
-| `RSS_FEED_URLS` | required if `RSS_ENABLED=true` | `""` | Comma-separated list of RSS/Atom feed URLs, seeded as `external_sources` rows (`kind="rss"`) at startup. Commas inside a URL's own path or query are retained (same splitting rule as `ARIA_CLIENT_CALLBACKS`); a separator is a comma followed by the next absolute URL. Each entry must be an absolute `http(s)` URL. |
+| `RSS_FEED_URLS` | required if `RSS_ENABLED=true` | `""` | Comma-separated list of RSS/Atom feed URLs, seeded as `external_sources` rows (`kind="rss"`) at startup. Commas inside a URL's own path or query are retained (same splitting rule as `ARIA_CLIENT_CALLBACKS`); a separator is a comma followed by the next absolute URL. Each entry must be an absolute `http(s)` URL. Issue #77 PR4 (ADR-0008): each entry may carry an optional `\|<username>` suffix (for example `https://note.com/rss\|myuser`) naming that feed's own `ActorExternalSource` username — `\|` is never a valid unencoded URI character, so it unambiguously separates the URL from the suffix. The username must match Misskey's own character set (ASCII letters/digits/underscore); when omitted, one is derived from the feed's own host and disambiguated against every other username already registered for that host. Set only when a source is *first* registered — editing this suffix (or the feed's host) after the fact never changes an already-registered source's projected username/host; register under a new URL instead. |
 | `RSS_POLL_INTERVAL` | no | `15m` | How often each configured feed is re-fetched. Positive duration, must exceed `RSS_FETCH_TIMEOUT`. |
 | `RSS_FETCH_TIMEOUT` | no | `15s` | Bounds a single feed fetch's HTTP round trip. Positive duration, must be less than `RSS_POLL_INTERVAL`. |
 | `RSS_MAX_RESPONSE_BYTES` | no | `2097152` (2 MiB) | Integer of at least 1. Bounds how much of a feed response is read into memory; a larger response fails the fetch. |
@@ -898,20 +898,37 @@ only while `RSS_ENABLED=true`.
 ### Startup seeding and live reconciliation
 
 While `RSS_ENABLED=true`, `cmd/server` seeds one `external_sources` row
-(`kind="rss"`) per `RSS_FEED_URLS` entry at startup, and the scheduler
-reconciles the same set on every subsequent tick, via
-`ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a, replacing
-the old create-only `EnsureFromConfig`): a `(kind, uri)` pair already
-present is left untouched (including its `display_name`, `cursor`, and
-failure-tracking fields, never modified or re-seeded), a new one is
-created, and one no longer listed is deactivated (`active=0`), never
-deleted. Since `RSS_FEED_URLS` is one of Issue #76's db-eligible keys,
-**adding or removing a feed URL via `miauthctl config set/unset
-RSS_FEED_URLS` takes effect on the scheduler's next tick, no restart
-required** — see
+(`kind="rss"`) per `RSS_FEED_URLS` entry at startup in two steps, run in
+order:
+
+1. `ensureRSSSourcesWithActors` (Issue #77 PR4) creates a row for any
+   URL not yet registered at all — and, unlike
+   `ExternalSourceRepository.EnsureFromConfig` (still used as-is for the
+   single `imap`-kind source below), also creates that genuinely new
+   source's own dedicated `ActorExternalSource` actor (ADR-0008) in the
+   same step, atomically: a source row is never left without its actor,
+   or an actor without its source. A `(kind, uri)` pair already
+   registered is left untouched (including its `display_name`,
+   `cursor`, failure-tracking fields, and `actor_id`/`username`/`host`),
+   never modified or re-seeded.
+2. `ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a,
+   replacing the old create-only `EnsureFromConfig` for RSS) then
+   reactivates a previously-deactivated source whose URL is back in
+   `RSS_FEED_URLS`, and deactivates (`active=0`, never deleted) one no
+   longer listed; anything step 1 just created already exists and is
+   active by default, so this step's own create path is a no-op for it.
+
+The scheduler repeats step 2 on every subsequent tick, so — since
+`RSS_FEED_URLS` is one of Issue #76's db-eligible keys — **adding or
+removing a feed URL via `miauthctl config set/unset RSS_FEED_URLS`
+takes effect on the scheduler's next tick, no restart required** — see
 [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
-above. Editing `.env`/the environment directly and restarting still works
-too, exactly as before this issue.
+above. A **genuinely new** URL's `ActorExternalSource`/`username`/`host`
+are only ever created by step 1 at startup, though, so adding a brand
+new feed (as opposed to re-adding a previously-removed one) still needs
+a restart to seed its actor before the scheduler can poll it — editing
+`.env`/the environment directly and restarting always works too, exactly
+as before this issue.
 
 ### Untrusted external content
 

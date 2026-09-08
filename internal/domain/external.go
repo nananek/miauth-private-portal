@@ -13,6 +13,27 @@ type ExternalSource struct {
 	Kind        string
 	URI         string
 	DisplayName *string
+	// ActorID, Username, and Host are all nil for an imap-kind source
+	// (Issue #77 PR4/ADR-0008's design-A host display is RSS-only) and
+	// all set together for an rss-kind one, computed once when the
+	// source is first registered (cmd/server's startup seeding) and
+	// never recomputed afterward:
+	//   - ActorID names this source's own dedicated ActorExternalSource
+	//     row (the "1 external identity = 1 actor row" pattern Issue #52
+	//     set for Open WebUI models).
+	//   - Username is Misskey-username-charset-validated
+	//     (internal/config's ownerUsernamePattern), owner-settable via
+	//     RSS_FEED_URLS at registration or auto-derived from Host when
+	//     left unset.
+	//   - Host is this feed's own real origin (net/url.Parse(URI).Host)
+	//     — a real, deployment-uncontrolled domain, unlike
+	//     OPENWEBUI_PRESENTATION_HOST's single synthetic value. See
+	//     ADR-0008 for why this is safe only because this deployment
+	//     never federates, and the condition that would require
+	//     revisiting it.
+	ActorID  *string
+	Username *string
+	Host     *string
 	// Cursor is an adapter-opaque resume token (for internal/ingest/rss,
 	// a JSON string carrying the last response's ETag/Last-Modified). It
 	// only ever advances after every item in a fetch batch has been
@@ -55,6 +76,20 @@ type ExternalItem struct {
 type ExternalSourceRepository interface {
 	Create(ctx context.Context, s ExternalSource) error
 	Get(ctx context.Context, id string) (ExternalSource, error)
+	// GetByURI returns the source matching (kind, uri) exactly —
+	// UNIQUE(kind, uri) guarantees at most one — or ErrNotFound. Issue
+	// #77 PR4's RSS registration (cmd/server) uses this to decide
+	// whether a configured feed URL is genuinely new before creating its
+	// paired ActorExternalSource row, rather than the older
+	// create-and-ignore-conflict shape EnsureFromConfig still uses for
+	// imap (which needs no paired actor to avoid orphaning on conflict).
+	GetByURI(ctx context.Context, kind, uri string) (ExternalSource, error)
+	// GetByActorID returns the source whose ActorID is actorID, or
+	// ErrNotFound if none matches (every imap-kind source, and any
+	// actorID that does not belong to this repository at all). Backs
+	// internal/httpserver's ExternalSourceResolver
+	// (Issue #77 PR4's resolveUserLite case for ActorExternalSource).
+	GetByActorID(ctx context.Context, actorID string) (ExternalSource, error)
 	// List returns every *active* configured source of kind, in creation
 	// order (see ExternalSource.Active's own doc comment). A caller
 	// (ingest.Scheduler) always scopes to its own kind: without this

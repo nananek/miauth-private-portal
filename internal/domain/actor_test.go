@@ -24,6 +24,7 @@ func TestActorCapabilityPredicates(t *testing.T) {
 		{actorType: ActorAssistant, isPresentationOnly: true},
 		{actorType: ActorSystem, isPresentationOnly: true},
 		{actorType: ActorOpenWebUIModel, isRemote: true, isPresentationOnly: true},
+		{actorType: ActorExternalSource, isRemote: true, isPresentationOnly: true},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.actorType), func(t *testing.T) {

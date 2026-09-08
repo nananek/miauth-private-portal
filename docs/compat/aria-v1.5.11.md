@@ -1312,6 +1312,32 @@ are never exposed through any Note field — no marker is needed for them, since
 no Aria/Misskey-compatible HTTP endpoint exposes them at all (see
 `docs/operations/configuration.md`'s "Review/notebook/unresolved queries").
 
+**Since Issue #77 PR4 (ADR-0008), a `news` entry's provenance is no
+longer text-only.** Before PR4, every `news`/`mail` entry projected
+`user: {username: "system", host: null}` regardless of which RSS feed
+or mailbox it came from — the table above's markers were the *only*
+place provenance appeared. PR4 adds two real, structured signals on top
+of that unchanged text-marker behavior:
+
+- **`user.host` is the feed's own real origin domain** for a `news`
+  entry ingested from an RSS-kind source registered after PR4 shipped
+  (`ActorExternalSource`, ADR-0008) — `@<username>@<feed's real host>`,
+  not `system`. `mail` entries are unaffected and still project as
+  `system`: ADR-0008 excludes IMAP from this treatment. A `news` entry
+  from a source that predates PR4 (no `ActorID` on its
+  `domain.ExternalSource` row) also still projects as `system`, exactly
+  as before — nothing is backfilled.
+- **`note.url` is the source item's own article URL** (nullable, per the
+  "Minimum Note contract" section below — always `null` before PR4,
+  since no field carried it): `domain.Entry.ProvenanceURL`, denormalized
+  from `domain.ExternalItem.ProvenanceURL` at ingestion time
+  (`timeline.Service.CreateExternalEntry`) and projected verbatim.
+
+The text markers table above is unchanged by PR4 — the `"[news: ...]
+..."` body marker and the new `user.host`/`note.url` fields are
+independent, complementary signals a client can use together, not a
+replacement of one by the other.
+
 ## Pagination and reload semantics
 
 | Journey | Aria request cursor | Client behavior | Local contract decision |

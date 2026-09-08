@@ -89,6 +89,16 @@ type Options struct {
 	// which already satisfies the interface structurally.
 	VirtualActors VirtualActorResolver
 
+	// ExternalSources resolves an ActorExternalSource actor to its owning
+	// domain.ExternalSource (Issue #77 PR4/ADR-0008's design-A host
+	// display). A nil value means resolveUserLite's existing fallback
+	// projection applies. It is the narrow ExternalSourceResolver
+	// interface (satisfied structurally by domain.ExternalSourceRepository
+	// itself, via its GetByActorID method) — cmd/server passes
+	// db.Repos.ExternalSources directly, so this package still never
+	// imports a storage driver type.
+	ExternalSources ExternalSourceResolver
+
 	// OpenWebUIBridge is Issue #53's notes/create enqueue hook: when
 	// non-nil, handleNotesCreate creates every user_post through
 	// timeline.Service's Create{Root,Reply}WithHook instead of

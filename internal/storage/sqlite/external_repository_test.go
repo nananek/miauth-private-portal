@@ -39,6 +39,94 @@ func TestExternalSourceRepository_CreateGetList(t *testing.T) {
 	}
 }
 
+// TestExternalSourceRepository_CreateGet_RoundTripsIdentityFields backs
+// Issue #77 PR4/ADR-0008's design-A columns: ActorID/Username/Host round
+// -trip exactly, and stay nil for an imap-kind source that never sets
+// them (mustCreateExternalSource's plain shape, unchanged since before
+// PR4).
+func TestExternalSourceRepository_CreateGet_RoundTripsIdentityFields(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateDistinctActor(t, db)
+	username := "myfeed"
+	host := "example.com"
+	s := domain.ExternalSource{
+		ID: domain.NewID(), Kind: "rss", URI: "https://example.com/rss",
+		ActorID: &actorID, Username: &username, Host: &host, CreatedAt: time.Now(),
+	}
+	if err := db.ExternalSources.Create(t.Context(), s); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := db.ExternalSources.Get(t.Context(), s.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ActorID == nil || *got.ActorID != actorID {
+		t.Errorf("ActorID = %v, want %q", got.ActorID, actorID)
+	}
+	if got.Username == nil || *got.Username != username {
+		t.Errorf("Username = %v, want %q", got.Username, username)
+	}
+	if got.Host == nil || *got.Host != host {
+		t.Errorf("Host = %v, want %q", got.Host, host)
+	}
+
+	imapSource := mustCreateExternalSource(t, db, "imap", "imap://example.com/inbox")
+	got, err = db.ExternalSources.Get(t.Context(), imapSource.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ActorID != nil || got.Username != nil || got.Host != nil {
+		t.Errorf("imap source identity fields = %+v, want all nil", got)
+	}
+}
+
+func TestExternalSourceRepository_GetByURI(t *testing.T) {
+	db := newTestDB(t)
+	s := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+
+	got, err := db.ExternalSources.GetByURI(t.Context(), "rss", "https://example.com/feed.xml")
+	if err != nil {
+		t.Fatalf("GetByURI: %v", err)
+	}
+	if got.ID != s.ID {
+		t.Errorf("GetByURI id = %q, want %q", got.ID, s.ID)
+	}
+
+	if _, err := db.ExternalSources.GetByURI(t.Context(), "rss", "https://does-not-exist.example/feed.xml"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByURI(unknown) err = %v, want ErrNotFound", err)
+	}
+	// Same URI, different kind: must not match (kind is part of the key).
+	if _, err := db.ExternalSources.GetByURI(t.Context(), "imap", "https://example.com/feed.xml"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByURI(wrong kind) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestExternalSourceRepository_GetByActorID(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateDistinctActor(t, db)
+	username, host := "myfeed", "example.com"
+	s := domain.ExternalSource{
+		ID: domain.NewID(), Kind: "rss", URI: "https://example.com/rss",
+		ActorID: &actorID, Username: &username, Host: &host, CreatedAt: time.Now(),
+	}
+	if err := db.ExternalSources.Create(t.Context(), s); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := db.ExternalSources.GetByActorID(t.Context(), actorID)
+	if err != nil {
+		t.Fatalf("GetByActorID: %v", err)
+	}
+	if got.ID != s.ID {
+		t.Errorf("GetByActorID id = %q, want %q", got.ID, s.ID)
+	}
+
+	if _, err := db.ExternalSources.GetByActorID(t.Context(), "no-such-actor"); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("GetByActorID(unknown) err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestExternalSourceRepository_List_FiltersByKind(t *testing.T) {
 	db := newTestDB(t)
 	mustCreateExternalSource(t, db, "rss", "https://example.com/a.xml")

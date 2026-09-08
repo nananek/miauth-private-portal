@@ -510,6 +510,7 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 		Kind:             kind,
 		Body:             body,
 		ProcessingStatus: domain.ProcessingNone,
+		ProvenanceURL:    item.ProvenanceURL,
 		CreatedAt:        createdAt,
 		UpdatedAt:        now,
 	}
@@ -522,11 +523,11 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 		createErr := repos.ExternalItems.Create(ctx, item)
 		if createErr == nil {
 			created = true
-			actor, err := repos.Actors.GetByType(ctx, actorType)
+			actorID, err := s.resolveExternalEntryAuthor(ctx, repos, item.SourceID, actorType)
 			if err != nil {
 				return fmt.Errorf("resolve external entry author: %w", err)
 			}
-			entry.AuthorActorID = actor.ID
+			entry.AuthorActorID = actorID
 
 			if err := repos.Threads.Create(ctx, domain.Thread{ID: id, CreatedAt: now, UpdatedAt: now}); err != nil {
 				return err
@@ -581,6 +582,31 @@ func (s *Service) CreateExternalEntry(ctx context.Context, kind domain.EntryKind
 		s.broadcastCreated(entry)
 	}
 	return entry, created, nil
+}
+
+// resolveExternalEntryAuthor returns the actor ID a news/mail entry from
+// sourceID should be authored by: that source's own dedicated
+// ActorExternalSource actor (Issue #77 PR4/ADR-0008's design-A host
+// display) when it has one, otherwise the shared singleton actor
+// fallbackType names — the same authorActorTypeForKind[kind] lookup
+// every external entry used before PR4. A source's ActorID is nil for
+// every imap-kind source (ADR-0008's design-A host display is RSS-only)
+// and for an rss-kind source pre-dating PR4's migration, so this
+// fallback is not merely defensive: it is the real, ongoing behavior
+// for every kind that does not get its own actor.
+func (s *Service) resolveExternalEntryAuthor(ctx context.Context, repos domain.Repos, sourceID string, fallbackType domain.ActorType) (string, error) {
+	source, err := repos.ExternalSources.Get(ctx, sourceID)
+	if err != nil {
+		return "", fmt.Errorf("get external source: %w", err)
+	}
+	if source.ActorID != nil {
+		return *source.ActorID, nil
+	}
+	actor, err := repos.Actors.GetByType(ctx, fallbackType)
+	if err != nil {
+		return "", err
+	}
+	return actor.ID, nil
 }
 
 // createReplyEntry builds and persists one reply entry (Entries.Create,

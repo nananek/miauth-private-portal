@@ -12,16 +12,16 @@ import (
 type entryRepository struct{ q querier }
 
 const entrySelectColumns = `SELECT id, thread_id, parent_entry_id, kind, author_actor_id, body,
-	processing_status, archived_at, hidden_at, created_at, updated_at`
+	processing_status, archived_at, hidden_at, created_at, updated_at, provenance_url`
 
 func (r *entryRepository) Create(ctx context.Context, e domain.Entry) error {
 	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO entries (id, thread_id, parent_entry_id, kind, author_actor_id, body,
-			processing_status, archived_at, hidden_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			processing_status, archived_at, hidden_at, created_at, updated_at, provenance_url)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.ThreadID, nullableString(e.ParentEntryID), string(e.Kind), e.AuthorActorID, e.Body,
 		string(e.ProcessingStatus), formatTimePtr(e.ArchivedAt), formatTimePtr(e.HiddenAt),
-		formatTime(e.CreatedAt), formatTime(e.UpdatedAt),
+		formatTime(e.CreatedAt), formatTime(e.UpdatedAt), nullableString(e.ProvenanceURL),
 	)
 	return mapWriteError(err)
 }
@@ -175,13 +175,15 @@ func scanEntry(row rowScanner) (domain.Entry, error) {
 	var kind, processingStatus string
 	var archivedAt, hiddenAt sql.NullString
 	var createdAt, updatedAt string
+	var provenanceURL sql.NullString
 
 	if err := row.Scan(&e.ID, &e.ThreadID, &parentEntryID, &kind, &e.AuthorActorID, &e.Body,
-		&processingStatus, &archivedAt, &hiddenAt, &createdAt, &updatedAt); err != nil {
+		&processingStatus, &archivedAt, &hiddenAt, &createdAt, &updatedAt, &provenanceURL); err != nil {
 		return domain.Entry{}, mapReadError(err)
 	}
 
 	e.ParentEntryID = stringPtr(parentEntryID)
+	e.ProvenanceURL = stringPtr(provenanceURL)
 	e.Kind = domain.EntryKind(kind)
 	e.ProcessingStatus = domain.ProcessingStatus(processingStatus)
 

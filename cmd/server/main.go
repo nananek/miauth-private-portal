@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -346,6 +347,7 @@ func run() error {
 		LLMEnabled:               cfg.LLM.Enabled,
 		LLMClassificationEnabled: cfg.LLM.ClassificationEnabled,
 		VirtualActors:            virtualActors,
+		ExternalSources:          db.Repos.ExternalSources,
 		OpenWebUIBridge:          openWebUIBridge,
 		OpenWebUITurnLinks:       openWebUITurnLinks,
 		OpenWebUIViewerBaseURL:   cfg.OpenWebUI.ViewerBaseURL,
@@ -459,14 +461,24 @@ func run() error {
 		})
 		ingestSvc.RegisterAdapter(rssAdapter)
 
-		// ReconcileFromConfig (Issue #76 PR4a), not the old create-only
-		// EnsureFromConfig: a feed URL added or removed from
-		// RSS_FEED_URLS after this point is picked up by rssScheduler's
-		// own per-tick reconciliation below (DesiredURIs) without a
-		// restart, but the source set must still exist before the
-		// server reports itself ready, hence this explicit startup call.
-		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, time.Now().UTC()); err != nil {
+		// ensureRSSSourcesWithActors (Issue #77 PR4) first: it creates a
+		// paired ActorExternalSource (with its own username/host,
+		// ADR-0008) for every RSS_FEED_URLS entry not yet registered at
+		// all, something ReconcileFromConfig's own create path knows
+		// nothing about. ReconcileFromConfig (Issue #76 PR4a) then
+		// handles the ongoing-reconciliation half ensureRSSSourcesWithActors
+		// does not: reactivating a source whose URI came back after being
+		// removed, and deactivating one no longer configured. Running it
+		// right after is safe and cheap — every URI
+		// ensureRSSSourcesWithActors just created already exists and is
+		// active by default, so ReconcileFromConfig's create-if-missing
+		// branch is a no-op for those.
+		seedNow := time.Now().UTC()
+		if err := ensureRSSSourcesWithActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow); err != nil {
 			return fmt.Errorf("seed rss sources: %w", err)
+		}
+		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, seedNow); err != nil {
+			return fmt.Errorf("reconcile rss sources: %w", err)
 		}
 
 		rssScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
@@ -609,6 +621,74 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 		MaxConcurrentJobs:   cfg.MaxConcurrentJobs,
 		ShutdownGracePeriod: cfg.ShutdownGracePeriod,
 	}
+}
+
+// ensureRSSSourcesWithActors idempotently creates one domain.ExternalSource
+// (kind rss.Kind) plus its own dedicated ActorExternalSource actor
+// (Issue #77 PR4, ADR-0008's design-A host display) for every feedURLs
+// entry not already registered. feedUsernames[i], when non-nil, is
+// feedURLs[i]'s owner-chosen username (RSS_FEED_URLS' "|username"
+// suffix); otherwise one is derived from the feed's own host
+// (internal/ingest/rss.DefaultUsername), disambiguated against every
+// username already registered for that same host.
+//
+// Unlike domain.ExternalSourceRepository.EnsureFromConfig's plain
+// create-and-ignore-conflict shape (still used for imap below, which
+// pairs no actor with its source), each entry's existence is checked
+// first: an already-registered source's actor must never be recreated,
+// and only a genuinely new source's actor+source pair is created,
+// together inside one transaction, so a failed source insert never
+// leaves an orphaned actor behind. This is safe as plain check-then-
+// create (not itself wrapped in a further outer transaction) because it
+// only ever runs once, single-threaded, during this process's own
+// startup — there is no concurrent caller to race against.
+func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []string, feedUsernames []*string, now time.Time) error {
+	for i, feedURL := range feedURLs {
+		if _, err := db.ExternalSources.GetByURI(ctx, rss.Kind, feedURL); err == nil {
+			continue // already registered; username/host are never recomputed
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return fmt.Errorf("look up existing rss source %q: %w", feedURL, err)
+		}
+
+		host, err := rss.HostFromFeedURL(feedURL)
+		if err != nil {
+			return fmt.Errorf("derive host for rss source %q: %w", feedURL, err)
+		}
+
+		var username string
+		if i < len(feedUsernames) && feedUsernames[i] != nil {
+			username = *feedUsernames[i]
+		}
+		if username == "" {
+			existing, err := db.ExternalSources.List(ctx, rss.Kind)
+			if err != nil {
+				return fmt.Errorf("list existing rss sources: %w", err)
+			}
+			reserved := make(map[string]bool, len(existing))
+			for _, s := range existing {
+				if s.Host != nil && *s.Host == host && s.Username != nil {
+					reserved[*s.Username] = true
+				}
+			}
+			username = rss.DefaultUsername(host, feedURL, func(candidate string) bool { return reserved[candidate] })
+		}
+
+		actorID := domain.NewID()
+		err = db.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+			if err := repos.Actors.Create(ctx, domain.Actor{ID: actorID, Type: domain.ActorExternalSource, CreatedAt: now}); err != nil {
+				return fmt.Errorf("create rss source actor: %w", err)
+			}
+			return repos.ExternalSources.Create(ctx, domain.ExternalSource{
+				ID: domain.NewID(), Kind: rss.Kind, URI: feedURL,
+				ActorID: &actorID, Username: &username, Host: &host,
+				CreatedAt: now,
+			})
+		})
+		if err != nil {
+			return fmt.Errorf("register rss source %q: %w", feedURL, err)
+		}
+	}
+	return nil
 }
 
 // driveCapacityBytes is POST /api/drive's advertised capacity — cosmetic
