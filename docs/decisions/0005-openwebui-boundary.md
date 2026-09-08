@@ -1307,6 +1307,43 @@ observes `done: true`, `ToolTurnTimeout` elapses, and the turn ends
 `ambiguous` (D6) rather than hanging, answering incorrectly, or posing a
 security concern.
 
+**Newly discovered self-review gap (2026-09-08), not yet resolved: this
+decision silently drops Issue #81's `sources[]`/citations for every
+native turn.** `openwebui.TurnResult.Sources` is populated in exactly one
+place, `runTurn`'s `decodeSources(parsed.Sources)`, reading the *initial*
+`/api/chat/completions` **POST** response. Section (i)'s 2026-09-07
+capture found `sources[]` present there specifically *because*
+`params.function_calling=legacy` ((c)) triggered a synchronous
+pre-completion tool/web-search resolution that this same buffered
+response then carried. D27 removes `params.function_calling=legacy` for
+every turn that condition covers, and (h)/(k) already establish that
+mode's own POST response body is always `null` regardless of outcome —
+so `parsed.Sources` is now unconditionally empty for exactly the turns
+that actually call a tool or search the web, the only population that
+ever had a non-empty `sources[]` to begin with. `awaitTurnDone`'s own
+confirmation path, `LookupTurnOutcome` (`GET /api/v1/chats/{id}`), has no
+`Sources` field to fall back on either — `openwebui.TurnOutcome`'s own
+doc comment already named this gap under D22, but as a "cosmetic,"
+rare-recovery-path-only cost, on the premise that the common case reached
+sources through the (then buffered, legacy) POST response instead. D27
+inverts which path is common: every native turn now confirms exclusively
+through the GET path that was always missing `sources`, so the "cosmetic,
+rare" framing no longer holds — this is now the unconditional outcome for
+every tool-carrying and web-search-carrying turn, not an edge case. No
+test added by this PR catches it:
+`TestClient_ContinueTurn_Normalize{Tool,WebSearch}SourceFromFixture`
+still pass, but only because neither request sets `ToolIDs`/
+`WebSearchEnabled`, so they exercise the legacy (`Stream: false`) path
+with a hand-authored POST body — a shape a real native-mode turn's POST
+response can no longer produce. Per AGENTS.md ("stop implementation and
+record or request an ADR update; do not silently invent a protocol"),
+this is recorded here rather than papered over with an unverified guess
+at whether `GET /api/v1/chats/{id}` might carry `sources` for a done
+message (itself still an open 要実機確認, section (i)) — **this needs an
+owner decision (accept the regression, or block Issue #123 on
+re-verifying the GET body / finding another source of `sources[]` for
+native mode) before this ships.**
+
 ## Consequences
 
 - **#52 (OWUI-P)** gets its domain and migration inputs from D2, D3, D9, and

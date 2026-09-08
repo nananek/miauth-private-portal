@@ -623,6 +623,19 @@ func TestClient_ContinueTurn_NativeMode_HardLookupFailureStopsPollingImmediately
 // these tests pin normalizeSources' own documented 1:1-array-order
 // mapping, not a confirmed real-instance contract for more than one
 // source. See openwebui.Source's own doc comment.
+//
+// NOT NATIVE-MODE COVERAGE (ADR-0005 D27, Issue #123, self-review
+// finding, 2026-09-08): none of the tests below set ToolIDs or
+// WebSearchEnabled on their request, so each exercises runTurn's plain
+// (Stream: false) branch with a hand-authored, sources-bearing POST
+// response body. That combination — a real sources[] array on a
+// completions response — can no longer occur for an actual native
+// (tool-carrying) turn post-D27: that response is always empty (see
+// completionsResponseBody.Sources' own doc comment). These tests still
+// correctly pin normalizeSources'/decodeSources' own decoding logic, but
+// they do not demonstrate that TurnResult.Sources is ever non-nil for a
+// turn that really called a tool or searched the web under the current
+// design — see ADR-0005 D27's "self-review gap" paragraph.
 
 // TestClient_ContinueTurn_NormalizesToolSourceFromFixture backs the
 // tool-execution sources[] shape: source.name becomes DisplayName, the

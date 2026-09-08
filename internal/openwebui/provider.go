@@ -217,12 +217,20 @@ type TurnOutcome struct {
 	// sources[] is captured only from the completions response body
 	// itself, never re-derived from this GET path, because whether GET
 	// /api/v1/chats/{id} even carries sources for a completed turn was
-	// never confirmed. A turn recovered through this lookup path (Issue
-	// #53's uncertain-outcome retry) therefore never gets sources
-	// attached, even if the original completions call that produced it
-	// would have. That gap is cosmetic (a possibly-missing footnote
-	// list on an already-rare recovery path), not a correctness or
-	// security concern.
+	// never confirmed.
+	//
+	// NOT COSMETIC as of ADR-0005 D27 (Issue #123, self-review finding,
+	// 2026-09-08): this comment originally described a rare-recovery-
+	// path-only gap, back when a tool-carrying turn's common case read
+	// sources from a buffered, legacy-mode completions response instead.
+	// D27 retired that response shape for every native (tool-carrying)
+	// turn — its own completions response is always an empty body — and
+	// made this GET path (via awaitTurnDone) that turn's *only*
+	// confirmation step. The consequence: TurnResult.Sources is now
+	// unconditionally nil for every turn that actually calls a tool or
+	// searches the web, not merely for the rare uncertain-outcome retry
+	// this comment used to describe. See D27's own "self-review gap"
+	// paragraph for the open owner decision this needs before shipping.
 	Title *string
 }
 

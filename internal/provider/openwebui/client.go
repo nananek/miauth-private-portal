@@ -321,10 +321,19 @@ type completionsResponseBody struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	// Sources is Issue #81's addition: present whenever a tool call or
-	// web search actually ran (function_calling=legacy's own injection
-	// step — see paramsBody's doc comment). Left as json.RawMessage here
-	// — decoded into []wireSource separately, by decodeSources — so that
+	// Sources is Issue #81's addition: historically present whenever a
+	// tool call or web search actually ran, via the params.
+	// function_calling="legacy" pre-completion injection step D17 used
+	// to force (ADR-0005 D22). ADR-0005 D27 (Issue #123) retired that
+	// step entirely for a native (tool-carrying) turn in favor of
+	// stream:true, whose own completions response is always an empty
+	// body (see runTurn's own doc comment) — so this field is only ever
+	// populated for a plain turn that happens to carry a sources[] array
+	// on its buffered response, which no longer includes any real
+	// tool/web-search turn. See D27's "self-review gap" paragraph and
+	// openwebui.TurnOutcome's Title field doc comment for the unresolved
+	// consequence. Left as json.RawMessage here — decoded into
+	// []wireSource separately, by decodeSources — so that
 	// an unexpected sources[] shape (a provider schema drift this
 	// adapter has not observed) degrades to "no citations for this
 	// reply" rather than failing the whole completions decode and, with

@@ -492,6 +492,22 @@ assumption would look like (a cosmetic footnote mismatch, never a
 `GET /api/v1/chats/{id}` ever carries `sources` for a completed turn — this
 adapter assumes not, and never depends on retrieving it a second time.
 
+**Elevated by ADR-0005 D27 (Issue #123, self-review finding,
+2026-09-08): the mechanism this section describes no longer runs for any
+real tool/web-search turn.** The `params.function_calling=legacy` request
+this whole section's capture depended on is retired for exactly that
+population — D27 sends `stream:true` with no `params` key instead, whose
+completions response is always an empty body ((h)/(k)), never a
+`sources[]`-bearing one. The "whether GET ever carries sources" question
+directly above, previously relevant only to a rare uncertain-outcome
+retry, is now load-bearing for whether Issue #81's citations feature
+works **at all** for a native turn (the only kind that ever calls a tool
+or searches the web): if GET does not carry it either, `sources[]` is
+unconditionally lost for that entire population, not degraded for an edge
+case. This needs its own real-instance check (or an owner decision to
+accept the loss) before Issue #123 ships — see ADR-0005 D27's
+"self-review gap" paragraph.
+
 Separately, **要実機確認**: whether `background_tasks.title_generation:
 true` ((g) above) resolves synchronously (the chat's `title` field is
 already updated by the time `runTurn`'s own post-completion
