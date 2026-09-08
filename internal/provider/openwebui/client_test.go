@@ -52,6 +52,7 @@ func newTestClient(t *testing.T, server *httptest.Server, overrides func(*Config
 		AllowedOrigins:              []string{server.URL},
 		APIKey:                      testAPIKey,
 		Timeout:                     5 * time.Second,
+		ToolTurnTimeout:             5 * time.Second,
 		MaxResponseBytes:            1 << 20,
 		MaxRequestBytes:             1 << 20,
 		AllowIPForTesting:           allowAnyIP,
@@ -1454,5 +1455,339 @@ func minimalContinueTurnReq(chatID string) openwebui.ContinueTurnRequest {
 			ParentAssistantID:  &parent,
 		},
 		SentAt: time.Now(),
+	}
+}
+
+func minimalStreamTurnReq() openwebui.StreamTurnRequest {
+	return openwebui.StreamTurnRequest{
+		ModelID: "mock-model",
+		NewTurn: openwebui.Message{Role: "user", Content: "search for foo"},
+		SentAt:  time.Now(),
+	}
+}
+
+// --- StreamTurn (ADR-0005 D24, Issue #93) ---
+//
+// StreamTurn's own real-instance verification is unavailable in this
+// environment (no way to run the pinned Open WebUI image and a mock
+// upstream backend here — see StreamTurn's and D24's own "UNVERIFIED"
+// notes). Every test below is an httptest-mocked contract test instead:
+// it pins the *shape* this adapter is written to (what it sends, and how
+// it classifies what it reads back), against sse_passthrough_finish.sse.txt
+// (a real capture) and synthetic fixtures for the cases no real capture
+// exists for yet. None of it substitutes for the real-instance
+// confirmation D24 still requires before this mode is ever dispatched to.
+
+func writeSSEFixture(t *testing.T, w http.ResponseWriter, body []byte) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		t.Fatalf("write SSE response: %v", err)
+	}
+}
+
+// TestClient_StreamTurn_ReadsRealPassthroughFixture backs the one row of
+// docs/compat/openwebui-0.11.3.md's "(h)" table this adapter actually
+// reads — a real capture, not a synthetic one — and confirms the
+// accumulated content and finish_reason match what a caller reading the
+// same bytes by hand would expect.
+func TestClient_StreamTurn_ReadsRealPassthroughFixture(t *testing.T) {
+	fixture := loadFixture(t, "sse_passthrough_finish.sse.txt")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, fixture)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	result, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	if err != nil {
+		t.Fatalf("StreamTurn: %v", err)
+	}
+	const want = "mock reply #9 (received 1 messages; last user: stream no chat) "
+	if result.Content != want {
+		t.Errorf("Content = %q, want %q", result.Content, want)
+	}
+	if result.FinishReason == nil || *result.FinishReason != "stop" {
+		t.Errorf("FinishReason = %v, want \"stop\"", result.FinishReason)
+	}
+	if result.RemoteCurrentID != nil || result.Title != nil || result.Sources != nil {
+		t.Errorf("result = %+v, want RemoteCurrentID/Title/Sources all nil (this mode manages no chat)", result)
+	}
+}
+
+// TestClient_StreamTurn_MultiRoundToolCallFixture_ConcatenatesAcrossRounds
+// backs Issue #93's own acceptance criterion ("ツールの結果を受けた2ラウンド
+// 目以降の呼び出しが発生しうること"): a finish_reason of "tool_calls" mid-stream
+// must never be treated as the turn's end (unlike a chat-managed
+// completions response's single finish_reason, OpenAI's own streaming
+// semantics use "tool_calls" for a round that is not yet the final
+// answer), so the read must continue through every round's own content
+// until the literal "data: [DONE]" event, and the round-1/round-2 empty
+// tool_calls-only deltas must contribute nothing themselves.
+func TestClient_StreamTurn_MultiRoundToolCallFixture_ConcatenatesAcrossRounds(t *testing.T) {
+	fixture := loadFixture(t, "sse_native_tool_round_trip.sse.txt")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, fixture)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalStreamTurnReq()
+	req.ToolIDs = []string{"web_search"}
+	result, err := client.StreamTurn(t.Context(), req)
+	if err != nil {
+		t.Fatalf("StreamTurn: %v", err)
+	}
+	const want = "no results, retrying with an alt spelling.found it on the second try."
+	if result.Content != want {
+		t.Errorf("Content = %q, want %q", result.Content, want)
+	}
+	if result.FinishReason == nil || *result.FinishReason != "stop" {
+		t.Errorf("FinishReason = %v, want \"stop\" (the last non-null value before [DONE], not the first \"tool_calls\" seen mid-stream)", result.FinishReason)
+	}
+}
+
+// TestClient_StreamTurn_RequestOmitsChatManagementKeys backs ADR-0005
+// D24: chat_id, parent_id, id, user_message, background_tasks, and
+// params must all be entirely absent — this mode manages no remote
+// chat, and (unlike the chat-managed path) never forces
+// params.function_calling="legacy", since native tool execution is the
+// entire point.
+func TestClient_StreamTurn_RequestOmitsChatManagementKeys(t *testing.T) {
+	var sawKeys map[string]json.RawMessage
+	var sawAccept string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAccept = r.Header.Get("Accept")
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &sawKeys); err != nil {
+			t.Fatalf("decode streaming completions request: %v", err)
+		}
+		writeSSEFixture(t, w, loadFixture(t, "sse_passthrough_finish.sse.txt"))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	req := minimalStreamTurnReq()
+	req.ToolIDs = []string{"calculator"}
+	req.WebSearchEnabled = true
+	if _, err := client.StreamTurn(t.Context(), req); err != nil {
+		t.Fatalf("StreamTurn: %v", err)
+	}
+
+	for _, absent := range []string{"chat_id", "parent_id", "id", "user_message", "background_tasks", "params"} {
+		if _, ok := sawKeys[absent]; ok {
+			t.Errorf("streaming completions request has a %q key, want it entirely absent", absent)
+		}
+	}
+	for _, present := range []string{"model", "stream", "messages", "features", "tool_ids"} {
+		if _, ok := sawKeys[present]; !ok {
+			t.Errorf("streaming completions request is missing %q", present)
+		}
+	}
+	var stream bool
+	if err := json.Unmarshal(sawKeys["stream"], &stream); err != nil || !stream {
+		t.Errorf("stream = %v, err = %v, want true", stream, err)
+	}
+	if sawAccept != "text/event-stream" {
+		t.Errorf("Accept header = %q, want text/event-stream", sawAccept)
+	}
+}
+
+// TestClient_StreamTurn_NeitherToolIDsNorWebSearch_OmitsBothKeys mirrors
+// TestClient_ContinueTurn_WebSearchAndToolIDsDefaultOff_OmitsBothKeys for
+// the new request shape.
+func TestClient_StreamTurn_NeitherToolIDsNorWebSearch_OmitsBothKeys(t *testing.T) {
+	var sawKeys map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &sawKeys); err != nil {
+			t.Fatalf("decode streaming completions request: %v", err)
+		}
+		writeSSEFixture(t, w, loadFixture(t, "sse_passthrough_finish.sse.txt"))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	if _, err := client.StreamTurn(t.Context(), minimalStreamTurnReq()); err != nil {
+		t.Fatalf("StreamTurn: %v", err)
+	}
+	for _, absent := range []string{"features", "tool_ids"} {
+		if _, ok := sawKeys[absent]; ok {
+			t.Errorf("streaming completions request has a %q key, want it absent when neither is configured", absent)
+		}
+	}
+}
+
+// TestClient_StreamTurn_TruncatedNoDone_ContractFailed backs ADR-0005
+// D25: a connection that closes after content chunks but before "data:
+// [DONE]" is always a failure, and never adopts the partial content that
+// had already accumulated.
+func TestClient_StreamTurn_TruncatedNoDone_ContractFailed(t *testing.T) {
+	fixture := loadFixture(t, "sse_truncated_no_done.sse.txt")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, fixture)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	result, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryContractFailed || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryContractFailed, openwebui.PhaseStream)
+	}
+	if result.Content != "" {
+		t.Errorf("Content = %q, want empty — partial content must never be adopted", result.Content)
+	}
+}
+
+// TestClient_StreamTurn_MalformedChunkJSON_ContractFailed backs the same
+// "schema drift never guessed at" rule runTurn's own decode already
+// follows.
+func TestClient_StreamTurn_MalformedChunkJSON_ContractFailed(t *testing.T) {
+	body := "data: not-json\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, []byte(body))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	_, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryContractFailed || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryContractFailed, openwebui.PhaseStream)
+	}
+}
+
+// TestClient_StreamTurn_DoneWithEmptyContent_ContractFailed mirrors
+// runTurn's own "done turn has empty content" rule (completionsResponseBody's
+// analogous check): a stream that reaches [DONE] having accumulated no
+// content at all is a contract failure, not a valid empty answer.
+func TestClient_StreamTurn_DoneWithEmptyContent_ContractFailed(t *testing.T) {
+	body := `data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}` + "\n\n" +
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, []byte(body))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	_, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryContractFailed || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryContractFailed, openwebui.PhaseStream)
+	}
+}
+
+// TestClient_StreamTurn_ResponseExceedsMaxBytes_ContractFailed backs the
+// streamLimitedReader's own purpose: a stream that never reaches [DONE]
+// within MaxResponseBytes is cut off and classified the same as any
+// other contract failure, without ever buffering the whole (much larger)
+// body in memory first.
+func TestClient_StreamTurn_ResponseExceedsMaxBytes_ContractFailed(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 500; i++ {
+		sb.WriteString(`data: {"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}` + "\n\n")
+	}
+	sb.WriteString("data: [DONE]\n\n")
+	body := sb.String()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSEFixture(t, w, []byte(body))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) { cfg.MaxResponseBytes = 256 })
+
+	result, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryContractFailed || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryContractFailed, openwebui.PhaseStream)
+	}
+	if result.Content != "" {
+		t.Errorf("Content = %q, want empty", result.Content)
+	}
+}
+
+// TestClient_StreamTurn_CompletionsReturns401_AuthFailed mirrors
+// TestClient_StartChat_ChatsNewReturns401_AuthFailed for the new
+// endpoint call: a non-2xx status is classified from the HTTP status
+// alone, the same categorizeStatus every other call already shares.
+func TestClient_StreamTurn_CompletionsReturns401_AuthFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, []byte(`{"detail":"invalid token"}`), http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, nil)
+
+	_, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryAuthFailed || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryAuthFailed, openwebui.PhaseStream)
+	}
+}
+
+// TestClient_StreamTurn_RequestTooLarge_NotSent mirrors
+// TestClient_ContinueTurn_RequestTooLarge_NotSent for the new endpoint
+// call.
+func TestClient_StreamTurn_RequestTooLarge_NotSent(t *testing.T) {
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		writeSSEFixture(t, w, loadFixture(t, "sse_passthrough_finish.sse.txt"))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) { cfg.MaxRequestBytes = 8 })
+
+	_, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	if !errors.Is(err, openwebui.ErrRequestTooLarge) {
+		t.Errorf("errors.Is(err, ErrRequestTooLarge) = false, err = %v", err)
+	}
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryClientRejected {
+		t.Errorf("Category = %q, want %q", pe.Category, openwebui.CategoryClientRejected)
+	}
+	if hits != 0 {
+		t.Errorf("server was hit %d times, want 0 (an over-size request must never be sent)", hits)
+	}
+}
+
+// TestClient_StreamTurn_UsesToolTurnTimeoutIndependentlyOfTimeout backs
+// ToolTurnTimeout's whole reason for existing: a response slower than
+// the ordinary (short) Timeout must still succeed as long as it finishes
+// within the longer ToolTurnTimeout, since StreamTurn never reads
+// Timeout at all.
+func TestClient_StreamTurn_UsesToolTurnTimeoutIndependentlyOfTimeout(t *testing.T) {
+	fixture := loadFixture(t, "sse_passthrough_finish.sse.txt")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		writeSSEFixture(t, w, fixture)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) {
+		cfg.Timeout = 20 * time.Millisecond
+		cfg.ToolTurnTimeout = 2 * time.Second
+	})
+
+	if _, err := client.StreamTurn(t.Context(), minimalStreamTurnReq()); err != nil {
+		t.Fatalf("StreamTurn: %v, want success (bounded by ToolTurnTimeout, not the much shorter Timeout)", err)
+	}
+}
+
+// TestClient_StreamTurn_ExceedsToolTurnTimeout_Timeout confirms
+// ToolTurnTimeout does still bound the call, just as a longer budget
+// rather than none at all.
+func TestClient_StreamTurn_ExceedsToolTurnTimeout_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		writeJSON(t, w, []byte("null"), http.StatusOK)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server, func(cfg *Config) { cfg.ToolTurnTimeout = 20 * time.Millisecond })
+
+	_, err := client.StreamTurn(t.Context(), minimalStreamTurnReq())
+	pe := requireProviderError(t, err)
+	if pe.Category != openwebui.CategoryTimeout || pe.Phase != openwebui.PhaseStream {
+		t.Errorf("pe = %+v, want Category=%q Phase=%q", pe, openwebui.CategoryTimeout, openwebui.PhaseStream)
 	}
 }
