@@ -182,6 +182,12 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /api/i/notifications", RequireScope(logger, s.miauth, miauth.ScopeReadNotifications)(http.HandlerFunc(s.handleAPINotifications)))
 		s.Handle("POST /api/users/search", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearch)))
 		s.Handle("POST /api/users/search-by-username-and-host", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersSearchByUsernameAndHost)))
+		// Issue #114: users/show returns a profile (read:account, same
+		// scope as users/search above); users/notes returns that actor's
+		// own notes (read:notes, matching every other note-returning
+		// endpoint in this group).
+		s.Handle("POST /api/users/show", RequireScope(logger, s.miauth, miauth.ScopeReadAccount)(http.HandlerFunc(s.handleUsersShow)))
+		s.Handle("POST /api/users/notes", RequireScope(logger, s.miauth, miauth.ScopeReadNotes)(http.HandlerFunc(s.handleUsersNotes)))
 	}
 
 	// Issue #77 PR3: the Misskey-compatible Drive API. Independent of

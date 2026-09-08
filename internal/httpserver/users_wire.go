@@ -31,6 +31,35 @@ type usersSearchByUsernameAndHostRequest struct {
 	Detail   *bool   `json:"detail"`
 }
 
+// usersShowRequest is POST /api/users/show's request (Issue #114).
+// Three distinct misskey_dart request types — UsersShowRequest{userId},
+// UsersShowByIdsRequest{userIds}, and UsersShowByUserNameRequest{
+// username, host} — all post to this same endpoint (pinned
+// misskey_users.dart, traced in docs/compat/aria-v1.5.11.md), told apart
+// only by which fields are present. userIds is accepted so a malformed-
+// body decode never fails on it, but handleUsersShow does not implement
+// the batch lookup it requests — see that handler's own doc comment.
+type usersShowRequest struct {
+	UserID   *string  `json:"userId"`
+	UserIDs  []string `json:"userIds"`
+	Username *string  `json:"username"`
+	Host     *string  `json:"host"`
+}
+
+// usersNotesRequest is POST /api/users/notes's request (Issue #114,
+// misskey_dart's UsersNotesRequest). withRenotes/withReplies/withFiles/
+// fileType/sinceDate/untilDate/allowPartial are accepted by
+// decodeJSONBody's tolerant decoding (unknown/omitted fields never fail
+// it) but have no corresponding field here and are never read — the
+// same "accept but ignore" stance streamConnectBody.params takes for
+// /streaming's connect frame, since this service has no renote or
+// file-attachment concept to filter by.
+type usersNotesRequest struct {
+	UserID  string  `json:"userId"`
+	Limit   *int    `json:"limit"`
+	UntilID *string `json:"untilId"`
+}
+
 // searchCandidate is the intermediate projection of one known local
 // actor (owner, a reserved assistant/system presentation actor, or an
 // Open WebUI model's VirtualActor) that users/search and

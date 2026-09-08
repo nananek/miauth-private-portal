@@ -97,6 +97,8 @@ redacted.
 | `POST /api/notifications/mark-all-as-read` | **不要** | No traced Aria/misskey_dart source ever calls this; the pinned `misskey_dart` client does not even define a wrapper method for it (see below) | N/A — never implement without a new observed source |
 | `POST /api/users/search` | **必要** for Issue #65 (implemented) | User-selection dialog and mention/search autocomplete's query-based lookup | `i` token; `read:account` (already granted — no new scope) |
 | `POST /api/users/search-by-username-and-host` | **必要** for Issue #65 (implemented) | Same call sites' exact username(+host) lookup | `i` token; `read:account` (already granted — no new scope) |
+| `POST /api/users/show` | **必要** for Issue #114 (implemented) | `UserPage`'s `userId` and `username`(+`host`) lookups alike — three distinct misskey_dart request types all post here (see below) | `i` token; `read:account` (already granted — no new scope) |
+| `POST /api/users/notes` | **必要** for Issue #114 (implemented) | `UserPage`'s notes tab (`user_home.dart`/`user_notes.dart`) | `i` token; `read:notes` (already granted — no new scope) |
 | `POST /api/drive` | **必要** for Issue #77 (implemented — PR3) | Drive capacity/usage display (drive screen header, account settings) | `i` token; new `read:drive` scope |
 | `POST /api/drive/files` | **必要** for Issue #77 (implemented — PR3) | Drive screen's per-folder file listing, paginated with `untilId`/`limit` | `i` token; `read:drive` |
 | `POST /api/drive/files/create` | **必要** for Issue #77 (implemented — PR3) | Upload from local file (post composer, profile avatar picker, drive screen); both the multipart-file and raw-binary request forms are used | `i` token; new `write:drive` scope |
@@ -1034,6 +1036,66 @@ on every projection built through this struct, including `/api/i` and the
 MiAuth check response, which were already unaffected since Aria decodes
 their `user` field directly as `UserDetailedNotMe`, never through the
 polymorphic `User`/`UserDetailed` discriminator).
+
+### `POST /api/users/show` and `POST /api/users/notes` (Issue #114, implemented)
+
+Traced from the pinned `misskey_dart`'s `lib/src/misskey_users.dart`
+(`MisskeyUsers` class) and the pinned Aria commit's
+`lib/view/page/user/user_page.dart`, `user_home.dart`, and
+`user_notes.dart` — see Issue #114's own body for the full quoted
+source. The observed operator action is opening another actor's profile
+from a `users/search` result or a note's author, then its notes tab;
+starting an actual conversation from there still ends at the same
+`/api/chat/*` non-goal `users/search`'s own section above already
+documents, unchanged by this issue.
+
+**Three distinct misskey_dart request types all post to the same
+`POST /api/users/show` endpoint**, told apart only by which fields are
+present:
+
+```dart
+Future<UserDetailed> show(UsersShowRequest request); // {userId}
+Future<Iterable<UserDetailed>> showByIds(UsersShowByIdsRequest request); // {userIds}
+Future<UserDetailed> showByName(UsersShowByUserNameRequest request); // {username, host}
+```
+
+`UserPage`'s own constructor accepts `userId` or `username`(+`host`)
+interchangeably and its provider picks `show`/`showByName` accordingly —
+`showByIds`'s batch form has no traced call site in the profile-page
+flow, so it is **not implemented**: a request naming only `userIds`
+gets `UNSUPPORTED_FEATURE` rather than a guessed batch contract.
+
+The response for `userId`/`username` is the same polymorphic
+`UserDetailed.fromJson` decode `users/search`'s own section documents —
+this service has no Follow domain concept (Issue #34), so the response
+is always `userDetailedNotMe`, reused unchanged from `users/search`
+(no new struct). An unmatched `userId`/`username` gets a new
+`NO_SUCH_USER` denial (`writeNoSuchUser`, mirroring `writeNoSuchNote`'s
+generic-denial shape) rather than a fabricated result.
+
+`users/notes` (`UsersNotesRequest{userId, limit?, sinceId?, untilId?,
+withRenotes?, withReplies?, withFiles?, ...}`) returns a plain `Note`
+array — the same "Minimum Note contract" this document already fixes
+for every other note-returning endpoint — for one actor's own notes,
+newest-first, with the identical `untilId` cursor-pagination contract
+`notes/timeline` uses. `withRenotes`/`withReplies`/`withFiles`/
+`fileType`/`sinceDate`/`untilDate`/`allowPartial` are accepted (Go's
+JSON decoding tolerates unknown/omitted fields) but never read: this
+service has no renote or file-attachment-filter concept to apply them
+against, the same "accept but ignore" stance `/streaming`'s `connect`
+frame already takes for its own `params`. A `userId` outside this
+deployment's known actor set gets `NO_SUCH_USER`, distinct from a
+known-but-quiet actor's genuine empty array — the same pagination-
+loop-safe empty page an unknown `untilId` still returns, since Aria
+stops paging on an empty result either way.
+
+**Implemented as** `Server.handleUsersShow`/`Server.handleUsersNotes`
+(`internal/httpserver/users_handlers.go`/`users_wire.go`), reusing
+`users/search`'s `searchCandidates`/`matchesUsernameAndHost`/
+`projectSearchCandidate` unchanged for `users/show`, and a new
+`EntryRepository.ListByAuthorsDesc` (`internal/storage/sqlite/
+entry_repository.go`) — `ListTimelineDesc`'s own `(created_at, id)`
+cursor query, scoped to a fixed set of authors — for `users/notes`.
 
 ### Drive API and note attachments (Issue #77 investigation — PR0)
 

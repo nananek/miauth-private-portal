@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -187,4 +188,152 @@ func (s *Server) handleUsersSearchByUsernameAndHost(w http.ResponseWriter, r *ht
 		users[i] = s.projectSearchCandidate(r.Context(), c)
 	}
 	writeJSON(w, http.StatusOK, users)
+}
+
+// handleUsersShow handles POST /api/users/show (Issue #114): a userId or
+// username(+host) lookup over the same known actor set users/search
+// already enumerates, reusing searchCandidates/matchesUsernameAndHost/
+// projectSearchCandidate unchanged — no new projection logic, per this
+// issue's plan §0. A userId or username match returns userDetailedNotMe
+// directly (not wrapped in an array), matching UsersShowRequest/
+// UsersShowByUserNameRequest's single-object response; an unmatched
+// lookup returns the same NO_SUCH_USER denial as users/notes below
+// rather than fabricating success (AGENTS.md).
+//
+// UsersShowByIdsRequest{userIds} is deliberately not implemented: PR0's
+// trace of Aria's user_page.dart (docs/compat/aria-v1.5.11.md) found no
+// call site in the profile-page flow that uses it, and inventing a batch
+// contract nothing traces would be exactly the kind of guess AGENTS.md's
+// "do not silently invent a protocol" rules out. A request that only
+// carries userIds fails closed with an explicit UNSUPPORTED_FEATURE
+// instead of a fabricated empty/partial result.
+func (s *Server) handleUsersShow(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[usersShowRequest](r)
+	if !ok {
+		writeInvalidParam(w, "malformed request body")
+		return
+	}
+
+	candidates, err := s.searchCandidates(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("enumerate search candidates failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	switch {
+	case req.UserID != nil && *req.UserID != "":
+		for _, c := range candidates {
+			if c.ActorID == *req.UserID {
+				writeJSON(w, http.StatusOK, s.projectSearchCandidate(r.Context(), c))
+				return
+			}
+		}
+		writeNoSuchUser(w)
+	case req.Username != nil:
+		for _, c := range candidates {
+			if matchesUsernameAndHost(c, req.Username, req.Host) {
+				writeJSON(w, http.StatusOK, s.projectSearchCandidate(r.Context(), c))
+				return
+			}
+		}
+		writeNoSuchUser(w)
+	case len(req.UserIDs) > 0:
+		writeUnsupportedFeature(w, "userIds")
+	default:
+		writeInvalidParam(w, "userId, userIds, or username is required")
+	}
+}
+
+// handleUsersNotes handles POST /api/users/notes (Issue #114): the
+// requested actor's own notes, newest-first, with the same untilId
+// cursor-pagination contract handleNotesTimeline already gives the home
+// timeline. userId must name one of the same known actors
+// searchCandidates enumerates — an id outside that set gets the same
+// NO_SUCH_USER denial as an unmatched users/show lookup, never a
+// fabricated empty page (AGENTS.md), so a caller cannot tell "this actor
+// has no notes yet" apart from "no such actor" by checking status alone
+// on this endpoint, only on notes/timeline's own untilId handling below.
+func (s *Server) handleUsersNotes(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeJSONBody[usersNotesRequest](r)
+	if !ok {
+		writeInvalidParam(w, "malformed request body")
+		return
+	}
+	if req.UserID == "" {
+		writeInvalidParam(w, "userId is required")
+		return
+	}
+
+	candidates, err := s.searchCandidates(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("enumerate search candidates failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+	known := false
+	for _, c := range candidates {
+		if c.ActorID == req.UserID {
+			known = true
+			break
+		}
+	}
+	if !known {
+		writeNoSuchUser(w)
+		return
+	}
+
+	limit := defaultTimelineLimit
+	if req.Limit != nil && *req.Limit > 0 {
+		limit = *req.Limit
+	}
+	if limit > maxTimelineLimit {
+		limit = maxTimelineLimit
+	}
+
+	// untilId resolution mirrors handleNotesTimeline's own: a stale/
+	// unknown id has nothing older to page to, so an empty page is the
+	// pagination-loop-safe response (Aria stops paging on an empty
+	// result), not an error — distinct from userId itself being unknown
+	// above, which is checked first and always denied.
+	var before *domain.Cursor
+	if req.UntilID != nil && *req.UntilID != "" {
+		anchor, err := s.timeline.GetEntry(r.Context(), *req.UntilID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				writeJSON(w, http.StatusOK, []note{})
+				return
+			}
+			s.logger.Error("resolve users/notes untilId failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		before = &domain.Cursor{CreatedAt: anchor.CreatedAt, ID: anchor.ID}
+	}
+
+	entries, err := s.timeline.GetEntriesByAuthorDesc(r.Context(), req.UserID, before, limit, false)
+	if err != nil {
+		s.logger.Error("get user notes failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	owner, err := s.miauth.DescribeOwner(r.Context(), LocalActorIDFromContext(r.Context()))
+	if err != nil {
+		s.logger.Error("describe owner failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeInternalError(w)
+		return
+	}
+
+	notes := make([]note, 0, len(entries))
+	for _, e := range entries {
+		n, err := s.projectNote(r.Context(), e, s.resolveUserLite(r.Context(), e.AuthorActorID, owner), owner.ActorID)
+		if err != nil {
+			s.logger.Error("project user note failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+			writeInternalError(w)
+			return
+		}
+		notes = append(notes, n)
+	}
+	writeJSON(w, http.StatusOK, notes)
 }

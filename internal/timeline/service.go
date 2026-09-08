@@ -726,6 +726,17 @@ func (s *Service) GetTimelineDesc(ctx context.Context, before *domain.Cursor, li
 	return s.repos.Entries.ListTimelineDesc(ctx, before, limit, includeHidden)
 }
 
+// GetEntriesByAuthorDesc returns authorActorID's own entries, newest
+// first, using the same (created_at, id) cursor contract as
+// GetTimelineDesc — Issue #114's users/notes. It is
+// EntryRepository.ListByAuthorsDesc's single-author special case;
+// Issue #115's planned list-timeline feature is expected to call
+// ListByAuthorsDesc directly with a list's full member set rather than
+// gaining a second wrapper here.
+func (s *Service) GetEntriesByAuthorDesc(ctx context.Context, authorActorID string, before *domain.Cursor, limit int, includeHidden bool) ([]domain.Entry, error) {
+	return s.repos.Entries.ListByAuthorsDesc(ctx, []string{authorActorID}, before, limit, includeHidden)
+}
+
 // GetThread returns the full oldest-first conversation for threadID,
 // including archived and hidden entries.
 func (s *Service) GetThread(ctx context.Context, threadID string) ([]domain.Entry, error) {

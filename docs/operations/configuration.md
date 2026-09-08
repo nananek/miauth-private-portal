@@ -450,6 +450,8 @@ notes" section.
 | `POST /api/notes/show` | `i` token | `read:notes` |
 | `POST /api/notes/conversation` | `i` token | `read:notes` |
 | `POST /api/notes/children` | `i` token | `read:notes` |
+| `POST /api/users/show` | `i` token | `read:account` |
+| `POST /api/users/notes` | `i` token | `read:notes` |
 
 These routes register only when `httpserver.Options.TimelineService` is
 also set alongside `MiAuthService` (see `internal/httpserver.NewServer`);
