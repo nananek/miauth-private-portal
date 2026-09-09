@@ -464,18 +464,19 @@ func run() error {
 		})
 		ingestSvc.RegisterAdapter(rssAdapter)
 
-		// ensureRSSSourcesWithActors (Issue #77 PR4) first: it creates a
-		// paired ActorExternalSource (with its own username/host,
-		// ADR-0008) for every RSS_FEED_URLS entry not yet registered at
-		// all, something ReconcileFromConfig's own create path knows
-		// nothing about. ReconcileFromConfig (Issue #76 PR4a) then
-		// handles the ongoing-reconciliation half ensureRSSSourcesWithActors
-		// does not: reactivating a source whose URI came back after being
-		// removed, and deactivating one no longer configured. Running it
-		// right after is safe and cheap — every URI
-		// ensureRSSSourcesWithActors just created already exists and is
-		// active by default, so ReconcileFromConfig's create-if-missing
-		// branch is a no-op for those.
+		// ReconcileFromConfig (Issue #76 PR4a) first: it creates a bare row
+		// for every RSS_FEED_URLS entry not yet registered at all
+		// (reactivating one whose URI came back after being removed, and
+		// deactivating one no longer configured), but knows nothing about
+		// actors — that path must stay pure SQL reconciliation (AGENTS.md's
+		// persistence-boundary rule; see external_repository.go's own doc
+		// comment). ensureRSSSourceActors (Issue #77 PR4, self-healing as
+		// of Issue #134) runs right after: it provisions a paired
+		// ActorExternalSource (with its own username/host, ADR-0008) for
+		// every rss-kind row — freshly created by the call just above, or
+		// left actor-less by a pre-Issue-#134 deployment (this single
+		// startup pass doubles as that backfill) — that does not have one
+		// yet, without ever recomputing an already-set one.
 		seedNow := time.Now().UTC()
 		// A separate, fixed-policy client from rssAdapter's own
 		// (cfg.RSS.AllowInsecureHTTP-controlled) one above: favicon fetch
@@ -483,11 +484,11 @@ func run() error {
 		// client's reasoning — see internal/ingest/favicon.Fetch's doc
 		// comment.
 		faviconClient := safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: false})
-		if err := ensureRSSSourcesWithActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow, driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger); err != nil {
-			return fmt.Errorf("seed rss sources: %w", err)
-		}
 		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, seedNow); err != nil {
 			return fmt.Errorf("reconcile rss sources: %w", err)
+		}
+		if err := ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow, driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger); err != nil {
+			return fmt.Errorf("ensure rss source actors: %w", err)
 		}
 
 		rssScheduler = ingest.NewScheduler(db.ExternalSources, db.Jobs, ingest.SchedulerConfig{
@@ -498,6 +499,9 @@ func run() error {
 			},
 			DesiredURIs: func(ctx context.Context) []string {
 				return configStore.StringList(ctx, config.KeyRSSFeedURLs, cfg.RSS.FeedURLs)
+			},
+			EnsureActors: func(ctx context.Context) error {
+				return ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, time.Now().UTC(), driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger)
 			},
 		}, logger)
 	}
@@ -639,80 +643,105 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 	}
 }
 
-// ensureRSSSourcesWithActors idempotently creates one domain.ExternalSource
-// (kind rss.Kind) plus its own dedicated ActorExternalSource actor
-// (Issue #77 PR4, ADR-0008's design-A host display) for every feedURLs
-// entry not already registered. feedUsernames[i], when non-nil, is
-// feedURLs[i]'s owner-chosen username (RSS_FEED_URLS' "|username"
-// suffix); otherwise one is derived from the feed's own host
-// (internal/ingest/rss.DefaultUsername), disambiguated against every
-// username already registered for that same host.
+// ensureRSSSourceActors idempotently fills in actor_id/username/host
+// (Issue #77 PR4, ADR-0008) for every currently *active* rss-kind
+// external_sources row that does not have one yet. A row can reach that
+// state two ways this function treats identically: (1)
+// ReconcileFromConfig's create-if-missing path just created it with no
+// paired actor — that path knows nothing about actors at all, by design
+// (see external_repository.go's own doc comment) — whether at startup
+// or via a live RSS_FEED_URLS reload (Issue #134's bug); or (2) it was
+// left in that state by a version of this service that predates this
+// fix (Issue #134's backfill case — same code path, no separate
+// one-off tool needed). It never recomputes an already-set actor
+// identity: only a row with ActorID == nil is touched, and
+// SetActorIdentity's own `WHERE actor_id IS NULL` makes that enforced,
+// not just intended (ADR-0008: "computed once ... and never
+// recomputed").
 //
-// Unlike domain.ExternalSourceRepository.EnsureFromConfig's plain
-// create-and-ignore-conflict shape (still used for imap below, which
-// pairs no actor with its source), each entry's existence is checked
-// first: an already-registered source's actor must never be recreated,
-// and only a genuinely new source's actor+source pair is created,
-// together inside one transaction, so a failed source insert never
-// leaves an orphaned actor behind. This is safe as plain check-then-
-// create (not itself wrapped in a further outer transaction) because it
-// only ever runs once, single-threaded, during this process's own
-// startup — there is no concurrent caller to race against.
+// Callers must run this again after every ReconcileFromConfig round,
+// not only once at process startup — cmd/server's startup sequence and
+// ingest.Scheduler's tick (via SchedulerConfig.EnsureActors) both do.
 //
-// After each new source's actor+source pair commits, its host's
-// favicon.ico is fetched, validated, and stored as that actor's avatar
-// (Issue #77 PR5, folded in per plan-77 requirement 2: RSS icon fetch and
-// the profile-image (avatar_file_id) infrastructure share the same
-// Drive-backed storage path, so plan-77's owner decided to land them
-// together). This step is strictly best-effort — see
+// bootstrapFeedURLs/bootstrapFeedUsernames — this process's own
+// RSS_FEED_URLS at startup, already split into parallel slices by
+// internal/config's splitRSSFeedURLs — are consulted only to find an
+// owner-chosen username for a row whose URI happens to match one of
+// them (the startup call passes cfg.RSS.FeedURLs/FeedUsernames; the
+// scheduler-tick call passes nil, nil, since configstore.Store.
+// StringList does not carry a "|username" suffix through the DB
+// overlay — see that function's own doc comment). Every other
+// actor-less row gets an auto-derived username instead, exactly as an
+// unset feedUsernames[i] entry always has.
+//
+// After each row's actor commits, its host's favicon.ico is fetched,
+// validated, and stored as that actor's avatar (Issue #77 PR5, folded in
+// per plan-77 requirement 2). This step is strictly best-effort — see
 // fetchAndSetSourceFavicon's doc comment — and runs outside the actor/
 // source transaction: a network fetch has no business holding a database
 // write lock, and a favicon failure must never unwind an otherwise
-// successful source registration.
-func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []string, feedUsernames []*string, now time.Time, driveSvc *drive.Service, faviconClient *safehttp.Client, faviconMaxBytes int64, logger *slog.Logger) error {
-	for i, feedURL := range feedURLs {
-		if _, err := db.ExternalSources.GetByURI(ctx, rss.Kind, feedURL); err == nil {
-			continue // already registered; username/host are never recomputed
-		} else if !errors.Is(err, domain.ErrNotFound) {
-			return fmt.Errorf("look up existing rss source %q: %w", feedURL, err)
+// successful actor provisioning.
+func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs []string, bootstrapFeedUsernames []*string, now time.Time, driveSvc *drive.Service, faviconClient *safehttp.Client, faviconMaxBytes int64, logger *slog.Logger) error {
+	usernameByURI := make(map[string]string, len(bootstrapFeedURLs))
+	for i, u := range bootstrapFeedURLs {
+		if i < len(bootstrapFeedUsernames) && bootstrapFeedUsernames[i] != nil {
+			usernameByURI[u] = *bootstrapFeedUsernames[i]
+		}
+	}
+
+	sources, err := db.ExternalSources.List(ctx, rss.Kind)
+	if err != nil {
+		return fmt.Errorf("list rss sources: %w", err)
+	}
+
+	// reservedByHost seeds from every source that already has a
+	// username, then grows as this pass provisions more, so two
+	// actor-less rows discovered in the very same pass never derive the
+	// same candidate for the same host (the DB's own UNIQUE(host,
+	// username) index is the final backstop if this bookkeeping is ever
+	// wrong, but should never need to be exercised in practice).
+	reservedByHost := make(map[string]map[string]bool)
+	for _, s := range sources {
+		if s.Host != nil && s.Username != nil {
+			if reservedByHost[*s.Host] == nil {
+				reservedByHost[*s.Host] = make(map[string]bool)
+			}
+			reservedByHost[*s.Host][*s.Username] = true
+		}
+	}
+
+	for _, source := range sources {
+		if source.ActorID != nil {
+			continue // already has its own actor; never recomputed (ADR-0008)
 		}
 
-		host, err := rss.HostFromFeedURL(feedURL)
+		host, err := rss.HostFromFeedURL(source.URI)
 		if err != nil {
-			return fmt.Errorf("derive host for rss source %q: %w", feedURL, err)
+			return fmt.Errorf("derive host for rss source %q: %w", source.URI, err)
 		}
 
-		var username string
-		if i < len(feedUsernames) && feedUsernames[i] != nil {
-			username = *feedUsernames[i]
-		}
+		username := usernameByURI[source.URI]
 		if username == "" {
-			existing, err := db.ExternalSources.List(ctx, rss.Kind)
-			if err != nil {
-				return fmt.Errorf("list existing rss sources: %w", err)
-			}
-			reserved := make(map[string]bool, len(existing))
-			for _, s := range existing {
-				if s.Host != nil && *s.Host == host && s.Username != nil {
-					reserved[*s.Username] = true
-				}
-			}
-			username = rss.DefaultUsername(host, feedURL, func(candidate string) bool { return reserved[candidate] })
+			reserved := reservedByHost[host]
+			username = rss.DefaultUsername(host, source.URI, func(candidate string) bool { return reserved[candidate] })
 		}
+		if reservedByHost[host] == nil {
+			reservedByHost[host] = make(map[string]bool)
+		}
+		reservedByHost[host][username] = true
 
 		actorID := domain.NewID()
 		err = db.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
 			if err := repos.Actors.Create(ctx, domain.Actor{ID: actorID, Type: domain.ActorExternalSource, CreatedAt: now}); err != nil {
 				return fmt.Errorf("create rss source actor: %w", err)
 			}
-			return repos.ExternalSources.Create(ctx, domain.ExternalSource{
-				ID: domain.NewID(), Kind: rss.Kind, URI: feedURL,
-				ActorID: &actorID, Username: &username, Host: &host,
-				CreatedAt: now,
-			})
+			return repos.ExternalSources.SetActorIdentity(ctx, source.ID, actorID, username, host)
 		})
 		if err != nil {
-			return fmt.Errorf("register rss source %q: %w", feedURL, err)
+			if errors.Is(err, domain.ErrConflict) {
+				continue // provisioned by a concurrent pass since List above; safe to skip
+			}
+			return fmt.Errorf("provision rss source actor %q: %w", source.URI, err)
 		}
 
 		fetchAndSetSourceFavicon(ctx, db, driveSvc, faviconClient, faviconMaxBytes, actorID, host, username, logger)
@@ -727,9 +756,9 @@ func ensureRSSSourcesWithActors(ctx context.Context, db *sqlite.DB, feedURLs []s
 // faviconMaxBytes, or a Drive validation/storage error — is logged and
 // swallowed: this is a cosmetic enhancement to a source actor a caller
 // has already committed to the database, not a precondition for it, so
-// none of these failures may propagate to ensureRSSSourcesWithActors'
-// caller (which would otherwise fail this process's entire startup over
-// a third party's missing icon).
+// none of these failures may propagate to ensureRSSSourceActors' caller
+// (which would otherwise fail this process's entire startup, or a
+// scheduler tick, over a third party's missing icon).
 func fetchAndSetSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, client *safehttp.Client, maxBytes int64, actorID, host, username string, logger *slog.Logger) {
 	pngData, err := favicon.Fetch(ctx, client, host, maxBytes)
 	if err != nil {
