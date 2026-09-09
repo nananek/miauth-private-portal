@@ -82,7 +82,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "Rejected MiAuth session.")
 		return nil
 	case "tokens":
-		return runTokens(ctx, svc, db, args[1:], stdout, time.Now().UTC())
+		return runTokens(ctx, svc, db, args[1:], stdout)
 	case "revoke":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: miauthctl revoke <token-id>")

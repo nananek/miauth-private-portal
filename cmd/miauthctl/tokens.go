@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
@@ -15,13 +14,13 @@ import (
 
 // runTokens dispatches the tokens subcommand family. Bare "tokens" (no
 // further args) keeps its pre-existing meaning: list issued API tokens.
-func runTokens(ctx context.Context, svc *miauth.Service, db *sqlite.DB, args []string, stdout io.Writer, now time.Time) error {
+func runTokens(ctx context.Context, svc *miauth.Service, db *sqlite.DB, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return listTokens(ctx, svc, stdout)
 	}
 	switch args[0] {
 	case "reflect-scopes":
-		return tokensReflectScopes(ctx, svc, db, args[1:], stdout, now)
+		return tokensReflectScopes(ctx, svc, db, args[1:], stdout)
 	default:
 		return &cliExitError{code: exitUsage, err: errors.New(
 			"usage: miauthctl tokens [reflect-scopes [--token-id <id> | --all] [--dry-run]]",
@@ -35,7 +34,7 @@ func runTokens(ctx context.Context, svc *miauth.Service, db *sqlite.DB, args []s
 // scopes back, without requiring a fresh Aria login. See
 // miauth.Service.ReflectScopes' doc comment for the additive-only
 // design.
-func tokensReflectScopes(ctx context.Context, svc *miauth.Service, db *sqlite.DB, args []string, stdout io.Writer, now time.Time) error {
+func tokensReflectScopes(ctx context.Context, svc *miauth.Service, db *sqlite.DB, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("reflect-scopes", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	tokenID := fs.String("token-id", "", "")
@@ -77,43 +76,60 @@ func tokensReflectScopesOne(ctx context.Context, svc *miauth.Service, db *sqlite
 	return nil
 }
 
+// tokensReflectScopesAll drives both `--all` and `--all --dry-run`. The
+// real write path reuses miauth.Service.ReflectScopesAll (each token
+// reflected in its own transaction, per-token failures never blocking
+// others) rather than re-deriving the same skip-revoked/iterate loop
+// here; only the dry-run path — which ReflectScopesAll has no variant
+// of — walks the token list itself. Both paths funnel into the same
+// summary/print loop below so the two stay in lockstep.
 func tokensReflectScopesAll(ctx context.Context, svc *miauth.Service, db *sqlite.DB, stdout io.Writer, dryRun bool) error {
-	tokens, err := svc.ListAPITokens(ctx)
-	if err != nil {
-		return fmt.Errorf("list API tokens: %w", err)
+	type outcome struct {
+		tokenID string
+		result  miauth.ReflectScopesResult
+		err     error
 	}
+	var outcomes []outcome
 
-	var ownerID string
-	if !dryRun {
-		ownerID, err = ownerActorID(ctx, db)
+	if dryRun {
+		tokens, err := svc.ListAPITokens(ctx)
+		if err != nil {
+			return fmt.Errorf("list API tokens: %w", err)
+		}
+		for _, tok := range tokens {
+			if tok.RevokedAt != nil {
+				continue
+			}
+			result, err := svc.PreviewReflectScopes(ctx, tok.ID)
+			outcomes = append(outcomes, outcome{tokenID: tok.ID, result: result, err: err})
+		}
+	} else {
+		ownerID, err := ownerActorID(ctx, db)
 		if err != nil {
 			return err
+		}
+		items, err := svc.ReflectScopesAll(ctx, ownerID)
+		if err != nil {
+			return fmt.Errorf("list API tokens: %w", err)
+		}
+		for _, item := range items {
+			outcomes = append(outcomes, outcome{tokenID: item.TokenID, result: item.Result, err: item.Err})
 		}
 	}
 
 	var updated, unchanged, failed int
-	for _, tok := range tokens {
-		if tok.RevokedAt != nil {
-			continue
-		}
-		var result miauth.ReflectScopesResult
-		var itemErr error
-		if dryRun {
-			result, itemErr = svc.PreviewReflectScopes(ctx, tok.ID)
-		} else {
-			result, itemErr = svc.ReflectScopes(ctx, tok.ID, ownerID)
-		}
-		if itemErr != nil {
+	for _, o := range outcomes {
+		if o.err != nil {
 			failed++
-			fmt.Fprintf(stdout, "Token %s: FAILED: %v\n", safeCell(tok.ID), reflectScopesError(tok.ID, itemErr))
+			fmt.Fprintf(stdout, "Token %s: FAILED: %v\n", safeCell(o.tokenID), reflectScopesError(o.tokenID, o.err))
 			continue
 		}
-		if result.Changed {
+		if o.result.Changed {
 			updated++
 		} else {
 			unchanged++
 		}
-		fmt.Fprint(stdout, reflectScopesLine(tok.ID, result, dryRun))
+		fmt.Fprint(stdout, reflectScopesLine(o.tokenID, o.result, dryRun))
 	}
 
 	fmt.Fprintf(stdout, "Reflected %d token(s): %d updated, %d unchanged, %d failed.\n",
