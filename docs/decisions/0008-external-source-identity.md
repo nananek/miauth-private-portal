@@ -147,3 +147,23 @@ should be re-examined against whatever federation design is actually
 proposed — likely candidates include reverting to a synthetic host
 (Issue #52's own pattern) for `ActorExternalSource` specifically, or
 gating real-host display behind an explicit, separately-reviewed opt-in.
+
+## Addendum (Issue #134)
+
+Actor provisioning (`ensureRSSSourcesWithActors`, since renamed
+`ensureRSSSourceActors`) must run after **every**
+`ExternalSourceRepository.ReconcileFromConfig` round — startup and every
+live-reload scheduler tick — not only once at startup, as PR4 originally
+had it. It is now implemented as an idempotent self-heal over
+`actor_id IS NULL` rows (`ExternalSourceRepository.SetActorIdentity`,
+guarded by a `WHERE actor_id IS NULL` clause so a row is never
+recomputed once set) rather than a diff against configured URLs. This
+closes a gap where a source created by a live `RSS_FEED_URLS` change (or
+by `ReconcileFromConfig` in general, outside the one startup call PR4
+originally paired it with) could permanently keep authoring as the
+shared `system` actor, since nothing else ever revisited it. This
+addendum changes only *when* the already-decided provisioning logic
+above runs, not the identity design itself (real host, per-feed
+username, computed once and never recomputed all still hold). See
+[docs/operations/configuration.md](../operations/configuration.md#startup-seeding-and-live-reconciliation)
+for the current step-by-step behavior.
