@@ -24,12 +24,34 @@ type userLite struct {
 	ID       string  `json:"id"`
 	Username string  `json:"username"`
 	Host     *string `json:"host"`
+	// Name is this actor's display name, the same value userDetailedNotMe.Name
+	// carries (Issue #132): nil whenever the actor has none set, exactly
+	// newUserDetailedNotMe's own "empty string -> nil" convention, via
+	// optionalDisplayName below. Added because a client comparing this
+	// note's author name against users/show's userDetailedNotMe.name for
+	// the same actor previously had nothing here to compare — username
+	// (a charset-normalized handle, e.g. an Open WebUI model's slug) and
+	// DisplayName (its real human-readable name) are deliberately
+	// different strings (internal/domain.VirtualActor's own doc comment).
+	Name *string `json:"name"`
 	// AvatarURL is nil until the projected actor has an AvatarFileID
 	// (Issue #77 PR5) — an absolute GET /files/{id} URL, never the bare
 	// avatarId key: docs/compat/aria-v1.5.11.md's avatarId-discriminator
 	// guardrail (plan-77 v1 §1.4) applies here exactly as it does to
 	// userDetailedNotMe.
 	AvatarURL *string `json:"avatarUrl"`
+}
+
+// optionalDisplayName mirrors newUserDetailedNotMe's own inline
+// "empty string means unset" -> *string conversion (miauth_wire.go),
+// duplicated here rather than exported from that file since it is a
+// one-line, self-contained conversion with no shared state.
+func optionalDisplayName(name string) *string {
+	if name == "" {
+		return nil
+	}
+	n := name
+	return &n
 }
 
 // avatarURLFromFileID resolves fileID to the absolute GET /files/{id}
@@ -292,7 +314,11 @@ func wireText(e domain.Entry) string {
 
 // newUserLiteFromOwner projects a miauth.OwnerProfile onto userLite.
 func newUserLiteFromOwner(localOrigin string, owner miauth.OwnerProfile) userLite {
-	return userLite{ID: owner.ActorID, Username: owner.Username, AvatarURL: avatarURLFromFileID(localOrigin, owner.AvatarFileID)}
+	return userLite{
+		ID: owner.ActorID, Username: owner.Username,
+		Name:      optionalDisplayName(owner.DisplayName),
+		AvatarURL: avatarURLFromFileID(localOrigin, owner.AvatarFileID),
+	}
 }
 
 // resolveUserLite builds the userLite projection for an entry's
@@ -320,14 +346,14 @@ func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owne
 		if actor, err := s.timeline.ResolveAuthor(ctx, authorActorID); err == nil {
 			switch actor.Type {
 			case domain.ActorAssistant:
-				return userLite{ID: authorActorID, Username: "assistant"}
+				return userLite{ID: authorActorID, Username: "assistant", Name: optionalDisplayName(displayNameOrEmpty(actor.DisplayName))}
 			case domain.ActorSystem:
-				return userLite{ID: authorActorID, Username: "system"}
+				return userLite{ID: authorActorID, Username: "system", Name: optionalDisplayName(displayNameOrEmpty(actor.DisplayName))}
 			case domain.ActorOpenWebUIModel:
 				if s.virtualActors != nil {
 					if virtual, err := s.virtualActors.ResolveVirtualActor(ctx, authorActorID); err == nil {
 						host := virtual.Host
-						return userLite{ID: authorActorID, Username: virtual.Slug, Host: &host}
+						return userLite{ID: authorActorID, Username: virtual.Slug, Host: &host, Name: optionalDisplayName(virtual.DisplayName)}
 					}
 				}
 			case domain.ActorExternalSource:
@@ -336,6 +362,7 @@ func (s *Server) resolveUserLite(ctx context.Context, authorActorID string, owne
 						host := *src.Host
 						return userLite{
 							ID: authorActorID, Username: *src.Username, Host: &host,
+							Name: optionalDisplayName(displayNameOrEmpty(src.DisplayName)),
 							// AvatarURL projects the source's fetched
 							// favicon.ico (Issue #77 PR5) — actor.
 							// AvatarFileID, not any field on src itself:
