@@ -136,7 +136,7 @@ func TestAPITokenRepository_GetAndUpdateScopes(t *testing.T) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
 	}
 
-	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account", now); err != nil {
+	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account"); err != nil {
 		t.Fatal(err)
 	}
 	got, err = db.APITokens.Get(t.Context(), "tok-1")
@@ -144,7 +144,7 @@ func TestAPITokenRepository_GetAndUpdateScopes(t *testing.T) {
 		t.Fatalf("Get after UpdateScopes = %+v, err = %v", got, err)
 	}
 
-	if err := db.APITokens.UpdateScopes(t.Context(), "missing", "read:account", now); !errors.Is(err, domain.ErrNotFound) {
+	if err := db.APITokens.UpdateScopes(t.Context(), "missing", "read:account"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("UpdateScopes on missing token error = %v, want ErrNotFound", err)
 	}
 
@@ -154,7 +154,7 @@ func TestAPITokenRepository_GetAndUpdateScopes(t *testing.T) {
 	// UpdateScopes' WHERE revoked_at IS NULL guard: a revoked token must
 	// report ErrNotFound (never silently succeed) even though the row
 	// itself still exists.
-	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account write:notes", now); !errors.Is(err, domain.ErrNotFound) {
+	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account write:notes"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("UpdateScopes on revoked token error = %v, want ErrNotFound", err)
 	}
 	got, err = db.APITokens.Get(t.Context(), "tok-1")

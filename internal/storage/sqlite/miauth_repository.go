@@ -187,20 +187,18 @@ func (r *apiTokenRepository) TouchLastUsed(ctx context.Context, id string, at ti
 }
 
 // UpdateScopes writes id's recomputed scopes (miauth.Service.ReflectScopes).
-// api_tokens has no updated_at column to stamp, so at is unused here — it
-// is part of the signature only so a future column addition would not
-// need a signature change; the audit trail (APITokenScopeAuditRepository)
-// is what actually records ReflectScopes' timestamp today. The WHERE
-// clause requires revoked_at IS NULL as a belt-and-suspenders guard
-// against a concurrent revoke landing between ReflectScopes' own Get and
-// this write within the same transaction — SQLite's transaction isolation
-// already closes that race in practice, but the guard costs nothing and
-// matches this codebase's general preference for a DB-enforced invariant
-// over a read-then-write TOCTOU (see Authorize/Consume's own WHERE-clause
-// guards). Zero rows affected here always means "revoked concurrently,"
-// never "does not exist at all": nothing in this codebase ever deletes an
-// api_tokens row.
-func (r *apiTokenRepository) UpdateScopes(ctx context.Context, id, scopes string, _ time.Time) error {
+// api_tokens has no updated_at column to stamp; the audit trail
+// (APITokenScopeAuditRepository) is what records ReflectScopes' timestamp.
+// The WHERE clause requires revoked_at IS NULL as a belt-and-suspenders
+// guard against a concurrent revoke landing between ReflectScopes' own Get
+// and this write within the same transaction — SQLite's transaction
+// isolation already closes that race in practice, but the guard costs
+// nothing and matches this codebase's general preference for a
+// DB-enforced invariant over a read-then-write TOCTOU (see
+// Authorize/Consume's own WHERE-clause guards). Zero rows affected here
+// always means "revoked concurrently," never "does not exist at all":
+// nothing in this codebase ever deletes an api_tokens row.
+func (r *apiTokenRepository) UpdateScopes(ctx context.Context, id, scopes string) error {
 	res, err := r.q.ExecContext(ctx,
 		`UPDATE api_tokens SET scopes = ? WHERE id = ? AND revoked_at IS NULL`,
 		scopes, id,

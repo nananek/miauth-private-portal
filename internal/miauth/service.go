@@ -266,7 +266,7 @@ func (s *Service) ReflectScopes(ctx context.Context, tokenID, changedByActorID s
 		if !result.Changed {
 			return nil
 		}
-		if err := repos.APITokens.UpdateScopes(ctx, tok.ID, result.NewScopes, now); err != nil {
+		if err := repos.APITokens.UpdateScopes(ctx, tok.ID, result.NewScopes); err != nil {
 			if errors.Is(err, domain.ErrNotFound) {
 				// tok.RevokedAt was nil moments ago in this same
 				// transaction and nothing in this codebase ever deletes

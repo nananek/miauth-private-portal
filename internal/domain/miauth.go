@@ -76,7 +76,7 @@ type APITokenRepository interface {
 	// confirmed the token exists (as ReflectScopes does, via Get, inside
 	// the same transaction) can treat ErrNotFound from UpdateScopes as
 	// "revoked concurrently" — see ReflectScopes' doc comment.
-	UpdateScopes(ctx context.Context, id, scopes string, at time.Time) error
+	UpdateScopes(ctx context.Context, id, scopes string) error
 }
 
 // APITokenScopeAuditEntry is one row of the api_token_scope_audit table:
