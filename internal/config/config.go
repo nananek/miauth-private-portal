@@ -225,6 +225,15 @@ type RSSConfig struct {
 	// enforcement pattern: false (the default) rejects any http feed
 	// URL at config validation time.
 	AllowInsecureHTTP bool
+	// FilterScriptPath, if non-empty, names a Starlark script
+	// (internal/ingest/rss.LoadFilter) filtering individual ingested
+	// items before they reach the timeline (Issue #135). Empty (the
+	// default) means no filtering: every item is kept. Bootstrap-only —
+	// see docs/decisions/0009-rss-item-filtering.md's "no live reload"
+	// decision — no file-existence or syntax validation happens here;
+	// cmd/server's rss.LoadFilter call at startup is the real check, and
+	// fails startup closed on a bad script.
+	FilterScriptPath string
 }
 
 // IMAPConfig configures Issue #12's read-only IMAP mail ingestion. Enabled
@@ -697,6 +706,7 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.RSS.MaxRedirects = parseOptionalInt(values, KeyRSSMaxRedirects, 3, rssMaxRedirectsMin, rssMaxRedirectsMax, &errs)
 	cfg.RSS.SummaryMaxChars = parseOptionalInt(values, KeyRSSSummaryMaxChars, 4000, rssSummaryMaxCharsMin, rssSummaryMaxCharsMax, &errs)
 	cfg.RSS.AllowInsecureHTTP = parseOptionalBool(values, KeyRSSAllowInsecureHTTP, false, &errs)
+	cfg.RSS.FilterScriptPath = parseOptionalString(values, KeyRSSFilterScriptPath, "")
 
 	cfg.Drive.Backend = parseOptionalEnum(values, KeyDriveBackend, "localdisk", []string{"localdisk", "s3compat"}, &errs)
 	cfg.Drive.DataDir = parseOptionalString(values, KeyDriveDataDir, "./data/drive")
@@ -1009,6 +1019,7 @@ func (c Config) Redacted() map[string]string {
 		KeyRSSMaxRedirects:                           strconv.Itoa(c.RSS.MaxRedirects),
 		KeyRSSSummaryMaxChars:                        strconv.Itoa(c.RSS.SummaryMaxChars),
 		KeyRSSAllowInsecureHTTP:                      strconv.FormatBool(c.RSS.AllowInsecureHTTP),
+		KeyRSSFilterScriptPath:                       c.RSS.FilterScriptPath,
 		KeyDriveBackend:                              c.Drive.Backend,
 		KeyDriveDataDir:                              c.Drive.DataDir,
 		KeyDriveS3Endpoint:                           c.Drive.S3Endpoint,

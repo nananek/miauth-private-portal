@@ -60,6 +60,15 @@ const (
 	KeyRSSMaxRedirects      = "RSS_MAX_REDIRECTS"
 	KeyRSSSummaryMaxChars   = "RSS_SUMMARY_MAX_CHARS"
 	KeyRSSAllowInsecureHTTP = "RSS_ALLOW_INSECURE_HTTP"
+	// KeyRSSFilterScriptPath is Issue #135's optional per-item exclusion
+	// filter: a path to a Starlark script (internal/ingest/rss.LoadFilter)
+	// defining a top-level matches(title, body, source_host, source_uri,
+	// provenance_url) predicate. Empty (the default) means no filtering.
+	// Bootstrap-only — not in keyclass.go's dbEligibleKeys — because a
+	// script is executable logic loaded and compiled once at startup, not
+	// a scalar this service can safely re-read on a cadence; see
+	// docs/decisions/0009-rss-item-filtering.md.
+	KeyRSSFilterScriptPath = "RSS_FILTER_SCRIPT_PATH"
 
 	KeyIMAPEnabled          = "IMAP_ENABLED"
 	KeyIMAPHost             = "IMAP_HOST"
@@ -211,6 +220,7 @@ var knownKeyOrder = []string{
 	KeyRSSMaxRedirects,
 	KeyRSSSummaryMaxChars,
 	KeyRSSAllowInsecureHTTP,
+	KeyRSSFilterScriptPath,
 	KeyIMAPEnabled,
 	KeyIMAPHost,
 	KeyIMAPPort,
