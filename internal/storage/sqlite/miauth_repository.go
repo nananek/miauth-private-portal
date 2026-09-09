@@ -142,6 +142,10 @@ func (r *apiTokenRepository) Create(ctx context.Context, t domain.APIToken) erro
 	return mapWriteError(err)
 }
 
+func (r *apiTokenRepository) Get(ctx context.Context, id string) (domain.APIToken, error) {
+	return scanAPIToken(r.q.QueryRowContext(ctx, apiTokenSelectColumns+` WHERE id = ?`, id))
+}
+
 func (r *apiTokenRepository) GetByTokenHash(ctx context.Context, tokenHash string) (domain.APIToken, error) {
 	return scanAPIToken(r.q.QueryRowContext(ctx, apiTokenSelectColumns+` WHERE token_hash = ?`, tokenHash))
 }
@@ -176,6 +180,31 @@ func (r *apiTokenRepository) Revoke(ctx context.Context, id string, at time.Time
 
 func (r *apiTokenRepository) TouchLastUsed(ctx context.Context, id string, at time.Time) error {
 	res, err := r.q.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, formatTime(at), id)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffected(res)
+}
+
+// UpdateScopes writes id's recomputed scopes (miauth.Service.ReflectScopes).
+// api_tokens has no updated_at column to stamp, so at is unused here — it
+// is part of the signature only so a future column addition would not
+// need a signature change; the audit trail (APITokenScopeAuditRepository)
+// is what actually records ReflectScopes' timestamp today. The WHERE
+// clause requires revoked_at IS NULL as a belt-and-suspenders guard
+// against a concurrent revoke landing between ReflectScopes' own Get and
+// this write within the same transaction — SQLite's transaction isolation
+// already closes that race in practice, but the guard costs nothing and
+// matches this codebase's general preference for a DB-enforced invariant
+// over a read-then-write TOCTOU (see Authorize/Consume's own WHERE-clause
+// guards). Zero rows affected here always means "revoked concurrently,"
+// never "does not exist at all": nothing in this codebase ever deletes an
+// api_tokens row.
+func (r *apiTokenRepository) UpdateScopes(ctx context.Context, id, scopes string, _ time.Time) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE api_tokens SET scopes = ? WHERE id = ? AND revoked_at IS NULL`,
+		scopes, id,
+	)
 	if err != nil {
 		return mapWriteError(err)
 	}

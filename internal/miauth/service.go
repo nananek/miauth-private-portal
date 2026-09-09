@@ -25,6 +25,15 @@ var (
 	// treat it the same as any other authentication failure rather than
 	// revealing that a valid-but-wrong-actor token was presented.
 	ErrNotOwner = errors.New("miauth: actor is not the owner")
+	// ErrTokenRevoked is returned by ReflectScopes when tokenID names a
+	// revoked token: reflect-scopes only ever applies to active tokens.
+	ErrTokenRevoked = errors.New("miauth: token is revoked")
+	// ErrOriginatingSessionGone is returned by ReflectScopes when the
+	// token's originating MiAuth session cannot be replayed — either the
+	// token has no MiAuthLocalSessionID at all, or that session's row no
+	// longer exists. See ReflectScopes' doc comment for why this must be
+	// a clear error rather than a silent no-op.
+	ErrOriginatingSessionGone = errors.New("miauth: token's originating MiAuth session is missing or unlinked")
 )
 
 type Config struct {
@@ -174,6 +183,137 @@ func (s *Service) ListAPITokens(ctx context.Context) ([]domain.APIToken, error) 
 
 func (s *Service) RevokeAPIToken(ctx context.Context, tokenID string) error {
 	return s.repos.APITokens.Revoke(ctx, tokenID, s.clock.Now())
+}
+
+// ReflectScopesResult is one token's before/after outcome, returned so a
+// caller can report it without a second DB round trip.
+type ReflectScopesResult struct {
+	TokenID   string
+	OldScopes string
+	NewScopes string
+	Changed   bool
+}
+
+// reflectScopesCompute reads tokenID's token and its originating session
+// through repos and returns the would-be ReflectScopesResult, without
+// writing anything. ReflectScopes' transactional write path and
+// PreviewReflectScopes' read-only dry-run path both call this, so their
+// semantics can never drift apart.
+func reflectScopesCompute(ctx context.Context, repos domain.Repos, tokenID string) (domain.APIToken, ReflectScopesResult, error) {
+	tok, err := repos.APITokens.Get(ctx, tokenID)
+	if err != nil {
+		return domain.APIToken{}, ReflectScopesResult{}, err
+	}
+	if tok.RevokedAt != nil {
+		return domain.APIToken{}, ReflectScopesResult{}, ErrTokenRevoked
+	}
+	if tok.MiAuthLocalSessionID == nil {
+		return domain.APIToken{}, ReflectScopesResult{}, ErrOriginatingSessionGone
+	}
+	session, err := repos.LocalMiAuth.Get(ctx, *tok.MiAuthLocalSessionID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.APIToken{}, ReflectScopesResult{}, ErrOriginatingSessionGone
+		}
+		return domain.APIToken{}, ReflectScopesResult{}, err
+	}
+	recomputed := scopesString(effectiveScopes(session.RequestedPermissions))
+	next := clampToGrowth(tok.Scopes, recomputed)
+	result := ReflectScopesResult{TokenID: tok.ID, OldScopes: tok.Scopes, NewScopes: next, Changed: next != tok.Scopes}
+	return tok, result, nil
+}
+
+// PreviewReflectScopes computes what ReflectScopes would do for tokenID
+// without writing anything (`tokens reflect-scopes --dry-run`). Reading
+// outside a transaction is safe here since nothing is written.
+func (s *Service) PreviewReflectScopes(ctx context.Context, tokenID string) (ReflectScopesResult, error) {
+	_, result, err := reflectScopesCompute(ctx, s.repos, tokenID)
+	if err != nil {
+		return ReflectScopesResult{}, err
+	}
+	return result, nil
+}
+
+// ReflectScopes (Issue #133) recomputes tokenID's effective scopes from
+// its originating MiAuth session's stored RequestedPermissions against
+// the *current* grantableScopes, and writes the result back to
+// api_tokens.scopes if it grows. This is how a token issued before a
+// scope was added to grantableScopes (see effectiveScopes' doc comment)
+// picks that scope up without a fresh Aria login.
+//
+// It is deliberately additive-only: clampToGrowth never drops a scope
+// the token already carries, even one the freshly recomputed set would
+// no longer include (see clampToGrowth's own doc comment for why this
+// matters). Fails with ErrTokenRevoked for a revoked token, and
+// ErrOriginatingSessionGone if MiAuthLocalSessionID is nil or the
+// referenced session row no longer exists — a caller must never receive
+// a silent no-op or a crash for those, so it can tell the operator
+// exactly what remediation is needed (re-issue a new token via a fresh
+// Aria login).
+//
+// changedByActorID is recorded as the audit entry's operator
+// (ADR-0002); callers resolve it the same way cmd/miauthctl/config.go's
+// ownerActorID does.
+func (s *Service) ReflectScopes(ctx context.Context, tokenID, changedByActorID string) (ReflectScopesResult, error) {
+	now := s.clock.Now()
+	var result ReflectScopesResult
+	err := s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
+		tok, r, err := reflectScopesCompute(ctx, repos, tokenID)
+		if err != nil {
+			return err
+		}
+		result = r
+		if !result.Changed {
+			return nil
+		}
+		if err := repos.APITokens.UpdateScopes(ctx, tok.ID, result.NewScopes, now); err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				// tok.RevokedAt was nil moments ago in this same
+				// transaction and nothing in this codebase ever deletes
+				// an api_tokens row, so zero rows affected here can only
+				// mean a concurrent revoke landed between the read above
+				// and this write.
+				return ErrTokenRevoked
+			}
+			return err
+		}
+		return repos.TokenScopeAudit.Record(ctx, domain.APITokenScopeAuditEntry{
+			ID: domain.NewID(), TokenID: tok.ID, OldScopes: result.OldScopes, NewScopes: result.NewScopes,
+			ChangedAt: now, ChangedBy: changedByActorID,
+		})
+	})
+	if err != nil {
+		return ReflectScopesResult{}, err
+	}
+	return result, nil
+}
+
+// ReflectScopesAllItem is one token's outcome from ReflectScopesAll.
+type ReflectScopesAllItem struct {
+	TokenID string
+	Result  ReflectScopesResult
+	Err     error
+}
+
+// ReflectScopesAll runs ReflectScopes for every currently non-revoked
+// token, each in its own transaction (via ReflectScopes) so a failure on
+// one token never rolls back or blocks another's already-committed
+// update. Revoked tokens are skipped entirely — reflect-scopes only ever
+// applies to active tokens — and produce no ReflectScopesAllItem at all.
+func (s *Service) ReflectScopesAll(ctx context.Context, changedByActorID string) ([]ReflectScopesAllItem, error) {
+	tokens, err := s.repos.APITokens.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ReflectScopesAllItem, 0, len(tokens))
+	for _, tok := range tokens {
+		if tok.RevokedAt != nil {
+			continue
+		}
+		result, err := s.ReflectScopes(ctx, tok.ID, changedByActorID)
+		items = append(items, ReflectScopesAllItem{TokenID: tok.ID, Result: result, Err: err})
+	}
+	return items, nil
 }
 
 type CheckResult struct {
