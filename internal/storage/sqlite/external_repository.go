@@ -43,6 +43,24 @@ func (r *externalSourceRepository) GetByActorID(ctx context.Context, actorID str
 	return scanExternalSource(row)
 }
 
+// SetActorIdentity's WHERE clause is the only guard against a race
+// between two self-heal passes (there is only ever one process, but a
+// startup pass and a scheduler-tick pass could in principle interleave
+// on a very fast poll interval): whichever commits first wins, the
+// second gets ErrConflict and is a safe no-op to the caller (see
+// cmd/server's ensureRSSSourceActors, which treats it exactly like
+// "already provisioned" and moves on).
+func (r *externalSourceRepository) SetActorIdentity(ctx context.Context, id, actorID, username, host string) error {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE external_sources SET actor_id = ?, username = ?, host = ? WHERE id = ? AND actor_id IS NULL`,
+		actorID, username, host, id,
+	)
+	if err != nil {
+		return mapWriteError(err)
+	}
+	return requireRowAffectedConflict(res)
+}
+
 func (r *externalSourceRepository) List(ctx context.Context, kind string) ([]domain.ExternalSource, error) {
 	rows, err := r.q.QueryContext(ctx, externalSourceSelectColumns+` WHERE kind = ? AND active = 1 ORDER BY created_at, id`, kind)
 	if err != nil {

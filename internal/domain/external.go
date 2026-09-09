@@ -90,6 +90,17 @@ type ExternalSourceRepository interface {
 	// internal/httpserver's ExternalSourceResolver
 	// (Issue #77 PR4's resolveUserLite case for ActorExternalSource).
 	GetByActorID(ctx context.Context, actorID string) (ExternalSource, error)
+	// SetActorIdentity fills in actorID/username/host on an existing source
+	// row (Issue #134's self-healing actor provisioning, run by whatever
+	// creates a bare row via ReconcileFromConfig's create-if-missing path,
+	// or by the backfill pass over a pre-existing actor-less row). It only
+	// ever succeeds against a row whose actor_id is currently NULL —
+	// ADR-0008's "computed once ... and never recomputed" is enforced here,
+	// not just documented: a second call against an already-provisioned row
+	// returns ErrConflict instead of silently overwriting it, the same
+	// zero-rows-affected-means-conflict shape ExternalItemRepository.Promote
+	// already uses for its own "exactly once" guarantee.
+	SetActorIdentity(ctx context.Context, id, actorID, username, host string) error
 	// List returns every *active* configured source of kind, in creation
 	// order (see ExternalSource.Active's own doc comment). A caller
 	// (ingest.Scheduler) always scopes to its own kind: without this
