@@ -602,15 +602,13 @@ func TestReflectScopes_NoOpWhenAlreadyCurrent(t *testing.T) {
 	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
 		t.Fatal(err)
 	}
-	checkResult, err := ts.Check(t.Context(), "route-1")
-	if err != nil {
+	if _, err := ts.Check(t.Context(), "route-1"); err != nil {
 		t.Fatal(err)
 	}
 	tokens, err := ts.ListAPITokens(t.Context())
 	if err != nil || len(tokens) != 1 {
 		t.Fatalf("tokens = %+v, err = %v", tokens, err)
 	}
-	_ = checkResult
 
 	result, err := ts.ReflectScopes(t.Context(), tokens[0].ID, owner.ID)
 	if err != nil {
