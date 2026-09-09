@@ -49,6 +49,18 @@ type SchedulerConfig struct {
 	// removed from config after startup is simply not reflected until a
 	// restart).
 	DesiredURIs func(ctx context.Context) []string
+
+	// EnsureActors, if non-nil, is called once per tick, right after
+	// DesiredURIs' reconciliation (Issue #134): it provisions a real actor
+	// for any source of Kind that does not have one yet — a Kind whose
+	// sources are never individually identified this way (imap) simply
+	// leaves this nil, the same "nil disables the feature entirely"
+	// convention DesiredURIs itself uses. A failure here is logged and
+	// swallowed, exactly like a ReconcileFromConfig or List failure below:
+	// a source without an actor yet must still be polled (it just keeps
+	// authoring as the fallback system actor until the next successful
+	// tick), never skipped.
+	EnsureActors func(ctx context.Context) error
 }
 
 // Scheduler periodically enqueues one JobType job per configured
@@ -135,6 +147,18 @@ func (s *Scheduler) tick(ctx context.Context) {
 			// Reconciliation failing (a transient storage error) must
 			// not skip enqueueing jobs for whatever sources already
 			// exist — fall through to List/enqueue below regardless.
+		}
+	}
+
+	if s.cfg.EnsureActors != nil {
+		if err := s.cfg.EnsureActors(ctx); err != nil {
+			if ctx.Err() == nil {
+				s.logger.Warn("ingest scheduler: ensure source actors failed", "error_category", "storage_error")
+			}
+			// Best-effort, like the reconcile failure above: must not
+			// skip enqueueing jobs for sources that already have a
+			// working actor (or, for that matter, ones that don't yet
+			// but must still be polled).
 		}
 	}
 
