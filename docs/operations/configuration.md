@@ -414,6 +414,48 @@ issued local API tokens by ID without exposing their hashes or raw values;
 `revoke <token-id>` revokes one. The first approved session creates the sole
 Owner actor and later approvals reuse it.
 
+#### Reflecting newly-added scopes onto existing tokens (`tokens reflect-scopes`)
+
+A local API token's `scopes` are computed once, at issuance (`Check`).
+Whenever a new scope is added to `internal/miauth.grantableScopes`, a token
+issued before that change does not carry it, even though Aria's MiAuth
+`permission` query already requested it — re-approving through `miauthctl
+approve` is one way to pick it up (it issues a fresh token), and
+`miauthctl tokens reflect-scopes` (Issue #133) is the other: it updates an
+**already-issued** token in place, without a fresh Aria login.
+
+```sh
+go run ./cmd/miauthctl tokens reflect-scopes --token-id <token-id>
+go run ./cmd/miauthctl tokens reflect-scopes --all
+go run ./cmd/miauthctl tokens reflect-scopes --token-id <token-id> --dry-run
+```
+
+`--token-id <id>` reflects one token; `--all` reflects every currently
+non-revoked token (exactly one of the two is required). `--dry-run` reports
+what would change without writing anything. Each reflect recomputes the
+token's effective scopes from its originating MiAuth session's stored
+requested permissions against the *current* `grantableScopes`, and only ever
+**adds** scopes the stored value is missing — it never removes a scope a
+token already has, even a hypothetical one a future `grantableScopes` change
+might no longer grant, so running it is always safe. Every actual change is
+recorded in an audit trail (`api_token_scope_audit`, mirroring
+`app_config_audit`) with the token id, before/after scopes, timestamp, and
+operator (the bound Owner actor, per ADR-0002); a reflect that finds nothing
+to add writes no audit row.
+
+A token fails to reflect — with a clear per-token error, never a silent
+no-op — if it is revoked, or if its originating MiAuth session can no longer
+be found (nothing in this codebase ever deletes a `miauth_local_sessions`
+row, so this only happens if one was removed manually, outside the app); the
+remediation in both cases is to issue a fresh token via `miauthctl approve`
+instead. `--all` reflects every non-revoked token independently — one
+token's failure does not block the others — and exits non-zero if any
+token failed, listing which ones.
+
+When adding a new scope to `grantableScopes`, existing tokens do not gain it
+automatically: run `miauthctl tokens reflect-scopes --all` after deploying
+(or document why not).
+
 ### Deliberately out of scope
 
 - Managing SSH access, host accounts, or operating-system audit policy.

@@ -15,7 +15,7 @@ var expectedTables = []string{
 	"llm_classification_tags", "llm_classification_related_entries", "jobs", "llm_generations",
 	"external_sources", "external_items", "reactions", "mentions", "notifications",
 	"openwebui_workspaces", "openwebui_models", "openwebui_conversation_links", "openwebui_turn_links",
-	"files", "folders",
+	"files", "folders", "api_token_scope_audit",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {

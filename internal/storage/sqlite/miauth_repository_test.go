@@ -115,3 +115,83 @@ func TestAPITokenRepository_ListAndRevoke(t *testing.T) {
 		t.Fatalf("revoked List = %+v, err = %v", tokens, err)
 	}
 }
+
+func TestAPITokenRepository_GetAndUpdateScopes(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	owner := createOwnerActor(t, db, now)
+	token := domain.APIToken{
+		ID: "tok-1", TokenHash: "hash-1", LocalActorID: owner.ID,
+		Scopes: "read:account", CreatedAt: now,
+	}
+	if err := db.APITokens.Create(t.Context(), token); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.APITokens.Get(t.Context(), "tok-1")
+	if err != nil || got.Scopes != "read:account" {
+		t.Fatalf("Get = %+v, err = %v", got, err)
+	}
+	if _, err := db.APITokens.Get(t.Context(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
+	}
+
+	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account", now); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.APITokens.Get(t.Context(), "tok-1")
+	if err != nil || got.Scopes != "read:account write:account" {
+		t.Fatalf("Get after UpdateScopes = %+v, err = %v", got, err)
+	}
+
+	if err := db.APITokens.UpdateScopes(t.Context(), "missing", "read:account", now); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UpdateScopes on missing token error = %v, want ErrNotFound", err)
+	}
+
+	if err := db.APITokens.Revoke(t.Context(), "tok-1", now); err != nil {
+		t.Fatal(err)
+	}
+	// UpdateScopes' WHERE revoked_at IS NULL guard: a revoked token must
+	// report ErrNotFound (never silently succeed) even though the row
+	// itself still exists.
+	if err := db.APITokens.UpdateScopes(t.Context(), "tok-1", "read:account write:account write:notes", now); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UpdateScopes on revoked token error = %v, want ErrNotFound", err)
+	}
+	got, err = db.APITokens.Get(t.Context(), "tok-1")
+	if err != nil || got.Scopes != "read:account write:account" {
+		t.Fatalf("revoked token scopes changed: got = %+v, err = %v, want unchanged", got, err)
+	}
+}
+
+func TestAPITokenScopeAuditRepository_RecordAndListByToken(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	owner := createOwnerActor(t, db, now)
+	token := domain.APIToken{ID: "tok-1", TokenHash: "hash-1", LocalActorID: owner.ID, Scopes: "read:account", CreatedAt: now}
+	if err := db.APITokens.Create(t.Context(), token); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []domain.APITokenScopeAuditEntry{
+		{ID: "audit-1", TokenID: "tok-1", OldScopes: "read:account", NewScopes: "read:account write:account", ChangedAt: now, ChangedBy: owner.ID},
+		{ID: "audit-2", TokenID: "tok-1", OldScopes: "read:account write:account", NewScopes: "read:account write:account read:drive", ChangedAt: now.Add(time.Minute), ChangedBy: owner.ID},
+	}
+	for _, e := range entries {
+		if err := db.TokenScopeAudit.Record(t.Context(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	history, err := db.TokenScopeAudit.ListByToken(t.Context(), "tok-1")
+	if err != nil || len(history) != 2 {
+		t.Fatalf("ListByToken = %+v, err = %v, want 2 entries oldest first", history, err)
+	}
+	if history[0].ID != "audit-1" || history[1].ID != "audit-2" {
+		t.Fatalf("ListByToken order = %+v, want audit-1 then audit-2", history)
+	}
+
+	other, err := db.TokenScopeAudit.ListByToken(t.Context(), "no-such-token")
+	if err != nil || len(other) != 0 {
+		t.Fatalf("ListByToken for unrelated token = %+v, err = %v, want none", other, err)
+	}
+}
