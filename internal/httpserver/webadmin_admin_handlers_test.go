@@ -405,32 +405,42 @@ func TestHandleAdminMutatingRoutes_RequireSession(t *testing.T) {
 // auditFailingRepo wraps the real WebAdminActionAuditRepository so its
 // Record call always errors, letting
 // TestRecordAdminAction_FailureDoesNotFailTheHTTPResponse prove
-// recordAdminAction's failure is swallowed rather than surfaced.
+// recordAdminAction's failure is swallowed rather than surfaced. called
+// is set on every Record call so the test can confirm this decorator —
+// not the real repository — is the one the running service actually
+// used (see newWebAdminTestServer's mutateRepos doc comment: a
+// domain.Repos swap made after service construction is silently
+// invisible to it, since the service holds its own copy of the value).
 type auditFailingRepo struct {
 	domain.WebAdminActionAuditRepository
+	called *bool
 }
 
 var errAuditWriteFailed = errors.New("simulated audit write failure")
 
-func (auditFailingRepo) Record(ctx context.Context, entry domain.WebAdminActionAuditEntry) error {
+func (r auditFailingRepo) Record(ctx context.Context, entry domain.WebAdminActionAuditEntry) error {
+	*r.called = true
 	return errAuditWriteFailed
 }
 
 func TestRecordAdminAction_FailureDoesNotFailTheHTTPResponse(t *testing.T) {
-	ts := newWebAdminTestServer(t)
+	var failingRepoCalled bool
+	// The failing decorator must be wired into the domain.Repos value
+	// BEFORE webadmin.NewService/miauth.NewService run inside
+	// newWebAdminTestServer, not swapped in on ts.db.Repos afterwards —
+	// see that helper's doc comment.
+	ts := newWebAdminTestServer(t, func(r *domain.Repos) {
+		r.WebAdminActionAudit = auditFailingRepo{r.WebAdminActionAudit, &failingRepoCalled}
+	})
 	cookie, csrfToken := authedAdminRequest(t, ts)
 	seedPendingSession(t, ts, "route-session-audit-fail", "read:account", nil)
-
-	// Swap the underlying repository's audit table for one whose Record
-	// always fails, without touching internal/miauth.Service at all
-	// (plan-136-phase3 §1 Decision 1) — this only replaces the
-	// bookkeeping side-write recordAdminAction makes after the real
-	// action already succeeded.
-	ts.db.Repos.WebAdminActionAudit = auditFailingRepo{ts.db.Repos.WebAdminActionAudit}
 
 	rec := postAdminAction(t, ts, "/admin/sessions/approve", cookie, csrfToken, map[string]string{"routeSessionId": "route-session-audit-fail"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %q, want 200 even though the audit write fails", rec.Code, rec.Body.String())
+	}
+	if !failingRepoCalled {
+		t.Fatal("auditFailingRepo.Record was never invoked: the failing repo never reached the running service, so this test did not actually exercise the audit-failure path")
 	}
 	var got struct {
 		OK bool `json:"ok"`

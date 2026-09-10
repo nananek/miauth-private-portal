@@ -47,7 +47,17 @@ type webAdminTestServer struct {
 	dbPath  string
 }
 
-func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
+// newWebAdminTestServer builds a webAdminTestServer against a fresh
+// migrated DB. mutateRepos, if given, is applied to a copy of db.Repos
+// before it is handed to webadmin.NewService/miauth.NewService: both
+// services store their own domain.Repos VALUE (not a pointer) at
+// construction time, so swapping a field on ts.db.Repos afterwards (e.g.
+// to inject a failing decorator) would never be seen by the already-built
+// service. Tests that need one repository to behave differently for the
+// service under test (see
+// TestRecordAdminAction_FailureDoesNotFailTheHTTPResponse) must instead
+// pass a hook here, before construction.
+func newWebAdminTestServer(t *testing.T, mutateRepos ...func(*domain.Repos)) *webAdminTestServer {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
@@ -64,7 +74,11 @@ func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
 	if err := db.Actors.Create(t.Context(), owner); err != nil {
 		t.Fatal(err)
 	}
-	svc, err := webadmin.NewService(db, db.Repos, webadmin.Config{
+	repos := db.Repos
+	for _, mutate := range mutateRepos {
+		mutate(&repos)
+	}
+	svc, err := webadmin.NewService(db, repos, webadmin.Config{
 		RPID: webAdminTestRPID, RPDisplayName: "Test Portal", RPOrigins: []string{webAdminTestOrigin},
 		OwnerUsername: "owner", OwnerDisplayName: "Test Owner",
 		// SessionTTL must be nonzero: FinishLogin's Activate call extends
@@ -83,7 +97,7 @@ func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
 	// newMiAuthTestServer. Without this, GET /admin/ (now a real
 	// dashboard, not Phase 2's placeholder) would panic on a nil
 	// s.miauth.
-	miauthSvc := miauth.NewService(db, db.Repos, miauth.Config{
+	miauthSvc := miauth.NewService(db, repos, miauth.Config{
 		ClientCallbacks: []string{"aria://aria/miauth"}, OwnerUsername: "owner", OwnerDisplayName: "Test Owner",
 	})
 	// LocalOrigin matches webAdminTestOrigin (already https://), so
