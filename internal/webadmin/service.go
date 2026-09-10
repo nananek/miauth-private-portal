@@ -419,10 +419,17 @@ func (s *Service) FinishLogin(ctx context.Context, sessionID string, r *http.Req
 		// revoke-credential (plan-136-phase2 §1 Decision 6) — cutting
 		// off a lost/stolen device's session, not just its future
 		// logins. Grouping the two writes atomically closes that race:
-		// a storage error here (vanishingly rare otherwise) costs the
-		// Owner a login retry, which is a strictly safer failure mode
-		// than an orphaned session outliving the credential that
-		// authenticated it.
+		// UpdateAfterLogin then returns domain.ErrNotFound
+		// (requireRowAffected's zero-rows case), and this closure
+		// aborts before Activate ever runs — costing the Owner a login
+		// retry, which is a strictly safer failure mode than an
+		// orphaned session outliving the credential that authenticated
+		// it. That ErrNotFound is mapped to ErrSessionInvalid below,
+		// alongside Activate's own ErrConflict case: whenever this race
+		// actually fires it is expected, security-correct behavior, not
+		// a real fault, so it must read to the caller as an ordinary
+		// failed login (401), not a 500, and must not get logged at
+		// error level.
 		if err := repos.WebAdminCredentials.UpdateAfterLogin(ctx, credentialID, credJSON, now); err != nil {
 			return err
 		}
@@ -431,8 +438,13 @@ func (s *Service) FinishLogin(ctx context.Context, sessionID string, r *http.Req
 		return err
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrConflict) {
-			return "", domain.WebAdminSession{}, ErrSessionInvalid // raced to expiry since the Get above
+		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
+			// ErrConflict: Activate's own row raced to expiry, or lost a
+			// concurrent double-submit of the same login, since the Get
+			// above. ErrNotFound: UpdateAfterLogin's credential row was
+			// deleted by a concurrent revoke-credential (see this
+			// transaction's own doc comment above).
+			return "", domain.WebAdminSession{}, ErrSessionInvalid
 		}
 		return "", domain.WebAdminSession{}, fmt.Errorf("webadmin: commit login: %w", err)
 	}

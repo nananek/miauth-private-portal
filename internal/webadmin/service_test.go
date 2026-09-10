@@ -2,6 +2,7 @@ package webadmin
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -621,6 +622,130 @@ func TestFinishLogin_TamperedResponseFailsCeremony_SessionStaysPending(t *testin
 	after, err := ts.db.WebAdminCredentials.ListByOwner(t.Context(), ts.ownerID)
 	if err != nil || len(after) != 1 || after[0].CredentialJSON != before[0].CredentialJSON || after[0].LastUsedAt != nil {
 		t.Fatalf("credentials after tampered login = %+v, err = %v, want unchanged (no partial commit)", after, err)
+	}
+}
+
+// TestFinishLogin_CredentialRevokedBeforeCeremonyStartsFailsCleanly covers
+// the coarser case: RevokeCredential's Delete lands any time between
+// BeginLogin and FinishLogin being invoked at all, so FinishLogin's own
+// ListByOwner call (loading credentials to hand the WebAuthn library for
+// verification) already sees an empty list. go-webauthn itself then
+// rejects the assertion — "User does not own all credentials from the
+// allowed credential list" — before this service ever reaches its own
+// UpdateAfterLogin/Activate transaction. This is a different, wider
+// window than TestFinishLogin_CredentialRevokedBetweenCredentialLoadAndCommitReturnsErrSessionInvalid
+// below, which pins down the narrower race FinishLogin's own transaction
+// comment specifically reasons about.
+func TestFinishLogin_CredentialRevokedBeforeCeremonyStartsFailsCleanly(t *testing.T) {
+	ts := newTestService(t)
+	vector := newDynamicWebAuthnVector(t)
+	cred := registerDynamicCredential(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("registration-challenge-dddddddd")), 0)
+
+	assertion, sessionID, err := ts.BeginLogin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates RevokeCredential's Delete winning the race against this
+	// ceremony's own FinishLogin call, in the window between BeginLogin
+	// and here (the session's CredentialID is still nil, so
+	// RevokeAllByCredential's own cascade cannot have touched it).
+	if err := ts.db.WebAdminCredentials.Delete(t.Context(), cred.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	loginBody := vector.loginBody(t, assertion.Response.Challenge.String(), 7)
+	req := &http.Request{Body: io.NopCloser(bytes.NewReader(loginBody))}
+	if _, _, err := ts.FinishLogin(t.Context(), sessionID, req); !errors.Is(err, ErrCeremonyFailed) {
+		t.Fatalf("err = %v, want ErrCeremonyFailed (go-webauthn itself rejects an empty allowed-credential list)", err)
+	}
+
+	pending, err := ts.db.WebAdminSessions.Get(t.Context(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status == domain.WebAdminSessionActive {
+		t.Fatal("session was activated despite its credential being deleted mid-ceremony — it would outlive the revoke that was supposed to cut it off")
+	}
+}
+
+// listThenDeleteCredentialRepo wraps a real WebAdminCredentialRepository
+// and deletes credentialRowID immediately after ListByOwner returns —
+// landing RevokeCredential's Delete in the exact window FinishLogin's
+// own UpdateAfterLogin/Activate transaction comment reasons about:
+// after FinishLogin's pre-verification credential load (whose result the
+// WebAuthn library still verifies against), but before that transaction
+// runs. A real concurrent goroutine can't be made to land in a window
+// that narrow deterministically; this decorator can.
+type listThenDeleteCredentialRepo struct {
+	domain.WebAdminCredentialRepository
+	t               *testing.T
+	credentialRowID string
+}
+
+func (r listThenDeleteCredentialRepo) ListByOwner(ctx context.Context, ownerActorID string) ([]domain.WebAdminCredential, error) {
+	r.t.Helper()
+	creds, err := r.WebAdminCredentialRepository.ListByOwner(ctx, ownerActorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.WebAdminCredentialRepository.Delete(ctx, r.credentialRowID); err != nil {
+		r.t.Fatal(err)
+	}
+	return creds, nil
+}
+
+// TestFinishLogin_CredentialRevokedBetweenCredentialLoadAndCommitReturnsErrSessionInvalid
+// pins down the narrow race FinishLogin's own transaction comment
+// reasons through, precisely: the WebAuthn ceremony itself succeeds
+// (verified against credentials loaded a moment earlier), but
+// RevokeCredential's Delete lands before this service's own
+// UpdateAfterLogin/Activate transaction starts. UpdateAfterLogin (keyed
+// by credentialID) then fails with zero rows affected, aborting Activate
+// in the same transaction, so the session never transitions to active
+// bound to a credential that no longer exists — the exact outcome
+// RevokeAllByCredential's own cascade could never otherwise catch, since
+// this session was still 'pending' (CredentialID nil) at the moment the
+// credential was deleted. It also pins the specific error to
+// ErrSessionInvalid, not just non-nil: this race is expected,
+// security-correct behavior whenever it fires, and must read to the
+// HTTP layer as an ordinary failed login (401), not an opaque 500.
+func TestFinishLogin_CredentialRevokedBetweenCredentialLoadAndCommitReturnsErrSessionInvalid(t *testing.T) {
+	ts := newTestService(t)
+	vector := newDynamicWebAuthnVector(t)
+	cred := registerDynamicCredential(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("registration-challenge-eeeeeeee")), 0)
+
+	assertion, sessionID, err := ts.BeginLogin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	racyRepos := ts.db.Repos
+	racyRepos.WebAdminCredentials = listThenDeleteCredentialRepo{
+		WebAdminCredentialRepository: racyRepos.WebAdminCredentials,
+		t:                            t, credentialRowID: cred.ID,
+	}
+	racySvc, err := NewService(ts.db, racyRepos, Config{
+		RPID: testRPID, RPDisplayName: "Test Portal", RPOrigins: []string{testRPOrigin},
+		OwnerUsername: "owner", OwnerDisplayName: "Test Owner", Clock: ts.clock,
+		SessionCookie: SessionCookieConfig{SessionTTL: testSessionTTL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loginBody := vector.loginBody(t, assertion.Response.Challenge.String(), 7)
+	req := &http.Request{Body: io.NopCloser(bytes.NewReader(loginBody))}
+	if _, _, err := racySvc.FinishLogin(t.Context(), sessionID, req); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("err = %v, want ErrSessionInvalid (a clean failed-login response, not an opaque 500)", err)
+	}
+
+	pending, err := ts.db.WebAdminSessions.Get(t.Context(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status == domain.WebAdminSessionActive {
+		t.Fatal("session was activated despite its credential being deleted mid-transaction — it would outlive the revoke that was supposed to cut it off")
 	}
 }
 
