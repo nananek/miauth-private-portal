@@ -19,6 +19,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 	"github.com/nananek/miauth-private-portal/internal/userlist"
+	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
 
 // Options configures the HTTP server. It intentionally contains only
@@ -155,6 +156,11 @@ type Options struct {
 	// enforced independently of drive.Service's own Config.MaxFileBytes.
 	// Meaningless while Drive is nil.
 	DriveMaxFileBytes int64
+
+	// WebAdmin backs Issue #136 Phase 1's admin bootstrap/registration
+	// routes; see NewServer. A nil value (the safe default) registers
+	// none of them.
+	WebAdmin *webadmin.Service
 }
 
 // Run builds the HTTP server from opts, serves it, marks reg ready once

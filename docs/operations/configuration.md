@@ -457,10 +457,36 @@ When adding a new scope to `grantableScopes`, existing tokens do not gain it
 automatically: run `miauthctl tokens reflect-scopes --all` after deploying
 (or document why not).
 
+### Admin Web UI: bootstrap and registration (Phase 1)
+
+Issue #136 (ADR-0010) adds a browser-based admin surface, anchored to the
+same SSH/host-access trust point as everything else in this section. Phase
+1 (this document's current state) covers only bootstrapping a passkey for
+the Owner; it issues no session cookie and adds no admin screen — see
+ADR-0010 for the full four-phase design and why a web admin session is a
+structurally distinct, fifth credential type rather than a repurposed
+`api_tokens`/`miauth_local_sessions` row.
+
+```sh
+go run ./cmd/miauthctl web-login issue
+```
+
+This prints a single-use setup URL
+(`<LOCAL_ORIGIN>/admin/setup?token=<raw>`), valid for 10 minutes. Opening it
+in a browser and completing the WebAuthn prompt registers one passkey for
+the Owner; the token is consumed atomically with that registration, so a
+second open of the same URL fails. The raw token is printed to stdout
+exactly once and never logged, the same redaction rule this document's
+other raw-secret CLI outputs (`tokens` output excluded, `config`'s
+`Redacted()`) already follow.
+
 ### Deliberately out of scope
 
 - Managing SSH access, host accounts, or operating-system audit policy.
 - Browser session cookies; authorization occurs through the host-local CLI.
+  (Issue #136 Phase 2+ narrows this exclusion for the admin Web UI
+  specifically — see ADR-0010 — but Aria's own MiAuth flow above is
+  unaffected.)
 - `POST /api/meta`, `POST /api/i`, and `POST /api/i/update`: assigned to
   Issue #7's minimal Aria/Misskey surface and Issue #23 PR1's
   self-service display-name editing, respectively; see the Note API

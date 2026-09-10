@@ -2,7 +2,7 @@
 
 ## Getting started
 
-Prerequisites: Go 1.24 or newer.
+Prerequisites: Go 1.26 or newer.
 
 ```sh
 cp .env.example .env

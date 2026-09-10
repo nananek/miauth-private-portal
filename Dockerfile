@@ -5,7 +5,7 @@
 # can be gcr.io/distroless/static-debian12 (no libc needed). See
 # docs/operations/configuration.md for why this deployment always runs
 # with foreign_keys/journal_mode fixed rather than operator-configurable.
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 # /go/pkg/mod (GOPATH/pkg/mod, GOPATH=/go in this base image) and
