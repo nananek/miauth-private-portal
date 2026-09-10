@@ -405,14 +405,24 @@ func (s *Service) FinishLogin(ctx context.Context, sessionID string, r *http.Req
 	rawSessionToken = newRawSessionToken()
 	csrfToken := newCSRFToken()
 	err = s.uow.WithinTx(ctx, func(ctx context.Context, repos domain.Repos) error {
-		// MUST happen even though this write's own success has no
-		// further bearing on whether login succeeds: see this
-		// function's doc comment. It is inside the same transaction as
-		// Activate below only for atomicity convenience, not because a
-		// failure here should abort a successful FinishLogin — a
-		// storage error updating sign-count bookkeeping on an
-		// already-cryptographically-verified login is still a login
-		// the Owner just correctly proved.
+		// Deliberately in the same transaction as Activate below, so a
+		// failure here also aborts Activate: if UpdateAfterLogin fails
+		// because this credential row is gone — RevokeCredential ran
+		// concurrently with this ceremony's final step, after the
+		// credentials were loaded above but before this transaction — a
+		// best-effort write here would still let Activate proceed and
+		// mint an *active* session bound to a just-revoked credential.
+		// RevokeCredential's own RevokeAllByCredential cascade cannot
+		// catch that session: it only revokes rows that were already
+		// 'active' at the moment it ran, and this one was still
+		// 'pending' then. That would silently defeat the whole point of
+		// revoke-credential (plan-136-phase2 §1 Decision 6) — cutting
+		// off a lost/stolen device's session, not just its future
+		// logins. Grouping the two writes atomically closes that race:
+		// a storage error here (vanishingly rare otherwise) costs the
+		// Owner a login retry, which is a strictly safer failure mode
+		// than an orphaned session outliving the credential that
+		// authenticated it.
 		if err := repos.WebAdminCredentials.UpdateAfterLogin(ctx, credentialID, credJSON, now); err != nil {
 			return err
 		}

@@ -304,6 +304,11 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		csrfToken = *session.CSRFToken
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// This response embeds the caller's own CSRF token (see this
+	// handler's doc comment) — no-store keeps it out of disk/shared
+	// caches, unlike the token-free adminSetupPageHTML/adminLoginPageHTML
+	// pages above, which need no such header.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_ = adminIndexPageTemplate.Execute(w, struct{ CSRFToken string }{CSRFToken: csrfToken})
 }
