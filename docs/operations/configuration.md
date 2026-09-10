@@ -955,21 +955,31 @@ only while `RSS_ENABLED=true`.
 ### Startup seeding and live reconciliation
 
 While `RSS_ENABLED=true`, `cmd/server` seeds one `external_sources` row
-(`kind="rss"`) per `RSS_FEED_URLS` entry at startup in two steps, run in
-order:
+(`kind="rss"`) per `RSS_FEED_URLS` entry in two steps, run in order —
+**both at startup and again on every scheduler tick** (Issue #134;
+before that fix, step 2 below ran once, at startup, only):
 
-1. `ensureRSSSourcesWithActors` (Issue #77 PR4) creates a row for any
-   URL not yet registered at all — and, unlike
-   `ExternalSourceRepository.EnsureFromConfig` (still used as-is for the
-   single `imap`-kind source below), also creates that genuinely new
-   source's own dedicated `ActorExternalSource` actor (ADR-0008) in the
-   same step, atomically: a source row is never left without its actor,
-   or an actor without its source. A `(kind, uri)` pair already
-   registered is left untouched (including its `display_name`,
-   `cursor`, failure-tracking fields, and `actor_id`/`username`/`host`),
-   never modified or re-seeded. Immediately after — outside that
+1. `ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a,
+   replacing the old create-only `EnsureFromConfig` for RSS) creates a
+   bare row for any URL not yet registered at all, reactivates a
+   previously-deactivated source whose URL is back in `RSS_FEED_URLS`,
+   and deactivates (`active=0`, never deleted) one no longer listed.
+   This step knows nothing about actors, Drive, or HTTP — it is pure SQL
+   reconciliation (`AGENTS.md`'s persistence-boundary rule) — so a row
+   it just created has no `actor_id`/`username`/`host` yet.
+2. `ensureRSSSourceActors` (Issue #77 PR4, rewritten as a self-healing
+   pass by Issue #134) scans every currently active `kind="rss"` row and
+   provisions a dedicated `ActorExternalSource` actor (ADR-0008) —
+   `actor_id`/`username`/`host`, set together via
+   `ExternalSourceRepository.SetActorIdentity` — for any row that does
+   not have one yet, whether step 1 just created it or it was left
+   actor-less by an older deployment (see "Backfill" below). A row that
+   already has an actor is left completely untouched: `SetActorIdentity`
+   only ever succeeds against a row whose `actor_id` is still `NULL`, so
+   an already-registered source's identity is never recomputed.
+   Immediately after each row's actor commits — outside that
    transaction, and never able to fail it — Issue #77 PR5's
-   `fetchAndSetSourceFavicon` best-effort fetches the new source's own
+   `fetchAndSetSourceFavicon` best-effort fetches that source's own
    `https://<host>/favicon.ico`, extracts its largest embedded PNG image
    (`internal/ingest/favicon.Fetch`/`ExtractPNGFromICO`; a legacy
    BMP-in-ICO favicon is not supported and is skipped like any other
@@ -979,26 +989,33 @@ order:
    `DRIVE_MAX_FILE_BYTES`, regardless of `RSS_ALLOW_INSECURE_HTTP`
    (which governs only the feed fetch itself); a missing, oversized, or
    undecodable favicon is logged and otherwise silently skipped — the
-   source is registered either way, and its actor simply keeps no
-   avatar.
-2. `ExternalSourceRepository.ReconcileFromConfig` (Issue #76 PR4a,
-   replacing the old create-only `EnsureFromConfig` for RSS) then
-   reactivates a previously-deactivated source whose URL is back in
-   `RSS_FEED_URLS`, and deactivates (`active=0`, never deleted) one no
-   longer listed; anything step 1 just created already exists and is
-   active by default, so this step's own create path is a no-op for it.
+   source keeps its actor either way, which simply keeps no avatar.
 
-The scheduler repeats step 2 on every subsequent tick, so — since
-`RSS_FEED_URLS` is one of Issue #76's db-eligible keys — **adding or
-removing a feed URL via `miauthctl config set/unset RSS_FEED_URLS`
-takes effect on the scheduler's next tick, no restart required** — see
+Since `RSS_FEED_URLS` is one of Issue #76's db-eligible keys, and both
+steps above now run on every scheduler tick (not just at startup):
+**adding or removing a feed URL via `miauthctl config set/unset
+RSS_FEED_URLS` takes effect on the scheduler's next tick, no restart
+required** — see
 [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
-above. A **genuinely new** URL's `ActorExternalSource`/`username`/`host`/
-favicon are only ever created by step 1 at startup, though, so adding a
-brand new feed (as opposed to re-adding a previously-removed one) still
-needs a restart to seed its actor before the scheduler can poll it —
-editing `.env`/the environment directly and restarting always works
-too, exactly as before this issue.
+above — and a **genuinely new** URL's `ActorExternalSource`/`username`/
+`host`/favicon are provisioned within that very same tick, immediately,
+with no restart needed either. Editing `.env`/the environment directly
+and restarting always works too, exactly as before this issue.
+
+**Backfill.** Because step 2 is a self-healing pass over every
+actor-less active row rather than a diff against configured URLs, it
+also fixes up any row a pre-Issue-#134 deployment left without an actor
+(for example, a source that was created by a live `RSS_FEED_URLS`
+change under the old code, which only ever ran step 2's predecessor
+once, at startup). No separate migration, flag, or `miauthctl`/SQL step
+is needed by the operator — this fix's first startup, or its first
+scheduler tick if that comes first, provisions every such row
+automatically. Already-ingested entries/items from such a source are
+**not** retroactively re-attributed: `entries.author_actor_id` is set
+once, at entry-creation time, and never re-resolved, so historical items
+already showing the shared `system` actor stay that way permanently —
+only entries ingested *after* the backfill runs pick up the source's
+real actor.
 
 ### Untrusted external content
 

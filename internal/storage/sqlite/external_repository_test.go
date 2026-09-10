@@ -127,6 +127,73 @@ func TestExternalSourceRepository_GetByActorID(t *testing.T) {
 	}
 }
 
+func TestExternalSourceRepository_SetActorIdentity_FillsActorlessRow(t *testing.T) {
+	db := newTestDB(t)
+	source := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+	actorID := mustCreateDistinctActor(t, db)
+
+	if err := db.ExternalSources.SetActorIdentity(t.Context(), source.ID, actorID, "myfeed", "example.com"); err != nil {
+		t.Fatalf("SetActorIdentity: %v", err)
+	}
+
+	got, err := db.ExternalSources.Get(t.Context(), source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActorID == nil || *got.ActorID != actorID {
+		t.Errorf("ActorID = %v, want %q", got.ActorID, actorID)
+	}
+	if got.Username == nil || *got.Username != "myfeed" {
+		t.Errorf("Username = %v, want %q", got.Username, "myfeed")
+	}
+	if got.Host == nil || *got.Host != "example.com" {
+		t.Errorf("Host = %v, want %q", got.Host, "example.com")
+	}
+	if got.URI != source.URI {
+		t.Errorf("URI = %q, want unchanged %q", got.URI, source.URI)
+	}
+	if !got.CreatedAt.Equal(source.CreatedAt) {
+		t.Errorf("CreatedAt = %v, want unchanged %v", got.CreatedAt, source.CreatedAt)
+	}
+}
+
+func TestExternalSourceRepository_SetActorIdentity_ConflictsIfAlreadySet(t *testing.T) {
+	db := newTestDB(t)
+	source := mustCreateExternalSource(t, db, "rss", "https://example.com/feed.xml")
+	firstActor := mustCreateDistinctActor(t, db)
+	secondActor := mustCreateDistinctActor(t, db)
+
+	if err := db.ExternalSources.SetActorIdentity(t.Context(), source.ID, firstActor, "first", "example.com"); err != nil {
+		t.Fatalf("first SetActorIdentity: %v", err)
+	}
+
+	err := db.ExternalSources.SetActorIdentity(t.Context(), source.ID, secondActor, "second", "example.com")
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("second SetActorIdentity() error = %v, want ErrConflict", err)
+	}
+
+	got, err := db.ExternalSources.Get(t.Context(), source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActorID == nil || *got.ActorID != firstActor {
+		t.Errorf("ActorID = %v, want unchanged first call's %q", got.ActorID, firstActor)
+	}
+	if got.Username == nil || *got.Username != "first" {
+		t.Errorf("Username = %v, want unchanged %q", got.Username, "first")
+	}
+}
+
+func TestExternalSourceRepository_SetActorIdentity_NonexistentIDIsConflict(t *testing.T) {
+	db := newTestDB(t)
+	actorID := mustCreateDistinctActor(t, db)
+
+	err := db.ExternalSources.SetActorIdentity(t.Context(), "no-such-source", actorID, "user", "example.com")
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("SetActorIdentity(nonexistent id) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestExternalSourceRepository_List_FiltersByKind(t *testing.T) {
 	db := newTestDB(t)
 	mustCreateExternalSource(t, db, "rss", "https://example.com/a.xml")

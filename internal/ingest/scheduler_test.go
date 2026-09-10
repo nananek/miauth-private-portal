@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -145,6 +146,99 @@ func TestScheduler_Tick_NilDesiredURIsSkipsReconciliation(t *testing.T) {
 	}
 	if len(sources) != 1 {
 		t.Fatalf("List = %+v, want the pre-existing source untouched", sources)
+	}
+}
+
+// TestScheduler_Tick_CallsEnsureActorsAfterReconcile backs Issue #134's
+// live-reload fix: a source created by this same tick's DesiredURIs
+// reconciliation must have EnsureActors invoked against it before
+// tick's List/enqueue loop runs, so a feed added live gets its actor
+// provisioned within the same tick that created its row, not on some
+// later one.
+func TestScheduler_Tick_CallsEnsureActorsAfterReconcile(t *testing.T) {
+	db := newTestDB(t)
+
+	var calls int
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{
+		Kind:         "rss",
+		PollInterval: time.Hour,
+		DesiredURIs:  func(context.Context) []string { return []string{"https://example.com/new.xml"} },
+		EnsureActors: func(ctx context.Context) error {
+			calls++
+			sources, err := db.ExternalSources.List(ctx, "rss")
+			if err != nil {
+				return err
+			}
+			for _, s := range sources {
+				if s.ActorID != nil {
+					continue
+				}
+				actorID := domain.NewID()
+				if err := db.Actors.Create(ctx, domain.Actor{ID: actorID, Type: domain.ActorExternalSource, CreatedAt: time.Now().UTC()}); err != nil {
+					return err
+				}
+				if err := db.ExternalSources.SetActorIdentity(ctx, s.ID, actorID, "auto", "example.com"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}, nil)
+	scheduler.tick(t.Context())
+
+	if calls != 1 {
+		t.Fatalf("EnsureActors call count = %d, want 1", calls)
+	}
+
+	sources, err := db.ExternalSources.List(t.Context(), "rss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].ActorID == nil {
+		t.Fatalf("List = %+v, want the reconciled source to already have a non-nil ActorID", sources)
+	}
+}
+
+// TestScheduler_Tick_EnsureActorsFailureDoesNotBlockEnqueue mirrors the
+// existing reconcile-failure regression test: EnsureActors erroring must
+// not prevent tick from still listing/enqueueing jobs for sources that
+// already exist.
+func TestScheduler_Tick_EnsureActorsFailureDoesNotBlockEnqueue(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
+
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{
+		Kind:         "rss",
+		PollInterval: time.Hour,
+		EnsureActors: func(context.Context) error { return errors.New("boom") },
+	}, nil)
+	scheduler.tick(t.Context())
+
+	jobs, err := db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("len(jobs) = %d, want 1 (EnsureActors failure must not block enqueue)", len(jobs))
+	}
+}
+
+// TestScheduler_Tick_NilEnsureActorsIsANoOp is a regression guard for
+// imap's case: EnsureActors left nil, tick behaves exactly as before
+// this field existed.
+func TestScheduler_Tick_NilEnsureActorsIsANoOp(t *testing.T) {
+	db := newTestDB(t)
+	mustCreateSource(t, db, "rss", "https://example.com/a.xml")
+
+	scheduler := NewScheduler(db.ExternalSources, db.Jobs, SchedulerConfig{Kind: "rss", PollInterval: time.Hour}, nil)
+	scheduler.tick(t.Context())
+
+	jobs, err := db.Jobs.List(t.Context(), domain.JobFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("len(jobs) = %d, want 1", len(jobs))
 	}
 }
 
