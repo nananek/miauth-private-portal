@@ -118,11 +118,11 @@ without inventing a second, disconnected owner concept.
    Issue #133's `api_token_scope_audit` shape exactly: a `web_admin_action_audit`
    table, one row per approve/reject/revoke/RSS-feed-change, written in the
    same transaction as the underlying write, recording `{credential_id,
-   action, target, before, after, changed_at}`. This closes the gap noted in
-   §1.2 of plan-136: once more than one credential can act as "the operator,"
-   recording which one did what is worth the (small) cost, even though
-   ADR-0002's CLI-only model never needed it. **This plan does not propose
-   retrofitting the same audit trail onto the CLI path** — `miauthctl`'s
+   action, target, before, after, changed_at}`. This closes a gap that only
+   matters once more than one credential can act as "the operator": recording
+   which one did what is worth the (small) cost, even though ADR-0002's
+   CLI-only model never needed it. **This ADR does not propose retrofitting
+   the same audit trail onto the CLI path** — `miauthctl`'s
    existing SSH-is-the-boundary model (ADR-0002) is unchanged and still
    self-consistent; only the *new* multi-credential Web UI path needs it.
 
