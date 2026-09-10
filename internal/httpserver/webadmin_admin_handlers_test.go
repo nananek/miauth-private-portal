@@ -137,9 +137,17 @@ func TestHandleAdminIndex_RendersPendingSessionsAndTokens(t *testing.T) {
 }
 
 // TestHandleAdminIndex_EscapesUntrustedRequestedPermissionsAndCallback is
-// the security-critical test for this phase: RequestedPermissions and
-// ClientCallback are Aria-supplied, untrusted values. html/template's
-// auto-escaping must actually be engaged for them, not just assumed.
+// the security-critical test for this phase. RequestedPermissions is a
+// genuinely attacker-reachable field: handleMiAuthStart
+// (internal/httpserver/miauth_handlers.go) persists the "permission"
+// query param verbatim, with no validation. ClientCallback only reaches
+// storage at all if it exactly matches an operator-configured
+// ARIA_CLIENT_CALLBACKS entry (internal/miauth.Service.StartLocalSession's
+// callbackAllowed check) — it is exercised here as defense-in-depth for
+// a misconfigured allowlist or a future, less-restricted write path, not
+// because today's HTTP flow lets an attacker put arbitrary markup there.
+// Either way, html/template's auto-escaping must actually be engaged for
+// both fields, not just assumed.
 func TestHandleAdminIndex_EscapesUntrustedRequestedPermissionsAndCallback(t *testing.T) {
 	ts := newWebAdminTestServer(t)
 	cookie, _ := authedAdminRequest(t, ts)
