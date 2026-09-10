@@ -1,6 +1,6 @@
 # ADR-0010: Admin Web UI authentication — SSH-anchored bootstrap + WebAuthn
 
-- Status: Proposed for Issue #136
+- Status: Accepted for Issue #136
 - Date: 2026-09-10
 - Scope: a new browser-based admin surface for MiAuth session/token management
   and RSS feed management (Issue #136's "第一弾"). Does not touch Aria's own
