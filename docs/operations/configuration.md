@@ -116,6 +116,7 @@ catch that class of mistake during local development.
 | `RSS_MAX_REDIRECTS` | no | `3` | 0-20. Maximum redirect hops a feed fetch follows; 0 disallows any redirect. |
 | `RSS_SUMMARY_MAX_CHARS` | no | `4000` | 1-100000. Bounds each ingested item's normalized title/body length after HTML tags are stripped. |
 | `RSS_ALLOW_INSECURE_HTTP` | no | `false` | When `false` (the default), any `http://` entry in `RSS_FEED_URLS` fails config validation — mirroring `LOCAL_ORIGIN`'s production `https` enforcement. Set `true` only for a trusted internal/test feed. |
+| `RSS_FILTER_SCRIPT_PATH` | no | `""` | Issue #135: path to a Starlark (`.star`) script defining a top-level `matches(title, body, source_host, source_uri, provenance_url)` function; `True` excludes that item from the timeline. Empty (the default) means no filtering — every fetched item is kept, exactly pre-Issue #135 behavior. Read and compiled once at `cmd/server` startup (`internal/ingest/rss.LoadFilter`); a syntax error or a missing/mis-shaped `matches()` fails startup. Not stored in the database (see [ADR-0009](../decisions/0009-rss-item-filtering.md)) — edit the file and restart to change it. See "[RSS item filtering](#rss-item-filtering)" below. |
 | `IMAP_ENABLED` | no | `false` | Gates Issue #12's IMAP mail ingestion entirely. While `false`, no `domain.ExternalSource` row is ever seeded, no adapter/scheduler is constructed, and `cmd/mailfetch`'s socket is never dialed. |
 | `IMAP_HOST` | required if `IMAP_ENABLED=true` | `""` | The IMAP server's hostname. |
 | `IMAP_PORT` | no | `993` | 1-65535. `993` is the conventional implicit-TLS port; `143` is conventional for `IMAP_TLS_MODE=starttls`. |
@@ -1016,6 +1017,53 @@ once, at entry-creation time, and never re-resolved, so historical items
 already showing the shared `system` actor stay that way permanently —
 only entries ingested *after* the backfill runs pick up the source's
 real actor.
+
+### RSS item filtering
+
+Issue #135, [ADR-0009](../decisions/0009-rss-item-filtering.md): setting
+`RSS_FILTER_SCRIPT_PATH` to a `.star` file lets an operator exclude
+individual articles from ever reaching the timeline — by title/body
+keyword, by feed, or any combination — without touching
+`RSS_FEED_URLS`' whole-feed granularity. The script must define exactly
+one top-level function:
+
+```python
+def matches(title, body, source_host, source_uri, provenance_url):
+    if "sponsored" in title.lower():
+        return True
+    if source_host == "note.com" and "spam" in body.lower():
+        return True
+    return False
+```
+
+`matches()` runs once per fetched item, right after `internal/ingest/
+rss.parseFeed` normalizes it (so `title`/`body` are already
+HTML-stripped and bounded by `RSS_SUMMARY_MAX_CHARS`) and before it ever
+reaches `internal/timeline.Service.CreateExternalEntry` — an excluded
+item gets no `external_items` row, no `EntryNews` entry, and is never
+re-offered once the feed's ETag/cursor moves past it, the same
+"silently skip, never replay" shape `RSS_ENABLED=false` already has.
+`source_host`/`source_uri` let one global script express per-feed rules
+as ordinary conditionals; `provenance_url` is `""` when the item carries
+none.
+
+Two distinct failure moments, two different defaults:
+
+- **The script fails to load** (missing file, syntax error, no
+  top-level `matches` function, wrong parameter count) — `cmd/server`
+  fails to start, the same fail-closed posture every other startup-time
+  config problem already gets.
+- **The script fails while evaluating one item** (an execution-step
+  bound exceeded, a type error triggered by unanticipated feed content,
+  a non-bool return, ...) — that one item is **kept**, a warning is
+  logged, and the rest of the batch proceeds normally. A filter
+  *infrastructure* failure must never itself make an otherwise-legitimate
+  article disappear; only a script's own deliberate `True` does.
+
+`RSS_FILTER_SCRIPT_PATH` is bootstrap-only (not one of the [db-eligible
+keys](#runtime-configuration-overlay-miauthctl-config) above): the
+script is read and compiled exactly once, at startup, so editing it
+requires a restart.
 
 ### Untrusted external content
 

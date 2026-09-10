@@ -1068,6 +1068,49 @@ func TestLoad_RSSEnabledWithFeedURLsSucceeds(t *testing.T) {
 	}
 }
 
+// TestLoad_RSSFilterScriptPathRoundTrips mirrors IMAP_MAILFETCH_SOCKET's
+// own plain-optional-string parsing shape (Issue #135): the raw value is
+// carried through unchanged, with no file-existence or Starlark-syntax
+// check performed by internal/config itself (that happens one layer up,
+// in cmd/server, via internal/ingest/rss.LoadFilter).
+func TestLoad_RSSFilterScriptPathRoundTrips(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv:              "development",
+		KeyRSSFilterScriptPath: "/etc/miauth/rss-filter.star",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RSS.FilterScriptPath != "/etc/miauth/rss-filter.star" {
+		t.Errorf("RSS.FilterScriptPath = %q, want %q", cfg.RSS.FilterScriptPath, "/etc/miauth/rss-filter.star")
+	}
+}
+
+// TestLoad_RSSFilterScriptPathDefaultsToEmpty pins the safe default: no
+// filtering configured, exactly pre-Issue #135 behavior.
+func TestLoad_RSSFilterScriptPathDefaultsToEmpty(t *testing.T) {
+	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
+		KeyAppEnv: "development",
+	}))})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RSS.FilterScriptPath != "" {
+		t.Errorf("RSS.FilterScriptPath = %q, want empty by default", cfg.RSS.FilterScriptPath)
+	}
+}
+
+// TestConfig_Redacted_IncludesRSSFilterScriptPath pins that the script
+// *path* is shown as-is by Redacted() — unlike LLM_API_KEY/IMAP_PASSWORD
+// it names a file, not a credential, so there is nothing to redact.
+func TestConfig_Redacted_IncludesRSSFilterScriptPath(t *testing.T) {
+	cfg := Config{RSS: RSSConfig{FilterScriptPath: "/etc/miauth/rss-filter.star"}}
+	redacted := cfg.Redacted()
+	if got := redacted[KeyRSSFilterScriptPath]; got != "/etc/miauth/rss-filter.star" {
+		t.Errorf("Redacted()[%s] = %q, want %q", KeyRSSFilterScriptPath, got, "/etc/miauth/rss-filter.star")
+	}
+}
+
 func TestLoad_RSSFeedURLsRetainsCommasInsideQuery(t *testing.T) {
 	cfg, err := Load(LoadOptions{Getenv: getenvFromMap(mergeMaps(validAuthEnv(), map[string]string{
 		KeyAppEnv:      "development",

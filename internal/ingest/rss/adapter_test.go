@@ -33,7 +33,7 @@ func TestAdapter_Fetch_ValidFeedReturnsItemsAndCursor(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	result, err := adapter.Fetch(context.Background(), source, nil)
@@ -75,7 +75,7 @@ func TestAdapter_Fetch_ReloadSummaryMaxCharsOverridesConstructionValue(t *testin
 		MaxResponseBytes:      1 << 20,
 		SummaryMaxChars:       4000,
 		ReloadSummaryMaxChars: func(context.Context) int { return 5 },
-	})
+	}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	result, err := adapter.Fetch(context.Background(), source, nil)
@@ -103,7 +103,7 @@ func TestAdapter_Fetch_NilReloadSummaryMaxCharsUsesConstructionValue(t *testing.
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	result, err := adapter.Fetch(context.Background(), source, nil)
@@ -127,7 +127,7 @@ func TestAdapter_Fetch_ConditionalRequestReturnsNotModified(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	cursor := `{"etag":"\"v1\""}`
@@ -155,7 +155,7 @@ func TestAdapter_Fetch_MalformedCursorIsTreatedAsAbsent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	corrupted := "not valid json"
@@ -178,7 +178,7 @@ func TestAdapter_Fetch_MalformedFeedReturnsCategoryMalformed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	_, err := adapter.Fetch(context.Background(), source, nil)
@@ -197,7 +197,7 @@ func TestAdapter_Fetch_OversizedResponseReturnsCategoryTooLarge(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 10, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 10, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	_, err := adapter.Fetch(context.Background(), source, nil)
@@ -217,7 +217,7 @@ func TestAdapter_Fetch_TimeoutReturnsCategoryTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 10 * time.Millisecond, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 10 * time.Millisecond, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
 
 	_, err := adapter.Fetch(context.Background(), source, nil)
@@ -235,7 +235,7 @@ func TestAdapter_Fetch_SSRFBlockedAddressReturnsCategoryPolicy(t *testing.T) {
 	// CategoryPolicy (permanent — retrying can never fix a
 	// misconfigured/malicious source URI).
 	client := safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: true})
-	adapter := NewAdapter(client, Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000})
+	adapter := NewAdapter(client, Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
 	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: "http://127.0.0.1:1/feed.xml"}
 
 	_, err := adapter.Fetch(context.Background(), source, nil)
@@ -247,6 +247,106 @@ func TestAdapter_Fetch_SSRFBlockedAddressReturnsCategoryPolicy(t *testing.T) {
 	}
 	if !errors.Is(err, safehttp.ErrPolicyViolation) {
 		t.Errorf("err = %v, want it to wrap safehttp.ErrPolicyViolation", err)
+	}
+}
+
+// TestFetch_FilterDropsMatchingItems pins Issue #135's end-to-end
+// exclusion behavior at the Adapter level: an item a.filter's matches()
+// reports true for is never present in FetchResult.Items, while a
+// non-matching item in the same batch survives untouched, and cursor
+// advancement (derived from HTTP response headers, not item content) is
+// unaffected either way.
+func TestFetch_FilterDropsMatchingItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validRSSFeed))
+	}))
+	defer server.Close()
+
+	path := writeScript(t, `
+def matches(title, body, source_host, source_uri, provenance_url):
+    return "second" in title.lower()
+`)
+	filter, err := LoadFilter(path)
+	if err != nil {
+		t.Fatalf("LoadFilter: %v", err)
+	}
+
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, filter, nil)
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
+
+	result, err := adapter.Fetch(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("len(Items) = %d, want 1 (one of the two feed items matches the filter)", len(result.Items))
+	}
+	if strings.Contains(strings.ToLower(result.Items[0].Title), "second") {
+		t.Errorf("Items[0].Title = %q, want the non-matching item to survive", result.Items[0].Title)
+	}
+	if result.NextCursor == "" {
+		t.Error("NextCursor is empty, want cursor advancement unaffected by filtering")
+	}
+}
+
+// TestFetch_FilterEvaluationErrorKeepsItem pins the fail-open contract
+// (Filter.shouldExclude's own doc comment) at the Adapter level: a
+// filter *evaluation* failure for one item must not make that item
+// disappear.
+func TestFetch_FilterEvaluationErrorKeepsItem(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validRSSFeed))
+	}))
+	defer server.Close()
+
+	// Every call to matches() fails at runtime (not at LoadFilter time),
+	// so both items in validRSSFeed hit the fail-open path.
+	path := writeScript(t, `
+def matches(title, body, source_host, source_uri, provenance_url):
+    fail("boom")
+`)
+	filter, err := LoadFilter(path)
+	if err != nil {
+		t.Fatalf("LoadFilter: %v", err)
+	}
+
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, filter, nil)
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
+
+	result, err := adapter.Fetch(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("len(Items) = %d, want 2: a filter evaluation error must keep every item, not drop it", len(result.Items))
+	}
+}
+
+// TestFetch_NilFilterUnchangedBehavior is a regression pin: passing nil
+// for filter reproduces pre-Issue #135 behavior exactly — no item is
+// ever dropped.
+func TestFetch_NilFilterUnchangedBehavior(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validRSSFeed))
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(testSafehttpClient(), Config{FetchTimeout: 5 * time.Second, MaxResponseBytes: 1 << 20, SummaryMaxChars: 4000}, nil, nil)
+	source := domain.ExternalSource{ID: "source-1", Kind: Kind, URI: server.URL}
+
+	result, err := adapter.Fetch(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("len(Items) = %d, want 2 (nil filter must keep every item)", len(result.Items))
 	}
 }
 

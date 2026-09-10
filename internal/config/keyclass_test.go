@@ -117,6 +117,11 @@ func TestIsDBEligibleKey_MatchesTierA(t *testing.T) {
 		KeyIMAPPort,
 		KeyIMAPTLSMode,
 		KeyLLMBaseURL,
+		// RSS_FILTER_SCRIPT_PATH (Issue #135) is executable logic loaded
+		// and compiled once at startup, not a scalar this service can
+		// safely re-read on a cadence — see
+		// docs/decisions/0009-rss-item-filtering.md.
+		KeyRSSFilterScriptPath,
 	} {
 		if IsDBEligibleKey(key) {
 			t.Errorf("IsDBEligibleKey(%s) = true, want false (Tier B or bootstrap-only)", key)

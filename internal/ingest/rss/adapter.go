@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -51,13 +52,25 @@ type Config struct {
 type Adapter struct {
 	client *safehttp.Client
 	cfg    Config
+	// filter, when non-nil, drops items matching RSS_FILTER_SCRIPT_PATH's
+	// compiled Starlark predicate (Issue #135) before Fetch returns them.
+	// nil means no filtering is configured: every item is kept, exactly
+	// pre-#135 behavior.
+	filter *Filter
+	logger *slog.Logger
 }
 
 // NewAdapter builds an Adapter. client is normally
 // safehttp.NewClient(...); tests pass one built with
-// safehttp.Config.AllowIPForTesting set.
-func NewAdapter(client *safehttp.Client, cfg Config) *Adapter {
-	return &Adapter{client: client, cfg: cfg}
+// safehttp.Config.AllowIPForTesting set. filter is nil when
+// RSS_FILTER_SCRIPT_PATH is unset (Issue #135); logger is only used to
+// warn-log a per-item filter evaluation failure, and defaults to
+// slog.Default() when nil.
+func NewAdapter(client *safehttp.Client, cfg Config, filter *Filter, logger *slog.Logger) *Adapter {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Adapter{client: client, cfg: cfg, filter: filter, logger: logger}
 }
 
 var _ ingest.Adapter = (*Adapter)(nil)
@@ -129,6 +142,7 @@ func (a *Adapter) Fetch(ctx context.Context, source domain.ExternalSource, curso
 	if err != nil {
 		return ingest.FetchResult{}, ingest.NewFetchError(ingest.CategoryMalformed, err)
 	}
+	items = a.applyFilter(source, items)
 
 	newState := cursorState{ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}
 	if newState.ETag == "" {
@@ -177,6 +191,30 @@ func categorizeStatus(status int) ingest.Category {
 	default:
 		return ingest.CategoryClientError
 	}
+}
+
+// applyFilter drops every item a.filter's matches() reports true for
+// (Issue #135). A per-item evaluation error is logged and the item is
+// kept — fail open, see Filter.shouldExclude's own doc comment for why.
+// A nil a.filter (RSS_FILTER_SCRIPT_PATH unset) returns items unchanged,
+// exactly pre-#135 behavior.
+func (a *Adapter) applyFilter(source domain.ExternalSource, items []ingest.FetchedItem) []ingest.FetchedItem {
+	if a.filter == nil {
+		return items
+	}
+	kept := items[:0]
+	for _, item := range items {
+		exclude, err := a.filter.shouldExclude(source, item)
+		if err != nil {
+			a.logger.Warn("rss filter evaluation failed, keeping item", "source_id", source.ID, "error", err.Error())
+			kept = append(kept, item)
+			continue
+		}
+		if !exclude {
+			kept = append(kept, item)
+		}
+	}
+	return kept
 }
 
 // drainAndClose gives net/http a chance to reuse a keep-alive connection

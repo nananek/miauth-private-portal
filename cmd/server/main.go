@@ -451,6 +451,17 @@ func run() error {
 	// recovery path LLM's Enabled gate relies on.
 	var rssScheduler *ingest.Scheduler
 	if cfg.RSS.Enabled {
+		// A bad script fails startup closed, before the server ever
+		// binds a port — the same posture every other startup-time
+		// config problem in this function already gets (Issue #135).
+		var rssFilter *rss.Filter
+		if cfg.RSS.FilterScriptPath != "" {
+			var err error
+			rssFilter, err = rss.LoadFilter(cfg.RSS.FilterScriptPath)
+			if err != nil {
+				return fmt.Errorf("load rss filter script: %w", err)
+			}
+		}
 		rssAdapter := rss.NewAdapter(safehttp.NewClient(safehttp.Config{
 			MaxRedirects:      cfg.RSS.MaxRedirects,
 			AllowInsecureHTTP: cfg.RSS.AllowInsecureHTTP,
@@ -461,7 +472,7 @@ func run() error {
 			ReloadSummaryMaxChars: func(ctx context.Context) int {
 				return configStore.Int(ctx, config.KeyRSSSummaryMaxChars, cfg.RSS.SummaryMaxChars)
 			},
-		})
+		}, rssFilter, logger)
 		ingestSvc.RegisterAdapter(rssAdapter)
 
 		// ReconcileFromConfig (Issue #76 PR4a) first: it creates a bare row
