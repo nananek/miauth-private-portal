@@ -79,6 +79,7 @@ func TestIsDBEligibleKey_MatchesTierA(t *testing.T) {
 		KeyLLMClassificationThreadContextMaxChars,
 		KeyOpenWebUICatalogSyncInterval,
 		KeyOpenWebUIWebSearchEnabled,
+		KeyAdminSessionTTL,
 	}
 	wantSet := make(map[string]bool, len(want))
 	for _, k := range want {

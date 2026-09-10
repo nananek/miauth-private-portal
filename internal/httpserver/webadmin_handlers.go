@@ -3,7 +3,10 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"html/template"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/webadmin"
@@ -76,16 +79,27 @@ func (s *Server) handleAdminSetupFinish(w http.ResponseWriter, r *http.Request) 
 }
 
 // writeWebAdminCeremonyError maps every webadmin.Service ceremony error
-// to a response: ErrBootstrapTokenInvalid is the one case a caller
-// interacting with an expired/replayed link can hit through no fault of
-// the client, and gets 401 with a generic body — mirroring
-// writeAuthenticationFailed's precedent of never revealing *why* an
-// auth-adjacent value was rejected. Everything else (a WebAuthn library
-// ceremony failure, or an unexpected storage error) is logged with the
-// request id and returned as a generic 500, never the raw error text.
+// to a response: ErrBootstrapTokenInvalid, ErrSessionInvalid, and
+// ErrCeremonyFailed are all cases a caller can hit through no fault of
+// the server — an expired/replayed link or session, or a WebAuthn
+// response that failed verification (a tampered/forged assertion is a
+// client-presented-bad-proof condition, not a server error) — and all
+// three get 401 with a generic body, mirroring writeAuthenticationFailed's
+// precedent of never revealing *why* an auth-adjacent value was rejected
+// (plan-136-phase2 §6.2). Everything else (an unexpected storage error)
+// is logged with the request id and returned as a generic 500, never the
+// raw error text.
 func (s *Server) writeWebAdminCeremonyError(w http.ResponseWriter, r *http.Request, logMsg string, err error) {
 	if errors.Is(err, webadmin.ErrBootstrapTokenInvalid) {
 		writeWebAdminError(w, http.StatusUnauthorized, "bootstrap token is invalid, expired, or already used")
+		return
+	}
+	if errors.Is(err, webadmin.ErrSessionInvalid) {
+		writeWebAdminError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if errors.Is(err, webadmin.ErrCeremonyFailed) {
+		writeWebAdminError(w, http.StatusUnauthorized, "WebAuthn verification failed")
 		return
 	}
 	s.logger.Error(logMsg, "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
@@ -188,3 +202,249 @@ const adminSetupPageHTML = `<!doctype html>
 </body>
 </html>
 `
+
+// handleAdminLogin serves GET /admin/login: a static, dependency-free
+// page structurally identical to Phase 1's adminSetupPageHTML (zero
+// server-side interpolation — see that page's own doc comment for the
+// XSS-posture reasoning, unchanged here) whose inline script drives the
+// two-call login ceremony below and, on success, sets document.location
+// to /admin/.
+func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(adminLoginPageHTML))
+}
+
+// handleAdminLoginBegin serves POST /admin/login/begin (no body needed
+// — single-Owner deployment, no username to submit). Calls
+// s.webadmin.BeginLogin, returns {"sessionId": "...", "publicKey": {...}}
+// — the assertion options plus the pending session's own row ID, which
+// the page's script must echo back on /admin/login/finish (mirrors
+// Phase 1's token-as-query-param convention, not a new cookie).
+// webadmin.ErrNoCredentialsRegistered maps to 400 with a message
+// telling the operator to run `miauthctl web-login issue` first, not a
+// generic auth failure — this is a deployment-state problem, not a
+// forged/expired credential attempt, and hiding it would only confuse a
+// legitimate first-time operator.
+func (s *Server) handleAdminLoginBegin(w http.ResponseWriter, r *http.Request) {
+	assertion, sessionID, err := s.webadmin.BeginLogin(r.Context())
+	if err != nil {
+		if errors.Is(err, webadmin.ErrNoCredentialsRegistered) {
+			writeWebAdminError(w, http.StatusBadRequest, "no passkey is registered yet; run miauthctl web-login issue first")
+			return
+		}
+		s.writeWebAdminCeremonyError(w, r, "webadmin begin login failed", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"sessionId": sessionID,
+		"publicKey": assertion.Response,
+	})
+}
+
+// handleAdminLoginFinish serves POST /admin/login/finish?sessionId=....
+// Body is the browser's raw navigator.credentials.get() response. Calls
+// s.webadmin.FinishLogin; on success sets the Decision-5 cookie (Secure
+// in production/HttpOnly/SameSite=Strict/Path=/admin, value the raw
+// session token, Expires matching the session's own ExpiresAt) and
+// responds 200 with {"ok": true}. webadmin.ErrSessionInvalid -> 401
+// generic body via writeWebAdminCeremonyError, matching
+// handleAdminSetupFinish's existing error-mapping shape exactly.
+func (s *Server) handleAdminLoginFinish(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("sessionId")
+	rawToken, session, err := s.webadmin.FinishLogin(r.Context(), sessionID, r)
+	if err != nil {
+		s.writeWebAdminCeremonyError(w, r, "webadmin finish login failed", err)
+		return
+	}
+	http.SetCookie(w, adminSessionCookie(rawToken, session.ExpiresAt, s.adminCookieSecure()))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleAdminLogout serves POST /admin/logout (behind RequireAdminSession
+// + RequireAdminCSRF). Revokes the session, clears the cookie (Set-Cookie
+// with MaxAge=-1, matching Name/Path/Secure/HttpOnly/SameSite exactly —
+// a clearing cookie whose attributes don't match the original is
+// silently ignored by the browser), responds 200.
+func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	session := AdminSessionFromContext(r.Context())
+	if err := s.webadmin.Logout(r.Context(), session.ID); err != nil {
+		s.logger.Error("webadmin logout failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeWebAdminError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	cookie := adminSessionCookie("", time.Unix(0, 0), s.adminCookieSecure())
+	cookie.MaxAge = -1
+	http.SetCookie(w, cookie)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleAdminIndex serves GET /admin/ (behind RequireAdminSession only —
+// a read, no CSRF token needed to view it). A minimal page proving this
+// route is reachable only with a valid session and unreachable without
+// one; the real admin screens are Phase 3/4. The admin_session cookie is
+// HttpOnly (Decision 5), so the page's own script cannot read the
+// session's CSRF token off it to call POST /admin/logout — the one
+// piece of caller-specific data this handler renders is that CSRF
+// token, embedded via html/template's automatic contextual escaping
+// (not naive string interpolation) into a <meta> tag. This is not the
+// same risk adminSetupPageHTML/adminLoginPageHTML's "zero
+// interpolation" doc comments describe: those pages are served to an
+// *unauthenticated* caller and must never reflect attacker-influenced
+// query/body values, whereas this value is a server-generated,
+// base64url-only random secret already bound to the caller's own
+// verified session, not attacker input.
+func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
+	session := AdminSessionFromContext(r.Context())
+	csrfToken := ""
+	if session.CSRFToken != nil {
+		csrfToken = *session.CSRFToken
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// This response embeds the caller's own CSRF token (see this
+	// handler's doc comment) — no-store keeps it out of disk/shared
+	// caches, unlike the token-free adminSetupPageHTML/adminLoginPageHTML
+	// pages above, which need no such header.
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = adminIndexPageTemplate.Execute(w, struct{ CSRFToken string }{CSRFToken: csrfToken})
+}
+
+// adminCookieSecure reports whether the admin session cookie should
+// carry the Secure attribute: derived from s.localOrigin's scheme
+// (mirrors LOCAL_ORIGIN's own production-https-enforcement logic —
+// see plan-136-phase2 §6.3 — rather than introducing a second "are we
+// in production" signal).
+func (s *Server) adminCookieSecure() bool {
+	return strings.HasPrefix(s.localOrigin, "https://")
+}
+
+func adminSessionCookie(raw string, expiresAt time.Time, secure bool) *http.Cookie {
+	return &http.Cookie{
+		Name: adminSessionCookieName, Value: raw, Path: "/admin",
+		Expires: expiresAt, HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode,
+	}
+}
+
+// adminLoginPageHTML is Issue #136 Phase 2's login surface: a static,
+// dependency-free page that runs the WebAuthn login ceremony via two
+// fetch() calls against the endpoints above, mirroring
+// adminSetupPageHTML's own "no server-supplied data, ever" construction
+// (see that constant's doc comment) — nothing here is interpolated by
+// Go.
+const adminLoginPageHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin login</title>
+</head>
+<body>
+<p id="status">Preparing login&hellip;</p>
+<script>
+(function () {
+  "use strict";
+
+  function base64urlToBuffer(value) {
+    var padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    while (padded.length % 4) padded += "=";
+    var binary = atob(padded);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function setStatus(text) {
+    document.getElementById("status").textContent = text;
+  }
+
+  async function run() {
+    if (!window.PublicKeyCredential) {
+      setStatus("This browser does not support passkeys (WebAuthn).");
+      return;
+    }
+
+    var beginResp = await fetch("/admin/login/begin", { method: "POST" });
+    if (!beginResp.ok) {
+      setStatus("Unable to start login. Is a passkey registered?");
+      return;
+    }
+    var begin = await beginResp.json();
+    var publicKey = begin.publicKey;
+    publicKey.challenge = base64urlToBuffer(publicKey.challenge);
+    if (publicKey.allowCredentials) {
+      publicKey.allowCredentials = publicKey.allowCredentials.map(function (c) {
+        return Object.assign({}, c, { id: base64urlToBuffer(c.id) });
+      });
+    }
+
+    setStatus("Follow your browser's prompt to use your passkey.");
+    var credential;
+    try {
+      credential = await navigator.credentials.get({ publicKey: publicKey });
+    } catch (e) {
+      setStatus("Login was cancelled or failed: " + e.message);
+      return;
+    }
+
+    var finishResp = await fetch("/admin/login/finish?sessionId=" + encodeURIComponent(begin.sessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credential.toJSON())
+    });
+    if (!finishResp.ok) {
+      setStatus("Login failed. Try again.");
+      return;
+    }
+    setStatus("Logged in. Redirecting…");
+    document.location = "/admin/";
+  }
+
+  run().catch(function (e) {
+    setStatus("Login failed: " + e.message);
+  });
+})();
+</script>
+</body>
+</html>
+`
+
+// adminIndexPageTemplate is Issue #136 Phase 2's whole "you're in"
+// surface: proving the session boundary works end to end. Its only
+// server-supplied value is the caller's own session's CSRF token (see
+// handleAdminIndex's doc comment for why that is safe here); everything
+// else is fixed markup. The real admin screens are Phase 3/4.
+var adminIndexPageTemplate = template.Must(template.New("adminIndex").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="admin-csrf-token" content="{{.CSRFToken}}">
+<title>Admin</title>
+</head>
+<body>
+<p>Logged in as the Owner.</p>
+<button id="logout">Log out</button>
+<p id="status"></p>
+<script>
+(function () {
+  "use strict";
+
+  document.getElementById("logout").addEventListener("click", async function () {
+    var csrfToken = document.querySelector('meta[name="admin-csrf-token"]').content;
+    var resp = await fetch("/admin/logout", {
+      method: "POST",
+      headers: { "X-Admin-CSRF-Token": csrfToken }
+    });
+    if (resp.ok) {
+      document.location = "/admin/login";
+    } else {
+      document.getElementById("status").textContent = "Logout failed.";
+    }
+  });
+})();
+</script>
+</body>
+</html>
+`))

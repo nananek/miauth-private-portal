@@ -90,11 +90,13 @@ type Server struct {
 	// UploadFromURL and CreateFile's other callers rely on instead.
 	driveMaxFileBytes int64
 
-	// webadmin backs Issue #136 Phase 1's admin bootstrap/registration
-	// routes (GET /admin/setup, POST /admin/setup/begin,
-	// POST /admin/setup/finish). A nil value (the default) registers
-	// none of them — every httpserver test predating this field, and
-	// any deployment that hasn't wired it yet, is unaffected.
+	// webadmin backs Issue #136's admin bootstrap/registration routes
+	// (Phase 1: GET /admin/setup, POST /admin/setup/begin,
+	// POST /admin/setup/finish) and login/session routes (Phase 2:
+	// GET /admin/login, POST /admin/login/{begin,finish}, GET /admin/,
+	// POST /admin/logout). A nil value (the default) registers none of
+	// them — every httpserver test predating this field, and any
+	// deployment that hasn't wired it yet, is unaffected.
 	webadmin *webadmin.Service
 }
 
@@ -266,6 +268,16 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("GET /admin/setup", http.HandlerFunc(s.handleAdminSetup))
 		s.Handle("POST /admin/setup/begin", http.HandlerFunc(s.handleAdminSetupBegin))
 		s.Handle("POST /admin/setup/finish", http.HandlerFunc(s.handleAdminSetupFinish))
+
+		// Issue #136 Phase 2 (ADR-0010): the WebAuthn login ceremony, the
+		// session it produces, and the routes it protects.
+		s.Handle("GET /admin/login", http.HandlerFunc(s.handleAdminLogin))
+		s.Handle("POST /admin/login/begin", http.HandlerFunc(s.handleAdminLoginBegin))
+		s.Handle("POST /admin/login/finish", http.HandlerFunc(s.handleAdminLoginFinish))
+
+		adminAuth := RequireAdminSession(logger, opts.WebAdmin)
+		s.Handle("GET /admin/", adminAuth(http.HandlerFunc(s.handleAdminIndex)))
+		s.Handle("POST /admin/logout", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminLogout))))
 	}
 
 	return s

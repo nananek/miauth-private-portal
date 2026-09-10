@@ -2,8 +2,12 @@ package httpserver
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
 
@@ -59,11 +64,21 @@ func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
 	svc, err := webadmin.NewService(db, db.Repos, webadmin.Config{
 		RPID: webAdminTestRPID, RPDisplayName: "Test Portal", RPOrigins: []string{webAdminTestOrigin},
 		OwnerUsername: "owner", OwnerDisplayName: "Test Owner",
+		// SessionTTL must be nonzero: FinishLogin's Activate call extends
+		// a session's expiry to now+sessionTTL, and a zero TTL would
+		// leave every login-produced session already expired the
+		// instant it is created.
+		SessionCookie: webadmin.SessionCookieConfig{SessionTTL: 12 * time.Hour},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"}), health.NewRegistry(), Options{WebAdmin: svc})
+	// LocalOrigin matches webAdminTestOrigin (already https://), so
+	// Server.adminCookieSecure() reports true here by default — this is
+	// the "https:// LOCAL_ORIGIN" variant plan-136-phase2 §9.5 calls for
+	// in the Set-Cookie attribute test, not a separate constructor.
+	server := NewServer(logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"}), health.NewRegistry(),
+		Options{WebAdmin: svc, LocalOrigin: webAdminTestOrigin})
 	return &webAdminTestServer{Server: server, db: db, svc: svc, ownerID: owner.ID}
 }
 
@@ -223,6 +238,391 @@ func TestHandleAdminSetupFinish_TamperedResponseReturns401Or500NotSilentSuccess(
 func sha256Hex(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
+}
+
+// dynamicWebAuthnVector duplicates internal/webadmin's own test-only
+// helper of the same name (see that file's doc comment for why a
+// dynamically generated ES256 keypair is used instead of go-webauthn's
+// fixed W3C spec fixture: that fixture's paired login vector carries
+// sign count 0 on both the registration and login side, which would
+// make FinishLogin's persisted SignCount byte-identical before/after —
+// unable to prove UpdateAfterLogin actually ran). Duplicated rather than
+// exported: this package already duplicates webAdminRegistrationVector/
+// sha256Hex from internal/webadmin for the same "test-only helper, not
+// worth a cross-package export" reason.
+type dynamicWebAuthnVector struct {
+	priv         *ecdsa.PrivateKey
+	credentialID []byte
+}
+
+func newDynamicWebAuthnVector(t *testing.T) *dynamicWebAuthnVector {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &dynamicWebAuthnVector{priv: priv, credentialID: []byte("http-dynamic-test-credential-01")}
+}
+
+func (v *dynamicWebAuthnVector) coseKey(t *testing.T) []byte {
+	t.Helper()
+	data, err := webauthncbor.Marshal(map[int64]any{
+		1:  int64(webauthncose.EllipticKey),
+		3:  int64(webauthncose.AlgES256),
+		-1: int64(webauthncose.P256),
+		-2: v.priv.PublicKey.X.FillBytes(make([]byte, 32)),
+		-3: v.priv.PublicKey.Y.FillBytes(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func (v *dynamicWebAuthnVector) authenticatorData(t *testing.T, flags protocol.AuthenticatorFlags, signCount uint32, includeAttestedData bool) []byte {
+	t.Helper()
+	hash := sha256.Sum256([]byte(webAdminTestRPID))
+	data := make([]byte, 0, 64)
+	data = append(data, hash[:]...)
+	data = append(data, byte(flags))
+	data = binary.BigEndian.AppendUint32(data, signCount)
+	if includeAttestedData {
+		attested := make([]byte, 16, 16+2+len(v.credentialID))
+		attested = binary.BigEndian.AppendUint16(attested, uint16(len(v.credentialID))) //nolint:gosec
+		attested = append(attested, v.credentialID...)
+		attested = append(attested, v.coseKey(t)...)
+		data = append(data, attested...)
+	}
+	return data
+}
+
+func (v *dynamicWebAuthnVector) sign(t *testing.T, authData, clientDataJSON []byte) []byte {
+	t.Helper()
+	clientDataHash := sha256.Sum256(clientDataJSON)
+	signed := make([]byte, 0, len(authData)+len(clientDataHash))
+	signed = append(signed, authData...)
+	signed = append(signed, clientDataHash[:]...)
+	digest := sha256.Sum256(signed)
+	sig, err := ecdsa.SignASN1(rand.Reader, v.priv, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
+}
+
+func dynamicClientDataJSON(t *testing.T, ceremony, challenge string) []byte {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"type": ceremony, "challenge": challenge, "origin": webAdminTestOrigin, "crossOrigin": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func (v *dynamicWebAuthnVector) registrationBody(t *testing.T, challenge string, signCount uint32) []byte {
+	t.Helper()
+	authData := v.authenticatorData(t, protocol.FlagUserPresent|protocol.FlagAttestedCredentialData, signCount, true)
+	clientDataJSON := dynamicClientDataJSON(t, "webauthn.create", challenge)
+	attestationObject, err := webauthncbor.Marshal(map[string]any{
+		"fmt": "none", "attStmt": map[string]any{}, "authData": authData,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := base64.RawURLEncoding.EncodeToString(v.credentialID)
+	body, err := json.Marshal(map[string]any{
+		"id": id, "rawId": id, "type": "public-key",
+		"response": map[string]any{
+			"attestationObject": base64.RawURLEncoding.EncodeToString(attestationObject),
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func (v *dynamicWebAuthnVector) loginBody(t *testing.T, challenge string, signCount uint32) []byte {
+	t.Helper()
+	authData := v.authenticatorData(t, protocol.FlagUserPresent, signCount, false)
+	clientDataJSON := dynamicClientDataJSON(t, "webauthn.get", challenge)
+	sig := v.sign(t, authData, clientDataJSON)
+	id := base64.RawURLEncoding.EncodeToString(v.credentialID)
+	body, err := json.Marshal(map[string]any{
+		"id": id, "rawId": id, "type": "public-key",
+		"response": map[string]any{
+			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+			"signature":         base64.RawURLEncoding.EncodeToString(sig),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// registerDynamicCredentialViaHTTP drives Phase 1's real
+// POST /admin/setup/{begin,finish} handlers end to end so Phase 2's
+// login tests below exercise a genuinely stored, HTTP-registered
+// credential.
+func registerDynamicCredentialViaHTTP(t *testing.T, ts *webAdminTestServer, vector *dynamicWebAuthnVector, challenge string, signCount uint32) {
+	t.Helper()
+	raw := ts.issueToken(t)
+	ts.setVectorSessionData(t, raw, challenge)
+	body := vector.registrationBody(t, challenge, signCount)
+	req := httptest.NewRequest(http.MethodPost, "/admin/setup/finish?token="+raw, bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register credential via HTTP failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// loginViaHTTP drives the two-call POST /admin/login/{begin,finish}
+// ceremony end to end and returns the admin_session cookie the server
+// set on success.
+func loginViaHTTP(t *testing.T, ts *webAdminTestServer, vector *dynamicWebAuthnVector, signCount uint32) *http.Cookie {
+	t.Helper()
+	beginReq := httptest.NewRequest(http.MethodPost, "/admin/login/begin", nil)
+	beginRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(beginRec, beginReq)
+	if beginRec.Code != http.StatusOK {
+		t.Fatalf("login begin failed: %d %s", beginRec.Code, beginRec.Body.String())
+	}
+	var begin struct {
+		SessionID string `json:"sessionId"`
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(beginRec.Body.Bytes(), &begin); err != nil {
+		t.Fatal(err)
+	}
+	loginBody := vector.loginBody(t, begin.PublicKey.Challenge, signCount)
+	finishReq := httptest.NewRequest(http.MethodPost, "/admin/login/finish?sessionId="+begin.SessionID, bytes.NewReader(loginBody))
+	finishRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(finishRec, finishReq)
+	if finishRec.Code != http.StatusOK {
+		t.Fatalf("login finish failed: %d %s", finishRec.Code, finishRec.Body.String())
+	}
+	for _, c := range finishRec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			return c
+		}
+	}
+	t.Fatal("no admin_session cookie set")
+	return nil
+}
+
+// extractCSRFToken pulls the CSRF token out of handleAdminIndex's
+// <meta name="admin-csrf-token" content="..."> tag — the only way a
+// test (or a real browser's own script) can learn the value to echo
+// back in X-Admin-CSRF-Token, since the admin_session cookie itself is
+// HttpOnly.
+func extractCSRFToken(t *testing.T, html string) string {
+	t.Helper()
+	const marker = `name="admin-csrf-token" content="`
+	idx := strings.Index(html, marker)
+	if idx < 0 {
+		t.Fatalf("csrf meta tag not found in %q", html)
+	}
+	rest := html[idx+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatalf("malformed csrf meta tag in %q", html)
+	}
+	return rest[:end]
+}
+
+func TestHandleAdminLogin_ServesStaticPageWithNoInterpolation(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "navigator.credentials.get") {
+		t.Fatalf("body does not look like the login page: %q", rec.Body.String())
+	}
+}
+
+func TestHandleAdminLoginBegin_NoCredentialsReturns400WithActionableMessage(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/admin/login/begin", nil)
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "web-login issue") {
+		t.Fatalf("body = %q, want an actionable message mentioning web-login issue", rec.Body.String())
+	}
+}
+
+func TestHandleAdminLoginBegin_ValidReturnsSessionIDAndAssertion(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	vector := newDynamicWebAuthnVector(t)
+	registerDynamicCredentialViaHTTP(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("http-registration-challenge-aaaa")), 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/login/begin", nil)
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		SessionID string `json:"sessionId"`
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID == "" || got.PublicKey.Challenge == "" {
+		t.Fatalf("response = %+v", got)
+	}
+}
+
+func TestHandleAdminLoginFinish_HappyPath_SetsSessionCookie(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	vector := newDynamicWebAuthnVector(t)
+	registerDynamicCredentialViaHTTP(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("http-registration-challenge-bbbb")), 0)
+
+	cookie := loginViaHTTP(t, ts, vector, 3)
+	// Each attribute is asserted individually and by name, not bundled,
+	// per plan-136-phase2 §9.5: this is the test that replaces
+	// docs/operations/security-regression.md's "Cookie attributes: Not
+	// applicable" row with real evidence.
+	if cookie.Path != "/admin" {
+		t.Errorf("Path = %q, want /admin", cookie.Path)
+	}
+	if !cookie.HttpOnly {
+		t.Error("HttpOnly = false, want true")
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("SameSite = %v, want Strict", cookie.SameSite)
+	}
+	if !cookie.Secure {
+		t.Error("Secure = false, want true (LOCAL_ORIGIN is https://)")
+	}
+	if cookie.Value == "" {
+		t.Error("empty session token in cookie")
+	}
+}
+
+func TestHandleAdminLoginFinish_TamperedResponseReturns401NoCookieSet(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	vector := newDynamicWebAuthnVector(t)
+	registerDynamicCredentialViaHTTP(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("http-registration-challenge-cccc")), 0)
+
+	beginReq := httptest.NewRequest(http.MethodPost, "/admin/login/begin", nil)
+	beginRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(beginRec, beginReq)
+	var begin struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(beginRec.Body.Bytes(), &begin); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongChallenge := base64.RawURLEncoding.EncodeToString([]byte("not-the-real-challenge-bytes!!!!"))
+	loginBody := vector.loginBody(t, wrongChallenge, 1)
+	req := httptest.NewRequest(http.MethodPost, "/admin/login/finish?sessionId="+begin.SessionID, bytes.NewReader(loginBody))
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			t.Fatalf("cookie set on a failed login: %+v", c)
+		}
+	}
+}
+
+func TestHandleAdminLogout_RevokesSessionAndClearsCookie(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	vector := newDynamicWebAuthnVector(t)
+	registerDynamicCredentialViaHTTP(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("http-registration-challenge-dddd")), 0)
+	cookie := loginViaHTTP(t, ts, vector, 5)
+
+	indexReq := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	indexReq.AddCookie(cookie)
+	indexRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(indexRec, indexReq)
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/ status = %d, want 200", indexRec.Code)
+	}
+	csrfToken := extractCSRFToken(t, indexRec.Body.String())
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/admin/logout", nil)
+	logoutReq.AddCookie(cookie)
+	logoutReq.Header.Set("X-Admin-CSRF-Token", csrfToken)
+	logoutRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, body = %q", logoutRec.Code, logoutRec.Body.String())
+	}
+
+	var cleared *http.Cookie
+	for _, c := range logoutRec.Result().Cookies() {
+		if c.Name == adminSessionCookieName {
+			cleared = c
+		}
+	}
+	if cleared == nil {
+		t.Fatal("logout did not set a clearing Set-Cookie")
+	}
+	// A clearing cookie whose attributes don't match the original is
+	// silently ignored by real browsers — this is a correctness
+	// assertion, not cosmetic (plan-136-phase2 §9.5).
+	if cleared.Path != cookie.Path || cleared.Secure != cookie.Secure ||
+		cleared.HttpOnly != cookie.HttpOnly || cleared.SameSite != cookie.SameSite {
+		t.Fatalf("clearing cookie attributes = %+v, want matching original %+v", cleared, cookie)
+	}
+	if cleared.MaxAge >= 0 {
+		t.Fatalf("clearing cookie MaxAge = %d, want negative", cleared.MaxAge)
+	}
+
+	followUp := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	followUp.AddCookie(cookie)
+	followUpRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(followUpRec, followUp)
+	if followUpRec.Code != http.StatusUnauthorized {
+		t.Fatalf("status after logout with the old cookie = %d, want 401", followUpRec.Code)
+	}
+}
+
+func TestHandleAdminIndex_RequiresSession(t *testing.T) {
+	ts := newWebAdminTestServer(t)
+	vector := newDynamicWebAuthnVector(t)
+	registerDynamicCredentialViaHTTP(t, ts, vector, base64.RawURLEncoding.EncodeToString([]byte("http-registration-challenge-eeee")), 0)
+
+	unauth := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	unauthRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(unauthRec, unauth)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("status without session = %d, want 401", unauthRec.Code)
+	}
+
+	cookie := loginViaHTTP(t, ts, vector, 9)
+	authed := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	authed.AddCookie(cookie)
+	authedRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(authedRec, authed)
+	if authedRec.Code != http.StatusOK {
+		t.Fatalf("status with valid session = %d, want 200", authedRec.Code)
+	}
 }
 
 func webAdminRegistrationVector(t *testing.T) (body []byte, challenge string, credentialID []byte) {

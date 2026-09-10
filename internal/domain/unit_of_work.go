@@ -69,6 +69,10 @@ type Repos struct {
 	// internal/webadmin.Service does.
 	WebAdminBootstrapTokens WebAdminBootstrapTokenRepository
 	WebAdminCredentials     WebAdminCredentialRepository
+	// WebAdminSessions backs Issue #136 Phase 2's login ceremonies and
+	// the sessions they produce (ADR-0010). Always present, like
+	// WebAdminBootstrapTokens/WebAdminCredentials above.
+	WebAdminSessions WebAdminSessionRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made

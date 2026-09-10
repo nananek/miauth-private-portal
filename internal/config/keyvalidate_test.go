@@ -51,6 +51,7 @@ func TestValidateKeyValue_ValidValuesForEveryDBEligibleKey(t *testing.T) {
 		KeyLLMClassificationThreadContextMaxChars:    "8000",
 		KeyOpenWebUICatalogSyncInterval:              "10m",
 		KeyOpenWebUIWebSearchEnabled:                 "true",
+		KeyAdminSessionTTL:                           "12h",
 	}
 
 	for _, key := range DBEligibleKeys() {
