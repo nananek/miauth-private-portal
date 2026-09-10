@@ -157,6 +157,7 @@ catch that class of mistake during local development.
 | `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. Issue #77 PR5: also bounds an RSS source's favicon fetch (`internal/ingest/favicon.Fetch`'s `maxBytes`) — no separate favicon-specific size configuration key exists. |
 | `DRIVE_MAX_IMAGE_WIDTH` / `DRIVE_MAX_IMAGE_HEIGHT` | no | `8000` | Bounds a raster image's decoded pixel dimensions (`internal/drive.ValidateImage`), independent of `DRIVE_MAX_FILE_BYTES` — a small but pathologically large-dimension image ("decompression bomb") is rejected by this check even when it fits comfortably under the byte-size bound. 1-100000. |
 | `DRIVE_ORPHAN_GC_INTERVAL` | no | `24h` | Issue #77 PR7: how often `internal/drive.GCScheduler` enqueues an orphan-file GC sweep (`RunOrphanGC`), which deletes any object the configured `Storage` backend holds that no `files` row references — the safety net for a rare best-effort-cleanup failure in the upload/delete paths, not a correctness-critical process, hence the deliberately infrequent default. Positive duration. |
+| `ADMIN_SESSION_TTL` | no | `12h` | Issue #136 Phase 2 (ADR-0010): how long a browser session issued by `POST /admin/login/finish` stays valid before `RequireAdminSession` rejects it and the Owner must log in again with a passkey. Positive duration. |
 
 `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TIMEOUT` are shared connection
 settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
@@ -165,7 +166,7 @@ settings: required (and bound-checked) whenever *either* `LLM_ENABLED` or
 `internal/config.KnownKeys()` is the single source of truth this table is
 generated from by hand; keep them in sync when a key is added or removed.
 
-29 of the keys above (Issue #76's Tier A) can additionally be read and
+30 of the keys above (Issue #76's Tier A) can additionally be read and
 changed at runtime, without a restart, via `miauthctl config` — see
 [Runtime configuration overlay](#runtime-configuration-overlay-miauthctl-config)
 below for the full list and how. Every other key remains env/config-file
@@ -226,7 +227,7 @@ is the single source of truth) falls into exactly one class:
   `miauthctl config set/import` reject these keys outright, so "cannot be
   stored" is a property of the schema, not a check every caller must
   remember.
-- **db-eligible** (Tier A, 29 keys) — may have an `app_config` row that
+- **db-eligible** (Tier A, 30 keys) — may have an `app_config` row that
   overrides the bootstrap value, reloaded live by the component that
   consumes it. Listed by component below.
 - **bootstrap-only** — every other key: process topology, every network
@@ -234,7 +235,7 @@ is the single source of truth) falls into exactly one class:
   flags, and anything read only once before a live-reloadable consumer
   exists. Stays env/config-file-only exactly as before this issue.
 
-The 29 db-eligible keys, grouped by the component that reloads them:
+The 30 db-eligible keys, grouped by the component that reloads them:
 
 | Component | Keys |
 | --- | --- |
@@ -243,6 +244,7 @@ The 29 db-eligible keys, grouped by the component that reloads them:
 | IMAP fetch job handler (`internal/ingest/imap.Adapter`) | `IMAP_FETCH_TIMEOUT`, `IMAP_MAX_MESSAGE_BYTES`, `IMAP_SNIPPET_MAX_CHARS`, `IMAP_STORE_FULL_BODY`, `IMAP_FULL_BODY_MAX_CHARS` |
 | `internal/llmreply.Service` / `internal/llmclassify.Service` | `LLM_MODEL`, `LLM_TIMEOUT`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_THREAD_CONTEXT_MAX_MESSAGES`, `LLM_THREAD_CONTEXT_MAX_CHARS`, `LLM_CLASSIFICATION_MODEL`, `LLM_CLASSIFICATION_MAX_OUTPUT_TOKENS`, `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_MESSAGES`, `LLM_CLASSIFICATION_THREAD_CONTEXT_MAX_CHARS` |
 | Open WebUI catalog scheduler / turn job | `OPENWEBUI_CATALOG_SYNC_INTERVAL`, `OPENWEBUI_WEB_SEARCH_ENABLED` |
+| `internal/webadmin.Service` (`FinishLogin`'s session-cookie lifetime) | `ADMIN_SESSION_TTL` |
 
 Notably absent, on purpose: `JOBS_WORKER_ID` (identifies this process's
 own in-flight lease ownership — changing it mid-run would make an
@@ -457,15 +459,16 @@ When adding a new scope to `grantableScopes`, existing tokens do not gain it
 automatically: run `miauthctl tokens reflect-scopes --all` after deploying
 (or document why not).
 
-### Admin Web UI: bootstrap and registration (Phase 1)
+### Admin Web UI: bootstrap, registration, and login (Phase 2)
 
 Issue #136 (ADR-0010) adds a browser-based admin surface, anchored to the
 same SSH/host-access trust point as everything else in this section. Phase
-1 (this document's current state) covers only bootstrapping a passkey for
-the Owner; it issues no session cookie and adds no admin screen — see
-ADR-0010 for the full four-phase design and why a web admin session is a
-structurally distinct, fifth credential type rather than a repurposed
-`api_tokens`/`miauth_local_sessions` row.
+1 covers bootstrapping a passkey for the Owner (no session cookie, no
+admin screen). Phase 2 (this document's current state) adds logging in
+with that passkey, the resulting session, logout, and CSRF protection —
+see ADR-0010 for the full four-phase design and why a web admin session
+is a structurally distinct, fifth credential type rather than a
+repurposed `api_tokens`/`miauth_local_sessions` row.
 
 ```sh
 go run ./cmd/miauthctl web-login issue
@@ -480,13 +483,37 @@ exactly once and never logged, the same redaction rule this document's
 other raw-secret CLI outputs (`tokens` output excluded, `config`'s
 `Redacted()`) already follow.
 
+Once a passkey is registered, `<LOCAL_ORIGIN>/admin/login` runs the
+WebAuthn login ceremony (`POST /admin/login/begin` then
+`POST /admin/login/finish`) and, on success, sets the `admin_session`
+cookie (`Secure` when `LOCAL_ORIGIN` is `https://`, `HttpOnly`,
+`SameSite=Strict`, `Path=/admin`) that `RequireAdminSession` checks on
+every other `/admin/*` route, including the Phase 2 placeholder
+`GET /admin/`. The session lasts `ADMIN_SESSION_TTL` (default `12h`) and
+ends early via the page's own logout button (`POST /admin/logout`,
+guarded by a CSRF synchronizer token alongside `SameSite=Strict`) or an
+operator revoking the credential that established it:
+
+```sh
+go run ./cmd/miauthctl web-login list-credentials
+go run ./cmd/miauthctl web-login revoke-credential <id>
+```
+
+`revoke-credential` deletes that passkey registration and revokes every
+currently-active session it established — recovery for a lost or stolen
+device, not just blocking its future logins.
+
 ### Deliberately out of scope
 
 - Managing SSH access, host accounts, or operating-system audit policy.
-- Browser session cookies; authorization occurs through the host-local CLI.
-  (Issue #136 Phase 2+ narrows this exclusion for the admin Web UI
-  specifically — see ADR-0010 — but Aria's own MiAuth flow above is
-  unaffected.)
+- Browser session cookies for Aria's own MiAuth flow above; authorization
+  there occurs through the host-local CLI (ADR-0002). Issue #136 Phase 2
+  narrows this exclusion for the admin Web UI specifically (see
+  ADR-0010's structurally distinct fifth credential type) — the two
+  surfaces never share a session or cookie.
+- The real MiAuth/RSS admin screens themselves: `GET /admin/` is a
+  minimal placeholder proving the session boundary works; Phase 3/4 build
+  the actual screens.
 - `POST /api/meta`, `POST /api/i`, and `POST /api/i/update`: assigned to
   Issue #7's minimal Aria/Misskey surface and Issue #23 PR1's
   self-service display-name editing, respectively; see the Note API

@@ -93,4 +93,99 @@ type WebAdminCredentialRepository interface {
 	// (internal/webadmin.Service.BeginRegistration); Phase 2 adds the
 	// login lookup on top without needing a new repository method.
 	ListByOwner(ctx context.Context, ownerActorID string) ([]WebAdminCredential, error)
+	// UpdateAfterLogin persists FinishLogin's returned *webauthn.Credential
+	// (re-encoded as CredentialJSON by the caller) and LastUsedAt together,
+	// keyed by credentialID (the base64url WebAuthn credential ID — the
+	// library's own documented primary lookup key at login). This is not
+	// optional bookkeeping: go-webauthn's own package documentation
+	// requires SignCount/CloneWarning/UserVerified/BackupState to be
+	// written back after every successful login so the next ceremony
+	// observes current values — see internal/webadmin.Service.FinishLogin's
+	// doc comment for the full citation.
+	UpdateAfterLogin(ctx context.Context, credentialID, credentialJSON string, at time.Time) error
+	// Delete removes id's credential row permanently (miauthctl web-login
+	// revoke-credential). Unlike WebAdminBootstrapToken/WebAdminSession,
+	// a credential registration has no "revoked but kept for history"
+	// state to preserve — Phase 3's web_admin_action_audit table (not
+	// yet built) is the only place CLI-vs-Web-UI action history will
+	// ever live, and CLI actions don't get one either way (ADR-0010
+	// Decision 8's own scoping note). Returns domain.ErrNotFound if id
+	// does not exist.
+	Delete(ctx context.Context, id string) error
+	// Get looks up one credential by its own row ID (miauthctl web-login
+	// revoke-credential resolves the operator-supplied id argument to a
+	// CredentialID before calling Delete + the session-revocation
+	// cascade — see cmd/miauthctl's webLoginRevokeCredential).
+	Get(ctx context.Context, id string) (WebAdminCredential, error)
+}
+
+// WebAdminSessionStatus is web_admin_sessions' two-state machine (Issue
+// #136 Phase 2, ADR-0010): pending -> active. A row never has a third
+// state; expiry and revocation are read off ExpiresAt/RevokedAt, not a
+// stored status value — see this type's own package-level doc comment
+// for why (mirrors WebAdminBootstrapStatus's identical reasoning).
+type WebAdminSessionStatus string
+
+const (
+	WebAdminSessionPending WebAdminSessionStatus = "pending"
+	WebAdminSessionActive  WebAdminSessionStatus = "active"
+)
+
+// WebAdminSession is a login ceremony (while Status == WebAdminSessionPending)
+// or an authenticated browser session (once WebAdminSessionActive) for the
+// Owner (ADR-0010 Decisions 4-5). Its own row ID is the bearer correlation
+// value threaded through BeginLogin/FinishLogin's two HTTP calls — the
+// same "no separate ceremony cookie" pattern Phase 1 established for
+// bootstrap-token registration (see internal/webadmin.Service.BeginLogin's
+// doc comment).
+type WebAdminSession struct {
+	ID                  string
+	OwnerActorID        string
+	CredentialID        *string // nil while pending; set atomically with the pending->active transition
+	Status              WebAdminSessionStatus
+	SessionTokenHash    *string // nil while pending
+	CSRFToken           *string // nil while pending
+	WebAuthnSessionData *string
+	CreatedAt           time.Time
+	ExpiresAt           time.Time
+	RevokedAt           *time.Time
+}
+
+// WebAdminSessionRepository persists Issue #136 Phase 2's login
+// ceremonies and the sessions they produce.
+type WebAdminSessionRepository interface {
+	// Create starts a new pending session (BeginLogin).
+	Create(ctx context.Context, s WebAdminSession) error
+	// Get looks a session up by its own row ID — the correlation value
+	// threaded through the login ceremony's two HTTP calls (mirrors
+	// WebAdminBootstrapTokenRepository.GetByTokenHash's role, keyed
+	// differently since there is no separate raw/hash pair here: the
+	// row ID itself is never sent to the browser as a bearer secret,
+	// only used server-side to correlate BeginLogin -> FinishLogin
+	// within the same short ceremony window).
+	Get(ctx context.Context, id string) (WebAdminSession, error)
+	// Activate atomically transitions id from pending to active
+	// (guarded by status='pending' AND expires_at > at, RETURNING the
+	// updated row), setting credentialID/sessionTokenHash/csrfToken and
+	// extending expiresAt to the real ADMIN_SESSION_TTL window — the
+	// same UPDATE...RETURNING/ErrConflict-on-zero-rows shape
+	// WebAdminBootstrapTokenRepository.Consume already establishes.
+	// FinishLogin calls this only after the WebAuthn library's own
+	// FinishLogin call has already succeeded.
+	Activate(ctx context.Context, id, credentialID, sessionTokenHash, csrfToken string, expiresAt, at time.Time) (WebAdminSession, error)
+	// GetActiveBySessionTokenHash is RequireAdminSession's lookup:
+	// status='active' AND revoked_at IS NULL AND expires_at > at,
+	// returns ErrNotFound (mapped to a generic auth failure by the
+	// caller, never surfaced as a distinct case) otherwise.
+	GetActiveBySessionTokenHash(ctx context.Context, sessionTokenHash string, at time.Time) (WebAdminSession, error)
+	// Revoke sets revoked_at on id (logout). A no-op (success) if
+	// already revoked or expired — logout must never error just
+	// because the session was already gone by the time it ran.
+	Revoke(ctx context.Context, id string, at time.Time) error
+	// RevokeAllByCredential sets revoked_at on every currently-active,
+	// unrevoked session whose CredentialID is credentialID — the
+	// cascade §1 Decision 6 requires when a credential is revoked.
+	// Returns the number of sessions revoked (for the CLI's own output,
+	// e.g. "revoked credential X and its 2 active session(s)").
+	RevokeAllByCredential(ctx context.Context, credentialID string, at time.Time) (int, error)
 }

@@ -99,6 +99,10 @@ func defaultDriveConfig() DriveConfig {
 	}
 }
 
+func defaultWebAdminConfig() WebAdminConfig {
+	return WebAdminConfig{SessionTTL: 12 * time.Hour}
+}
+
 func mergeMaps(maps ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, m := range maps {
@@ -184,6 +188,7 @@ func TestLoad_DefaultsWhenOnlyAppEnvSet(t *testing.T) {
 		IMAP:      defaultIMAPConfig(),
 		OpenWebUI: defaultOpenWebUIConfig(),
 		Drive:     defaultDriveConfig(),
+		WebAdmin:  defaultWebAdminConfig(),
 	}
 
 	// AuthConfig.AriaClientCallbacks is a []string, so Config is no
@@ -516,8 +521,9 @@ func TestConfig_ValidateAcceptsHandBuiltConfigWithinBounds(t *testing.T) {
 			LocalOrigin:   "https://portal.example",
 			OwnerUsername: "owner",
 		},
-		Jobs:  defaultJobsConfig(),
-		Drive: defaultDriveConfig(),
+		Jobs:     defaultJobsConfig(),
+		Drive:    defaultDriveConfig(),
+		WebAdmin: defaultWebAdminConfig(),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -1961,6 +1967,37 @@ func TestLoad_DriveMaxImageDimensionsOutOfBoundsRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), KeyDriveMaxImageWidth) {
 		t.Errorf("error %q does not mention %s", err.Error(), KeyDriveMaxImageWidth)
+	}
+}
+
+func TestLoad_AdminSessionTTLDefaultsToTwelveHours(t *testing.T) {
+	cfg, err := loadWithDrive(t, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebAdmin.SessionTTL != 12*time.Hour {
+		t.Errorf("WebAdmin.SessionTTL = %v, want 12h", cfg.WebAdmin.SessionTTL)
+	}
+}
+
+func TestLoad_AdminSessionTTLRejectsNonPositiveOrInvalidDuration(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		val  string
+	}{
+		{"not a duration", "not-a-duration"},
+		{"zero", "0s"},
+		{"negative", "-1h"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadWithDrive(t, map[string]string{KeyAdminSessionTTL: tt.val})
+			if err == nil {
+				t.Fatalf("%s=%q: expected error, got nil", KeyAdminSessionTTL, tt.val)
+			}
+			if !strings.Contains(err.Error(), KeyAdminSessionTTL) {
+				t.Errorf("error %q does not mention %s", err.Error(), KeyAdminSessionTTL)
+			}
+		})
 	}
 }
 

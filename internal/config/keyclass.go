@@ -101,6 +101,12 @@ var dbEligibleKeys = map[string]bool{
 	// Open WebUI's catalog scheduler and turn job.
 	KeyOpenWebUICatalogSyncInterval: true,
 	KeyOpenWebUIWebSearchEnabled:    true,
+
+	// internal/webadmin.Service.sessionTTL (Issue #136 Phase 2, ADR-0010
+	// plan-136-phase2 §1 Decision 1): an ordinary tunable session
+	// lifetime with no executable-logic or security-boundary-shape
+	// implications of its own.
+	KeyAdminSessionTTL: true,
 }
 
 // ClassOf returns key's ADR-0006 classification. An unknown key (one

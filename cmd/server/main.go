@@ -143,6 +143,12 @@ func run() error {
 	} else if svc, err := webadmin.NewService(db, db.Repos, webadmin.Config{
 		RPID: webAdminRPID.Hostname(), RPDisplayName: "miauth-private-portal", RPOrigins: []string{cfg.Auth.LocalOrigin},
 		OwnerUsername: cfg.Auth.OwnerUsername, OwnerDisplayName: cfg.Auth.OwnerDisplayName,
+		SessionCookie: webadmin.SessionCookieConfig{
+			SessionTTL: cfg.WebAdmin.SessionTTL,
+			ReloadSessionTTL: func(ctx context.Context) time.Duration {
+				return configStore.Duration(ctx, config.KeyAdminSessionTTL, cfg.WebAdmin.SessionTTL)
+			},
+		},
 	}); err != nil {
 		logger.Warn("admin web UI bootstrap unavailable: webadmin service init failed", "error", err.Error())
 	} else {

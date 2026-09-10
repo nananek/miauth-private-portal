@@ -52,5 +52,6 @@ func newRepos(q querier) domain.Repos {
 
 		WebAdminBootstrapTokens: &webAdminBootstrapTokenRepository{q: q},
 		WebAdminCredentials:     &webAdminCredentialRepository{q: q},
+		WebAdminSessions:        &webAdminSessionRepository{q: q},
 	}
 }

@@ -146,10 +146,33 @@ attacker-controlled query value.
 
 ### Cookie attributes
 
-Not applicable: ADR-0002 explicitly excludes browser session cookies from
-this design ("Browser session cookies; authorization occurs through the
-host-local CLI" is out of scope). There is no cookie-based session to
-attribute-check.
+ADR-0002 excludes browser session cookies from Aria's own local MiAuth
+flow ("Browser session cookies; authorization occurs through the
+host-local CLI" is out of scope) — that remains true and untested here.
+Issue #136 Phase 2 (ADR-0010) narrows the exclusion for the admin Web UI
+specifically: `POST /admin/login/finish` issues a real `admin_session`
+cookie once a WebAuthn login ceremony succeeds.
+
+| Property | Evidence |
+| --- | --- |
+| The session cookie is `Secure` (when `LOCAL_ORIGIN` is `https://`), `HttpOnly`, `SameSite=Strict`, and scoped to `Path=/admin` — never sent to any other route | `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminLoginFinish_HappyPath_SetsSessionCookie` (each attribute asserted individually and by name) |
+| A failed login ceremony never sets a cookie | `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminLoginFinish_TamperedResponseReturns401NoCookieSet` |
+| Logout clears the cookie with the exact same `Path`/`Secure`/`HttpOnly`/`SameSite` attributes as the original (a mismatched clearing cookie is silently ignored by real browsers) and a negative `MaxAge`; a follow-up request with the old cookie value is then rejected | `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminLogout_RevokesSessionAndClearsCookie` |
+| The session token is rotated on every login (a fresh high-entropy value each time, never reused) and its lifetime is bounded (`ADMIN_SESSION_TTL`, extended from the short login-ceremony window only on a successful `FinishLogin`) | `internal/webadmin/service_test.go`: `TestFinishLogin_HappyPath_ActivatesSessionAndPersistsUpdatedCredential` (asserts `ExpiresAt` reflects the long session TTL, not the ceremony window); `internal/webadmin/session_test.go`: `TestNewRawSessionToken_IsHighEntropyAndUnique` |
+| An unauthenticated or expired/revoked-session request to any `/admin/*` route behind `RequireAdminSession` is rejected with one generic 401 (no information leak about which case applied) | `internal/httpserver/session_middleware_test.go`: `TestRequireAdminSession_MissingCookieReturns401`, `TestRequireAdminSession_InvalidOrExpiredSessionReturns401` |
+
+### CSRF
+
+Issue #136 Phase 2 (ADR-0010 Decision 7) adds `SameSite=Strict` plus a
+defense-in-depth synchronizer token (`RequireAdminCSRF`) guarding every
+state-changing `/admin/*` route. This repo's AC8 table had no CSRF
+section before this phase — there was no cookie-based session for CSRF
+to apply to.
+
+| Property | Evidence |
+| --- | --- |
+| A mutating request (`POST /admin/logout`) missing or presenting the wrong `X-Admin-CSRF-Token` is rejected with 403, even with an otherwise-valid session cookie | `internal/httpserver/session_middleware_test.go`: `TestRequireAdminCSRF_MissingOrWrongTokenReturns403EvenWithValidSessionCookie` |
+| The correct CSRF token (compared via `crypto/subtle.ConstantTimeCompare`) allows the request through | `internal/httpserver/session_middleware_test.go`: `TestRequireAdminCSRF_CorrectTokenAllowsRequest` |
 
 ### Token attributes
 

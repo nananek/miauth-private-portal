@@ -47,6 +47,18 @@ type Config struct {
 	// ("localdisk" or "s3compat") is always meaningful, so there is no
 	// third "off" state to represent.
 	Drive DriveConfig
+	// WebAdmin configures Issue #136 Phase 2's admin Web UI session
+	// lifetime (ADR-0010). Like Drive it has no Enabled flag: the admin
+	// Web UI's routes are always registered once webadmin.NewService
+	// succeeds (cmd/server's own construction-failure fallback, not a
+	// config flag, is what can leave them unregistered).
+	WebAdmin WebAdminConfig
+}
+
+// WebAdminConfig bounds Issue #136 Phase 2's admin Web UI session
+// lifetime.
+type WebAdminConfig struct {
+	SessionTTL time.Duration
 }
 
 // HTTPConfig bounds the HTTP server's listen address, timeouts, request
@@ -721,6 +733,8 @@ func parse(values map[string]string) (Config, []FieldError) {
 	cfg.Drive.MaxImageHeight = parseOptionalInt(values, KeyDriveMaxImageHeight, 8000, driveMaxImageDimensionMin, driveMaxImageDimensionMax, &errs)
 	cfg.Drive.OrphanGCInterval = parseOptionalDuration(values, KeyDriveOrphanGCInterval, 24*time.Hour, &errs)
 
+	cfg.WebAdmin.SessionTTL = parseOptionalDuration(values, KeyAdminSessionTTL, 12*time.Hour, &errs)
+
 	cfg.IMAP.Enabled = parseOptionalBool(values, KeyIMAPEnabled, false, &errs)
 	cfg.IMAP.Host = parseOptionalString(values, KeyIMAPHost, "")
 	cfg.IMAP.Port = parseOptionalInt(values, KeyIMAPPort, 993, imapPortMin, imapPortMax, &errs)
@@ -887,6 +901,8 @@ func (c Config) Validate() error {
 	validateIntBounds(&errs, KeyDriveMaxImageHeight, c.Drive.MaxImageHeight, driveMaxImageDimensionMin, driveMaxImageDimensionMax)
 	validatePositiveDuration(&errs, KeyDriveOrphanGCInterval, c.Drive.OrphanGCInterval)
 
+	validatePositiveDuration(&errs, KeyAdminSessionTTL, c.WebAdmin.SessionTTL)
+
 	// IMAP fields are only required/bound-checked when the feature is
 	// actually enabled: IMAP_ENABLED defaults to false, and a disabled
 	// deployment must not fail startup over an unset IMAP setting it will
@@ -1035,6 +1051,7 @@ func (c Config) Redacted() map[string]string {
 		KeyDriveMaxImageWidth:     strconv.Itoa(c.Drive.MaxImageWidth),
 		KeyDriveMaxImageHeight:    strconv.Itoa(c.Drive.MaxImageHeight),
 		KeyDriveOrphanGCInterval:  c.Drive.OrphanGCInterval.String(),
+		KeyAdminSessionTTL:        c.WebAdmin.SessionTTL.String(),
 		KeyIMAPEnabled:            strconv.FormatBool(c.IMAP.Enabled),
 		KeyIMAPHost:               c.IMAP.Host,
 		KeyIMAPPort:               strconv.Itoa(c.IMAP.Port),

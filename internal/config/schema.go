@@ -166,6 +166,16 @@ const (
 	// deployment reconciles the configured Storage backend against every
 	// files.storage_key, deleting any object no row references.
 	KeyDriveOrphanGCInterval = "DRIVE_ORPHAN_GC_INTERVAL"
+
+	// KeyAdminSessionTTL is Issue #136 Phase 2's admin Web UI session
+	// lifetime (ADR-0010): how long a browser session issued by the
+	// WebAuthn login ceremony (POST /admin/login/finish) stays valid
+	// before RequireAdminSession rejects it and the Owner must log in
+	// again. db-eligible (plan-136-phase2 §1 Decision 1): an ordinary
+	// tunable duration with no executable-logic or security-boundary-shape
+	// implications of its own, the same class of decision
+	// RSS_POLL_INTERVAL already is.
+	KeyAdminSessionTTL = "ADMIN_SESSION_TTL"
 )
 
 // knownKeyOrder lists every known key once, in the order environment
@@ -263,6 +273,7 @@ var knownKeyOrder = []string{
 	KeyDriveMaxImageWidth,
 	KeyDriveMaxImageHeight,
 	KeyDriveOrphanGCInterval,
+	KeyAdminSessionTTL,
 }
 
 func isKnownKey(key string) bool {
