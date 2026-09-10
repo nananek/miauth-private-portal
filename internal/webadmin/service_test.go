@@ -65,6 +65,7 @@ type testService struct {
 	db      *sqlite.DB
 	clock   *fakeClock
 	ownerID string
+	dbPath  string
 }
 
 func newTestService(t *testing.T) *testService {
@@ -93,7 +94,7 @@ func newTestService(t *testing.T) *testService {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &testService{Service: svc, db: db, clock: clock, ownerID: owner.ID}
+	return &testService{Service: svc, db: db, clock: clock, ownerID: owner.ID, dbPath: dbPath}
 }
 
 func (ts *testService) issue(t *testing.T) (raw string, tok domain.WebAdminBootstrapToken) {

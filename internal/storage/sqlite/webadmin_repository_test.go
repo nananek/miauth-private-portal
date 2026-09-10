@@ -379,3 +379,36 @@ func TestWebAdminSessionRepository_RevokeAllByCredential_OnlyAffectsMatchingActi
 		t.Fatalf("other credential's session = %+v, err = %v, want unaffected", gotOther, err)
 	}
 }
+
+func TestWebAdminActionAuditRepository_Record(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	owner := createOwnerActor(t, db, now)
+
+	credentialID := "cred-1"
+	before, after := "created", "authorized"
+	full := domain.WebAdminActionAuditEntry{
+		ID: domain.NewID(), OwnerActorID: owner.ID, CredentialID: &credentialID,
+		Action: domain.WebAdminActionApproveSession, Target: "route-session-1",
+		BeforeValue: &before, AfterValue: &after, ChangedAt: now,
+	}
+	if err := db.WebAdminActionAudit.Record(t.Context(), full); err != nil {
+		t.Fatal(err)
+	}
+
+	minimal := domain.WebAdminActionAuditEntry{
+		ID: domain.NewID(), OwnerActorID: owner.ID,
+		Action: domain.WebAdminActionRevokeToken, Target: "token-1", ChangedAt: now,
+	}
+	if err := db.WebAdminActionAudit.Record(t.Context(), minimal); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	if err := db.sqlDB.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM web_admin_action_audit`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("row count = %d, want 2", count)
+	}
+}

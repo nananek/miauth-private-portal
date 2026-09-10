@@ -189,3 +189,45 @@ type WebAdminSessionRepository interface {
 	// e.g. "revoked credential X and its 2 active session(s)").
 	RevokeAllByCredential(ctx context.Context, credentialID string, at time.Time) (int, error)
 }
+
+// WebAdminAction names one of the four action kinds Issue #136 Phase
+// 3's handlers record. A plain string, not a CHECK-constrained column
+// (unlike WebAdminBootstrapStatus/WebAdminSessionStatus's two-value
+// state machines): this set may grow in a later phase (e.g. RSS feed
+// add/remove) without a schema change, and nothing queries by exact
+// action value today beyond storing/displaying it.
+type WebAdminAction string
+
+const (
+	WebAdminActionApproveSession WebAdminAction = "approve_session"
+	WebAdminActionRejectSession  WebAdminAction = "reject_session"
+	WebAdminActionRevokeToken    WebAdminAction = "revoke_token"
+	WebAdminActionReflectScopes  WebAdminAction = "reflect_scopes"
+)
+
+// WebAdminActionAuditEntry is one row of the api_token_scope_audit-style
+// change log Issue #136 Phase 3 adds for Web-UI-originated admin actions
+// (ADR-0010 Decision 8). CredentialID is nil only defensively (an active
+// WebAdminSession always has one set — see WebAdminSession.CredentialID's
+// own doc comment — this field's nilability exists so a future action
+// performed by something other than a browser session, if one is ever
+// added, is representable without a schema change, not because today's
+// callers ever leave it unset).
+type WebAdminActionAuditEntry struct {
+	ID           string
+	OwnerActorID string
+	CredentialID *string
+	Action       WebAdminAction
+	Target       string
+	BeforeValue  *string
+	AfterValue   *string
+	ChangedAt    time.Time
+}
+
+// WebAdminActionAuditRepository persists Issue #136 Phase 3's admin
+// action audit trail. Record-only for this phase — no List method yet;
+// a future audit-viewer screen would add one then rather than
+// speculatively now.
+type WebAdminActionAuditRepository interface {
+	Record(ctx context.Context, entry WebAdminActionAuditEntry) error
+}

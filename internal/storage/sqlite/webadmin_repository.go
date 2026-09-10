@@ -238,3 +238,15 @@ func scanWebAdminSession(row rowScanner) (domain.WebAdminSession, error) {
 	}
 	return s, nil
 }
+
+type webAdminActionAuditRepository struct{ q querier }
+
+func (r *webAdminActionAuditRepository) Record(ctx context.Context, entry domain.WebAdminActionAuditEntry) error {
+	_, err := r.q.ExecContext(ctx,
+		`INSERT INTO web_admin_action_audit (id, owner_actor_id, credential_id, action, target, before_value, after_value, changed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.ID, entry.OwnerActorID, nullableString(entry.CredentialID), string(entry.Action), entry.Target,
+		nullableString(entry.BeforeValue), nullableString(entry.AfterValue), formatTime(entry.ChangedAt),
+	)
+	return mapWriteError(err)
+}

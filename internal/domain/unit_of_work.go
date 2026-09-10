@@ -73,6 +73,11 @@ type Repos struct {
 	// the sessions they produce (ADR-0010). Always present, like
 	// WebAdminBootstrapTokens/WebAdminCredentials above.
 	WebAdminSessions WebAdminSessionRepository
+	// WebAdminActionAudit backs Issue #136 Phase 3's admin action audit
+	// trail (ADR-0010 Decision 8): one row per approve/reject/revoke/
+	// reflect-scopes action performed through the Web UI. Always
+	// present, like the other WebAdmin* repositories above.
+	WebAdminActionAudit WebAdminActionAuditRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made

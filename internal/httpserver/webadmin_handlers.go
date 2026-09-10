@@ -3,7 +3,6 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
-	"html/template"
 	"net/http"
 	"strings"
 	"time"
@@ -282,37 +281,6 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-// handleAdminIndex serves GET /admin/ (behind RequireAdminSession only —
-// a read, no CSRF token needed to view it). A minimal page proving this
-// route is reachable only with a valid session and unreachable without
-// one; the real admin screens are Phase 3/4. The admin_session cookie is
-// HttpOnly (Decision 5), so the page's own script cannot read the
-// session's CSRF token off it to call POST /admin/logout — the one
-// piece of caller-specific data this handler renders is that CSRF
-// token, embedded via html/template's automatic contextual escaping
-// (not naive string interpolation) into a <meta> tag. This is not the
-// same risk adminSetupPageHTML/adminLoginPageHTML's "zero
-// interpolation" doc comments describe: those pages are served to an
-// *unauthenticated* caller and must never reflect attacker-influenced
-// query/body values, whereas this value is a server-generated,
-// base64url-only random secret already bound to the caller's own
-// verified session, not attacker input.
-func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
-	session := AdminSessionFromContext(r.Context())
-	csrfToken := ""
-	if session.CSRFToken != nil {
-		csrfToken = *session.CSRFToken
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// This response embeds the caller's own CSRF token (see this
-	// handler's doc comment) — no-store keeps it out of disk/shared
-	// caches, unlike the token-free adminSetupPageHTML/adminLoginPageHTML
-	// pages above, which need no such header.
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	_ = adminIndexPageTemplate.Execute(w, struct{ CSRFToken string }{CSRFToken: csrfToken})
-}
-
 // adminCookieSecure reports whether the admin session cookie should
 // carry the Secure attribute: derived from s.localOrigin's scheme
 // (mirrors LOCAL_ORIGIN's own production-https-enforcement logic —
@@ -410,41 +378,3 @@ const adminLoginPageHTML = `<!doctype html>
 </body>
 </html>
 `
-
-// adminIndexPageTemplate is Issue #136 Phase 2's whole "you're in"
-// surface: proving the session boundary works end to end. Its only
-// server-supplied value is the caller's own session's CSRF token (see
-// handleAdminIndex's doc comment for why that is safe here); everything
-// else is fixed markup. The real admin screens are Phase 3/4.
-var adminIndexPageTemplate = template.Must(template.New("adminIndex").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="admin-csrf-token" content="{{.CSRFToken}}">
-<title>Admin</title>
-</head>
-<body>
-<p>Logged in as the Owner.</p>
-<button id="logout">Log out</button>
-<p id="status"></p>
-<script>
-(function () {
-  "use strict";
-
-  document.getElementById("logout").addEventListener("click", async function () {
-    var csrfToken = document.querySelector('meta[name="admin-csrf-token"]').content;
-    var resp = await fetch("/admin/logout", {
-      method: "POST",
-      headers: { "X-Admin-CSRF-Token": csrfToken }
-    });
-    if (resp.ok) {
-      document.location = "/admin/login";
-    } else {
-      document.getElementById("status").textContent = "Logout failed.";
-    }
-  });
-})();
-</script>
-</body>
-</html>
-`))

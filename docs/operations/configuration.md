@@ -459,16 +459,19 @@ When adding a new scope to `grantableScopes`, existing tokens do not gain it
 automatically: run `miauthctl tokens reflect-scopes --all` after deploying
 (or document why not).
 
-### Admin Web UI: bootstrap, registration, and login (Phase 2)
+### Admin Web UI: bootstrap, registration, login, and session/token administration (Phase 3)
 
 Issue #136 (ADR-0010) adds a browser-based admin surface, anchored to the
 same SSH/host-access trust point as everything else in this section. Phase
 1 covers bootstrapping a passkey for the Owner (no session cookie, no
-admin screen). Phase 2 (this document's current state) adds logging in
-with that passkey, the resulting session, logout, and CSRF protection —
-see ADR-0010 for the full four-phase design and why a web admin session
-is a structurally distinct, fifth credential type rather than a
-repurposed `api_tokens`/`miauth_local_sessions` row.
+admin screen). Phase 2 adds logging in with that passkey, the resulting
+session, logout, and CSRF protection. Phase 3 (this document's current
+state) replaces the Phase 2 placeholder `GET /admin/` with a real
+dashboard listing pending MiAuth sessions and API tokens, each with its
+own approve/reject/revoke/reflect-scopes action — see ADR-0010 for the
+full four-phase design and why a web admin session is a structurally
+distinct, fifth credential type rather than a repurposed
+`api_tokens`/`miauth_local_sessions` row.
 
 ```sh
 go run ./cmd/miauthctl web-login issue
@@ -488,8 +491,8 @@ WebAuthn login ceremony (`POST /admin/login/begin` then
 `POST /admin/login/finish`) and, on success, sets the `admin_session`
 cookie (`Secure` when `LOCAL_ORIGIN` is `https://`, `HttpOnly`,
 `SameSite=Strict`, `Path=/admin`) that `RequireAdminSession` checks on
-every other `/admin/*` route, including the Phase 2 placeholder
-`GET /admin/`. The session lasts `ADMIN_SESSION_TTL` (default `12h`) and
+every other `/admin/*` route, including `GET /admin/`. The session lasts
+`ADMIN_SESSION_TTL` (default `12h`) and
 ends early via the page's own logout button (`POST /admin/logout`,
 guarded by a CSRF synchronizer token alongside `SameSite=Strict`) or an
 operator revoking the credential that established it:
@@ -503,6 +506,34 @@ go run ./cmd/miauthctl web-login revoke-credential <id>
 currently-active session it established — recovery for a lost or stolen
 device, not just blocking its future logins.
 
+Once logged in, `GET /admin/` renders every pending MiAuth session and
+every API token, read fresh from `internal/miauth.Service` on each
+request (`ListPendingSessions`/`ListAPITokens` — the same methods
+`miauthctl` already uses; this phase adds no new capability, only a
+second, browser-based caller). Each row exposes the action(s)
+`miauthctl` already has a CLI equivalent for, as a `POST` guarded by both
+`RequireAdminSession` and the CSRF synchronizer token:
+
+| Route | Effect |
+| --- | --- |
+| `POST /admin/sessions/approve` | `internal/miauth.Service.ApproveSession` |
+| `POST /admin/sessions/reject` | `internal/miauth.Service.RejectSession` |
+| `POST /admin/tokens/revoke` | `internal/miauth.Service.RevokeAPIToken` |
+| `POST /admin/tokens/reflect-scopes` | `internal/miauth.Service.ReflectScopes` |
+
+Every mutating action, once it succeeds, writes one row to
+`web_admin_action_audit` (owner actor, which registered credential
+performed it, the action, its target, and a before/after value where
+meaningful) — a best-effort write in its own transaction immediately
+after the underlying action commits, not the same transaction as that
+action: `internal/miauth.Service`'s own methods are untouched by this
+phase and own their own transaction boundaries, so a rare audit-write
+failure never rolls back, and never fails the HTTP response for, an
+action that already succeeded. `RequestedPermissions`/`ClientCallback`
+(both Aria-supplied, untrusted) render on the dashboard through
+`html/template`'s ordinary auto-escaping, the same as the CSRF token
+above — never a `template.HTML`-style escape hatch.
+
 ### Deliberately out of scope
 
 - Managing SSH access, host accounts, or operating-system audit policy.
@@ -511,9 +542,12 @@ device, not just blocking its future logins.
   narrows this exclusion for the admin Web UI specifically (see
   ADR-0010's structurally distinct fifth credential type) — the two
   surfaces never share a session or cookie.
-- The real MiAuth/RSS admin screens themselves: `GET /admin/` is a
-  minimal placeholder proving the session boundary works; Phase 3/4 build
-  the actual screens.
+- The RSS feed admin screen: a separate, later phase (Phase 4) of Issue
+  #136; `GET /admin/` as of Phase 3 covers MiAuth sessions and API tokens
+  only.
+- An audit-history viewer for `web_admin_action_audit`: the table and its
+  index are built to support one cheaply later, but no UI or endpoint to
+  browse it exists yet.
 - `POST /api/meta`, `POST /api/i`, and `POST /api/i/update`: assigned to
   Issue #7's minimal Aria/Misskey surface and Issue #23 PR1's
   self-service display-name editing, respectively; see the Note API
