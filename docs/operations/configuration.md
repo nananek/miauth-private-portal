@@ -459,18 +459,20 @@ When adding a new scope to `grantableScopes`, existing tokens do not gain it
 automatically: run `miauthctl tokens reflect-scopes --all` after deploying
 (or document why not).
 
-### Admin Web UI: bootstrap, registration, login, and session/token administration (Phase 3)
+### Admin Web UI: bootstrap, registration, login, and session/token administration (Phase 4)
 
 Issue #136 (ADR-0010) adds a browser-based admin surface, anchored to the
 same SSH/host-access trust point as everything else in this section. Phase
 1 covers bootstrapping a passkey for the Owner (no session cookie, no
 admin screen). Phase 2 adds logging in with that passkey, the resulting
-session, logout, and CSRF protection. Phase 3 (this document's current
-state) replaces the Phase 2 placeholder `GET /admin/` with a real
-dashboard listing pending MiAuth sessions and API tokens, each with its
-own approve/reject/revoke/reflect-scopes action — see ADR-0010 for the
-full four-phase design and why a web admin session is a structurally
-distinct, fifth credential type rather than a repurposed
+session, logout, and CSRF protection. Phase 3 replaces the Phase 2
+placeholder `GET /admin/` with a real dashboard listing pending MiAuth
+sessions and API tokens, each with its own
+approve/reject/revoke/reflect-scopes action. Phase 4 (this document's
+current state, and the last of the four) adds an RSS feed add/remove
+section to that same dashboard — see ADR-0010 for the full four-phase
+design and why a web admin session is a structurally distinct, fifth
+credential type rather than a repurposed
 `api_tokens`/`miauth_local_sessions` row.
 
 ```sh
@@ -520,6 +522,34 @@ second, browser-based caller). Each row exposes the action(s)
 | `POST /admin/sessions/reject` | `internal/miauth.Service.RejectSession` |
 | `POST /admin/tokens/revoke` | `internal/miauth.Service.RevokeAPIToken` |
 | `POST /admin/tokens/reflect-scopes` | `internal/miauth.Service.ReflectScopes` |
+| `POST /admin/rss/add` | `internal/webadmin.Service.AddRSSFeed` |
+| `POST /admin/rss/remove` | `internal/webadmin.Service.RemoveRSSFeed` |
+
+Phase 4 adds a third dashboard section for `RSS_FEED_URLS`, wired
+entirely through the same `app_config`/`app_config_audit` DB
+configuration overlay this document's "Runtime-reloadable configuration"
+section above already describes (ADR-0006, Issue #76) — not a new
+domain concept, just a second, browser-based writer alongside
+`miauthctl config set RSS_FEED_URLS`/`config unset RSS_FEED_URLS`. Each
+`app_config`/`app_config_audit` write is compare-and-set on the row's
+current version, so a concurrent CLI `config set` and a Web UI add/remove
+race exactly as two browser tabs would (`409` on the losing write, not a
+silent overwrite). The dashboard also shows, read-only, whether
+`RSS_FILTER_SCRIPT_PATH` is configured at all (never the path itself —
+ADR-0009 keeps editing it CLI/file-only) and whether `RSS_FEED_URLS` is
+currently a database override or still the bootstrap (file/environment)
+value.
+
+One limitation is deliberate and worth stating plainly rather than
+glossing over: removing the last feed while `RSS_FEED_URLS` is still
+bootstrap-sourced (no `app_config` override has ever been written for
+it — the common shape for a single-operator deployment that set the
+feed once via `.env` and never touched it again) returns `409` rather
+than silently reverting to a non-empty bootstrap list or silently doing
+nothing; the operator must edit `RSS_FEED_URLS` in the config
+file/environment and restart, or add a replacement feed first. This
+mirrors `RSS_FILTER_SCRIPT_PATH`'s own "edit the file and restart"
+restriction (see its row in the configuration reference table above).
 
 Every mutating action, once it succeeds, writes one row to
 `web_admin_action_audit` (owner actor, which registered credential
@@ -542,12 +572,20 @@ above — never a `template.HTML`-style escape hatch.
   narrows this exclusion for the admin Web UI specifically (see
   ADR-0010's structurally distinct fifth credential type) — the two
   surfaces never share a session or cookie.
-- The RSS feed admin screen: a separate, later phase (Phase 4) of Issue
-  #136; `GET /admin/` as of Phase 3 covers MiAuth sessions and API tokens
-  only.
+- A general config-editing UI (any key beyond `RSS_FEED_URLS`) — stays
+  CLI/file-only. Editing `RSS_FILTER_SCRIPT_PATH` or its script's contents
+  from the browser also stays CLI/file-only (ADR-0009); the dashboard only
+  shows whether one is configured at all.
 - An audit-history viewer for `web_admin_action_audit`: the table and its
   index are built to support one cheaply later, but no UI or endpoint to
   browse it exists yet.
+- Phase 4 is the last of Issue #136's four planned phases: both halves of
+  the issue (MiAuth session/token admin, RSS feed management) are now
+  implemented, reachable from a browser, and audited. See
+  [ADR-0010](../decisions/0010-admin-web-ui-auth.md)'s "Revisit if"
+  section for what would justify a follow-up issue later (a second human
+  operator needing independent access, or the admin surface growing into
+  general/secret config editing) — neither is a known, current need.
 - `POST /api/meta`, `POST /api/i`, and `POST /api/i/update`: assigned to
   Issue #7's minimal Aria/Misskey surface and Issue #23 PR1's
   self-service display-name editing, respectively; see the Note API

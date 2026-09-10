@@ -108,6 +108,31 @@ type Config struct {
 	// nothing to do with the library, only with how this service's
 	// caller (internal/httpserver) wants the cookie shaped.
 	SessionCookie SessionCookieConfig
+
+	// RSSFeedURLsBootstrap/RSSFeedUsernamesBootstrap are the RSS_FEED_URLS
+	// value config.Load resolved from file/env/default at startup —
+	// cfg.RSS.FeedURLs/cfg.RSS.FeedUsernames verbatim (Issue #136 Phase
+	// 4). Used only as ListRSSFeeds/AddRSSFeed/RemoveRSSFeed's fallback
+	// when no app_config override row exists yet. Deliberately NOT
+	// derived from cfg.Redacted()[config.KeyRSSFeedURLs]: that
+	// reconstruction (config.go's Redacted implementation,
+	// `strings.Join(c.RSS.FeedURLs, ",")`) silently drops each entry's
+	// "|username" suffix, since it joins only the URL half — a pre-
+	// existing, display-only gap in Redacted() this phase does not fix
+	// (out of scope; Redacted() is a masking helper for `miauthctl
+	// config list`'s human-readable output, not a round-trip-safe
+	// serialization), but which would corrupt this phase's own "add a
+	// feed" reconstruction if reused here. cmd/server must pass
+	// cfg.RSS.FeedURLs/cfg.RSS.FeedUsernames directly instead.
+	RSSFeedURLsBootstrap      []string
+	RSSFeedUsernamesBootstrap []*string
+	// RSSEnabled is cfg.RSS.Enabled verbatim — display-only (Decision 6:
+	// the RSS section stays usable either way, this only adds an
+	// informational note when false).
+	RSSEnabled bool
+	// RSSFilterScriptPathConfigured is cfg.RSS.FilterScriptPath != ""
+	// (Decision 7) — never the path itself.
+	RSSFilterScriptPathConfigured bool
 }
 
 // SessionCookieConfig is Config.SessionCookie's own type (Issue #136
@@ -128,6 +153,11 @@ type Service struct {
 	ownerDisplayName string
 	clock            Clock
 	sessionCookie    SessionCookieConfig
+
+	rssFeedURLsBootstrap          []string
+	rssFeedUsernamesBootstrap     []*string
+	rssEnabled                    bool
+	rssFilterScriptPathConfigured bool
 }
 
 func NewService(uow domain.UnitOfWork, repos domain.Repos, cfg Config) (*Service, error) {
@@ -144,9 +174,20 @@ func NewService(uow domain.UnitOfWork, repos domain.Repos, cfg Config) (*Service
 	return &Service{
 		repos: repos, uow: uow, webauthn: wa, clock: clock,
 		ownerUsername: cfg.OwnerUsername, ownerDisplayName: cfg.OwnerDisplayName,
-		sessionCookie: cfg.SessionCookie,
+		sessionCookie:                 cfg.SessionCookie,
+		rssFeedURLsBootstrap:          cfg.RSSFeedURLsBootstrap,
+		rssFeedUsernamesBootstrap:     cfg.RSSFeedUsernamesBootstrap,
+		rssEnabled:                    cfg.RSSEnabled,
+		rssFilterScriptPathConfigured: cfg.RSSFilterScriptPathConfigured,
 	}, nil
 }
+
+// RSSEnabled and RSSFilterScriptPathConfigured expose Config's
+// identically-named fields (display-only) to internal/httpserver, which
+// has no other way to read unexported Service fields across the package
+// boundary.
+func (s *Service) RSSEnabled() bool                    { return s.rssEnabled }
+func (s *Service) RSSFilterScriptPathConfigured() bool { return s.rssFilterScriptPathConfigured }
 
 func (s *Service) sessionTTL(ctx context.Context) time.Duration {
 	if s.sessionCookie.ReloadSessionTTL != nil {

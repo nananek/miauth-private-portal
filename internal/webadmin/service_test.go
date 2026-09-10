@@ -68,7 +68,13 @@ type testService struct {
 	dbPath  string
 }
 
-func newTestService(t *testing.T) *testService {
+// newTestService builds a testService against a fresh migrated DB.
+// mutateConfig, if given, is applied (in order) to the Config passed to
+// NewService before construction — used by RSS tests to set
+// Config.RSSFeedURLsBootstrap/etc. without needing a new constructor
+// (Issue #136 Phase 4), mirroring internal/httpserver's newWebAdminTestServer
+// mutateRepos pattern (see PR #144 follow-up commit 104c517).
+func newTestService(t *testing.T, mutateConfig ...func(*Config)) *testService {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
@@ -86,11 +92,15 @@ func newTestService(t *testing.T) *testService {
 		t.Fatal(err)
 	}
 	clock := &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	svc, err := NewService(db, db.Repos, Config{
+	cfg := Config{
 		RPID: testRPID, RPDisplayName: "Test Portal", RPOrigins: []string{testRPOrigin},
 		OwnerUsername: "owner", OwnerDisplayName: "Test Owner", Clock: clock,
 		SessionCookie: SessionCookieConfig{SessionTTL: testSessionTTL},
-	})
+	}
+	for _, mutate := range mutateConfig {
+		mutate(&cfg)
+	}
+	svc, err := NewService(db, db.Repos, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

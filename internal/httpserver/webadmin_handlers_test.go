@@ -59,6 +59,19 @@ type webAdminTestServer struct {
 // pass a hook here, before construction.
 func newWebAdminTestServer(t *testing.T, mutateRepos ...func(*domain.Repos)) *webAdminTestServer {
 	t.Helper()
+	return newWebAdminTestServerWithConfig(t, mutateRepos, nil)
+}
+
+// newWebAdminTestServerWithConfig is newWebAdminTestServer plus
+// mutateConfig, applied (in order) to the webadmin.Config passed to
+// webadmin.NewService before construction — used by RSS tests (Issue
+// #136 Phase 4) to seed Config.RSSFeedURLsBootstrap/etc. Kept as a
+// second function rather than a variadic mutateConfig parameter on
+// newWebAdminTestServer itself: Go allows only one variadic parameter
+// per function, and mutateRepos already occupies that slot for this
+// file's many existing zero-arg call sites.
+func newWebAdminTestServerWithConfig(t *testing.T, mutateRepos []func(*domain.Repos), mutateConfig []func(*webadmin.Config)) *webAdminTestServer {
+	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
 		Path: dbPath, BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
@@ -78,7 +91,7 @@ func newWebAdminTestServer(t *testing.T, mutateRepos ...func(*domain.Repos)) *we
 	for _, mutate := range mutateRepos {
 		mutate(&repos)
 	}
-	svc, err := webadmin.NewService(db, repos, webadmin.Config{
+	cfg := webadmin.Config{
 		RPID: webAdminTestRPID, RPDisplayName: "Test Portal", RPOrigins: []string{webAdminTestOrigin},
 		OwnerUsername: "owner", OwnerDisplayName: "Test Owner",
 		// SessionTTL must be nonzero: FinishLogin's Activate call extends
@@ -86,7 +99,11 @@ func newWebAdminTestServer(t *testing.T, mutateRepos ...func(*domain.Repos)) *we
 		// leave every login-produced session already expired the
 		// instant it is created.
 		SessionCookie: webadmin.SessionCookieConfig{SessionTTL: 12 * time.Hour},
-	})
+	}
+	for _, mutate := range mutateConfig {
+		mutate(&cfg)
+	}
+	svc, err := webadmin.NewService(db, repos, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -287,6 +287,11 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		s.Handle("POST /admin/sessions/reject", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminSessionsReject))))
 		s.Handle("POST /admin/tokens/revoke", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminTokensRevoke))))
 		s.Handle("POST /admin/tokens/reflect-scopes", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminTokensReflectScopes))))
+
+		// Issue #136 Phase 4: the RSS feed add/remove screen on the same
+		// dashboard, same adminAuth+CSRF wrapping as the routes above.
+		s.Handle("POST /admin/rss/add", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminRSSAdd))))
+		s.Handle("POST /admin/rss/remove", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminRSSRemove))))
 	}
 
 	return s
