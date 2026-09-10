@@ -120,18 +120,28 @@ prompt builders now carry this exact regression test:
 
 ### XSS/escaping
 
-This service has no custom web UI (AGENTS.md non-goal), so the classic
-"browser renders attacker HTML and executes a script" path does not exist
-for any client-facing surface. The residual risk is untrusted RSS/IMAP
-content leaking markup into a stored entry body, and the one HTTP
-response in this service that isn't a JSON API body (MiAuth's waiting
-page) ever interpolating an attacker-controlled query value.
+This service was built with no custom web UI (AGENTS.md non-goal), so
+through Issue #135 the classic "browser renders attacker HTML and
+executes a script" path did not exist for any client-facing surface.
+Issue #136 Phase 1 (ADR-0010) breaks that precedent deliberately: `GET
+/admin/setup` now serves a real `text/html` page with an inline
+`<script>`. It stays outside this risk category by construction rather
+than by sanitization — the page is a fixed Go string constant
+(`adminSetupPageHTML`) with no server-side template interpolation at
+all; the one piece of caller-supplied data in the flow (the bootstrap
+token) is read back out of `window.location.search` by the page's own
+client-side script, never written into the HTML by Go. The residual risk
+from before Issue #136 is unchanged: untrusted RSS/IMAP content leaking
+markup into a stored entry body, and the one other non-JSON HTTP response
+in this service (MiAuth's waiting page) ever interpolating an
+attacker-controlled query value.
 
 | Property | Evidence |
 | --- | --- |
 | `<script>`/`<style>` element content is dropped, not just the tags | `internal/textsanitize/html_test.go`: `TestStripHTML_DropsScriptAndStyleContent` |
 | Attribute-based payloads (`onerror`, `onload`, `javascript:` hrefs) never surface after sanitization | `internal/textsanitize/html_test.go`: `TestStripHTML_AttributeBasedXSSPayloadsNeverSurface` (added by Issue #13 PR2) |
 | `handleMiAuthStart`'s waiting/error page never interpolates the attacker-controlled `permission`/`callback` query values, and is always served as `text/plain` (never `text/html`) | `internal/httpserver/miauth_handlers_test.go`: `TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody` (added by Issue #13 PR2) |
+| `handleAdminSetup`'s registration page is served byte-for-byte identical regardless of which valid token was presented (the token is never interpolated into the markup), and an invalid/expired token gets a generic `text/plain` error that never echoes the offending token value | `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminSetup_ValidTokenServesRegistrationPage`, `TestHandleAdminSetup_InvalidTokenServesGenericError` (added by Issue #136 Phase 1) |
 | JSON responses keep Go's default `<`/`>`/`&` HTML-escaping | Verified by inspection, not a dedicated test: no caller in this codebase ever calls `json.Encoder.SetEscapeHTML(false)` (`encoding/json`'s HTML-escaping is on by default and this repository never disables it) |
 
 ### Cookie attributes
@@ -149,3 +159,18 @@ attribute-check.
 | Only a token's hash is stored/compared, never the raw value, and hashing is one-way | `internal/miauth/token_test.go`: `TestHashAPIToken_IsDeterministicAndDistinctForDistinctInput`, `TestHashAPIToken_NeverEqualsRawToken` |
 | Scope checks are exact-match, not prefix/substring | `internal/miauth/scope_test.go`: `TestHasScope`, `TestEffectiveScopes_AriaPermissionList`, `TestEffectiveScopes_AlwaysGrantsReadNotes`, `TestEffectiveScopes_OnlyGrantsRequestedGrantableScopes`, `TestEffectiveScopes_IgnoresUnknownAndWhitespace` |
 | A revoked token is rejected on its next use, including at the HTTP middleware layer | `internal/httpserver/scope_middleware_test.go`: `TestRequireScope_RejectsRevokedToken`; `internal/miauth/service_test.go`: `TestCheckTokenListRevokeAndDescribeOwner` |
+
+Issue #136 Phase 1 (ADR-0010) adds a fifth, structurally distinct
+credential type — the `miauthctl web-login issue` bootstrap token — with
+its own copy of the same high-entropy/hash-only/single-use properties
+(ADR-0001's "keep distinct records for distinct credentials" rule, which
+is exactly why this isn't a row on the table above instead):
+
+| Property | Evidence |
+| --- | --- |
+| Raw bootstrap tokens are high-entropy and unique | `internal/webadmin/token_test.go`: `TestNewRawBootstrapToken_IsHighEntropyAndUnique` |
+| Only a bootstrap token's hash is stored/compared, never the raw value | `internal/webadmin/token_test.go`: `TestHashBootstrapToken_IsDeterministicAndDistinctForDistinctInput`; `internal/storage/sqlite/webadmin_repository_test.go`: `TestWebAdminBootstrapTokenRepository_CreateAndGetByTokenHash` |
+| An expired or already-consumed bootstrap token is rejected at every ceremony step (check, begin, finish), never just the first | `internal/webadmin/service_test.go`: `TestCheckBootstrapToken_ExpiredTokenIsInvalid`, `TestCheckBootstrapToken_ConsumedTokenIsInvalid`, `TestBeginRegistration_UnknownOrExpiredTokenReturnsErrBootstrapTokenInvalid`, `TestFinishRegistration_ExpiredBetweenBeginAndFinish` |
+| A replayed (already-consumed) `FinishRegistration` call is rejected and never creates a second credential | `internal/webadmin/service_test.go`: `TestFinishRegistration_HappyPath_ConsumesTokenAndCreatesCredential` (second-call assertion) |
+| A tampered/failed WebAuthn ceremony never partially commits — the token stays `issued` and no credential row is created | `internal/webadmin/service_test.go`: `TestFinishRegistration_TamperedResponseFailsCeremony`; `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminSetupFinish_TamperedResponseReturns401Or500NotSilentSuccess` |
+| The raw bootstrap token is printed to stdout exactly once and never logged | `cmd/miauthctl/webadmin_test.go`: `TestRunWebLogin_Issue_PrintsSetupURLWithToken` (by inspection of `webLoginIssue`: the only place the raw value is used) |
