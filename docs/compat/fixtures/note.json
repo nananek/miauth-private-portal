@@ -6,7 +6,8 @@
   "user": {
     "id": "user-example-0001",
     "username": "owner",
-    "host": null
+    "host": null,
+    "name": null
   },
   "userId": "user-example-0001",
   "visibility": "public",

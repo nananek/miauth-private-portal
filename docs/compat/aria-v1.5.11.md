@@ -1469,6 +1469,19 @@ enums. Counts default to zero, maps/lists (`reactions`, `reactionEmojis`,
 false. Nested `reply`, `renote`, `channel`, and `poll` are optional but must
 be fully valid when present.
 
+**`UserLite.name` (Issue #132), like `avatarUrl` before it, is populated
+beyond the parser's strict minimum.** `internal/httpserver.userLite` sends
+`name` for every note author, holding the same display-name value
+`UserDetailedNotMe.name` (`users/show`, `users/search`, `/api/i`) carries
+for that same actor — `nil` until the actor has one set. Before this, a
+note's `user` object had no `name` key at all, only `username`; for an
+Open WebUI model actor these are deliberately different strings
+(`username` is a Misskey-username-charset-normalized, hash-disambiguated
+slug, while `name` is the model's real human-readable display name — see
+`internal/domain.VirtualActor`'s own doc comment), so a client comparing
+a timeline author's name against the same actor's `users/show` result
+previously had nothing on the timeline side to compare.
+
 **`host: null` means local user, with exactly one exception (Issue #52).**
 Every actor this service can author an entry with projects `host: null`
 (the owner, and the reserved `assistant`/`system` presentation actors) —
@@ -1478,9 +1491,10 @@ deployment-configured presentation host
 `docs/operations/configuration.md`'s "Open WebUI bridge" section for the
 seeding and eligibility rules behind it). This is a fixed presentation
 value, not federation: the host is never discovered, resolved, or
-delivered to. No other route in this service's API surface (there is no
-`users/show`, so a client cannot look the host up) treats it as
-anything but a label on that one note's author.
+delivered to. `users/show` (Issue #114) lets a client look this actor up
+by the `userId` a note carries and get the same host (and, since Issue
+#132, the same `name`) back — no other route in this service's API
+surface treats `host` as anything but a label on that one note's author.
 
 The redacted fixtures are [`fixtures/note.json`](fixtures/note.json) (an
 ordinary local author, `host: null`) and

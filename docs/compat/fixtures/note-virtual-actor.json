@@ -6,7 +6,8 @@
   "user": {
     "id": "actor-example-openwebui-model",
     "username": "model",
-    "host": "openwebui.example.net"
+    "host": "openwebui.example.net",
+    "name": "Example Model"
   },
   "userId": "actor-example-openwebui-model",
   "replyId": "note-example-0001",
