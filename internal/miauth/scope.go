@@ -22,7 +22,9 @@ const (
 	// requests both today (docs/compat/aria-v1.5.11.md), so — like
 	// read:notifications before it — a local API token issued before
 	// this PR shipped will not carry them until the owner re-approves
-	// through miauthctl.
+	// through miauthctl, or an operator runs `miauthctl tokens
+	// reflect-scopes` (Issue #133) to add them to the existing token in
+	// place.
 	ScopeReadDrive  = "read:drive"
 	ScopeWriteDrive = "write:drive"
 )
@@ -53,9 +55,10 @@ var grantableScopes = []string{ScopeReadAccount, ScopeWriteNotes, ScopeWriteAcco
 // carve-out. A token issued before Issue #23 PR4/PR6 shipped never
 // carries read:reactions/write:reactions/read:notifications even if
 // Aria's original request included them — re-approving through
-// miauthctl is the only way to add them retroactively (see
-// plan-issue-23 §3's still-open "既存 API token への新規 scope 反映"
-// question).
+// miauthctl adds them retroactively, or (Issue #133) an operator can run
+// `miauthctl tokens reflect-scopes --token-id <id>` (or `--all`) to add
+// them to an already-issued token in place, without a fresh Aria login;
+// see Service.ReflectScopes.
 func effectiveScopes(requestedPermission string) []string {
 	requested := make(map[string]bool)
 	for _, p := range strings.Split(requestedPermission, ",") {
@@ -77,6 +80,44 @@ func effectiveScopes(requestedPermission string) []string {
 // APIToken.Scopes.
 func scopesString(scopes []string) string {
 	return strings.Join(scopes, " ")
+}
+
+// clampToGrowth returns storedScopes with every scope from recomputed that
+// storedScopes does not already have appended (grantableScopes' declared
+// order, mirroring effectiveScopes' own ordering), and never drops a
+// scope storedScopes already has — even if recomputed (today's
+// grantableScopes intersected with the session's original request) would
+// no longer include it.
+//
+// This is Service.ReflectScopes' (Issue #133) core, deliberate design
+// decision: additive-only, never a full recompute-and-replace. Every
+// change to grantableScopes in this codebase's history so far has been a
+// pure addition, never a removal, so in practice recomputed is always a
+// superset of what an older token would have. But the code must not
+// assume that invariant holds forever: if a future change ever did
+// remove or rename a grantableScopes entry, a naive "replace with
+// effectiveScopes(...) verbatim" reflect would silently revoke a scope
+// from an already-issued, already-in-use token as a side effect of a
+// routine, expected-to-be-safe "catch this token up" maintenance
+// command — surprising, security-relevant behavior hidden inside an
+// operation whose name and purpose both promise only growth. A
+// legitimate scope revocation is a categorically different, higher-stakes
+// operation than "pick up new capabilities" and deserves its own
+// explicit, loudly-named tool with its own confirmation/audit trail, not
+// a side effect of reflect-scopes.
+func clampToGrowth(storedScopes, recomputed string) string {
+	have := map[string]bool{}
+	for _, s := range strings.Fields(storedScopes) {
+		have[s] = true
+	}
+	out := strings.Fields(storedScopes)
+	for _, s := range strings.Fields(recomputed) {
+		if !have[s] {
+			out = append(out, s)
+			have[s] = true
+		}
+	}
+	return scopesString(out)
 }
 
 // hasScope reports whether the space-separated scopes string s grants

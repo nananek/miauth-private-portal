@@ -8,11 +8,15 @@ import "context"
 // writes into one atomic commit without ever seeing a storage driver
 // type.
 type Repos struct {
-	Actors          ActorRepository
-	Threads         ThreadRepository
-	Entries         EntryRepository
-	LocalMiAuth     LocalMiAuthSessionRepository
-	APITokens       APITokenRepository
+	Actors      ActorRepository
+	Threads     ThreadRepository
+	Entries     EntryRepository
+	LocalMiAuth LocalMiAuthSessionRepository
+	APITokens   APITokenRepository
+	// TokenScopeAudit backs Issue #133's api_token_scope_audit table:
+	// miauth.Service.ReflectScopes' change history, written in the same
+	// transaction as each APITokens.UpdateScopes call.
+	TokenScopeAudit APITokenScopeAuditRepository
 	UserTags        UserTagRepository
 	Classifications LLMClassificationRepository
 	Generations     LLMGenerationRepository

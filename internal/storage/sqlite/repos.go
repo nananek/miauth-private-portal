@@ -25,6 +25,7 @@ func newRepos(q querier) domain.Repos {
 		Entries:         &entryRepository{q: q},
 		LocalMiAuth:     &localMiAuthSessionRepository{q: q},
 		APITokens:       &apiTokenRepository{q: q},
+		TokenScopeAudit: &apiTokenScopeAuditRepository{q: q},
 		UserTags:        &userTagRepository{q: q},
 		Classifications: &llmClassificationRepository{q: q},
 		Generations:     &llmGenerationRepository{q: q},

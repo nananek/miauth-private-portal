@@ -1,11 +1,14 @@
 package miauth
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
@@ -30,14 +33,16 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 type testService struct {
 	*Service
-	db    *sqlite.DB
-	clock *fakeClock
+	db     *sqlite.DB
+	clock  *fakeClock
+	dbPath string
 }
 
 func newTestService(t *testing.T) *testService {
 	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
-		Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
+		Path: dbPath, BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +56,7 @@ func newTestService(t *testing.T) *testService {
 		ClientCallbacks: []string{"aria://aria/miauth"}, OwnerUsername: "owner",
 		OwnerDisplayName: "Test Owner", Clock: clock,
 	})
-	return &testService{Service: service, db: db, clock: clock}
+	return &testService{Service: service, db: db, clock: clock, dbPath: dbPath}
 }
 
 func TestStartLocalSession_CreateResumeAndValidation(t *testing.T) {
@@ -517,5 +522,302 @@ func TestBackfillOwnerDisplayName_LeavesOpenWebUIModelActorAlone(t *testing.T) {
 	}
 	if after.DisplayName != nil {
 		t.Fatalf("VirtualActor DisplayName = %v, want unchanged nil", after.DisplayName)
+	}
+}
+
+// --- ReflectScopes (Issue #133) ---------------------------------------
+
+// createOwnerActor creates the Owner actor directly, bypassing the
+// StartLocalSession/ApproveSession flow, for tests that only need a
+// valid owner id to attribute API tokens/audit entries to.
+func createOwnerActor(t *testing.T, ts *testService) domain.Actor {
+	t.Helper()
+	owner := domain.Actor{ID: domain.NewID(), Type: domain.ActorOwner, CreatedAt: ts.clock.Now()}
+	if err := ts.db.Actors.Create(t.Context(), owner); err != nil {
+		t.Fatal(err)
+	}
+	return owner
+}
+
+// createSessionAndToken creates a local MiAuth session with
+// requestedPermissions plus an API token referencing it, storing scopes
+// verbatim (bypassing Check's own effectiveScopes computation) so tests
+// can simulate a token issued before grantableScopes grew to include
+// everything session requests today.
+func createSessionAndToken(t *testing.T, ts *testService, ownerID, routeSessionID, requestedPermissions, scopes string) domain.APIToken {
+	t.Helper()
+	now := ts.clock.Now()
+	session := domain.LocalMiAuthSession{
+		RouteSessionID: routeSessionID, Status: domain.MiAuthConsumed, RequestedPermissions: requestedPermissions,
+		LocalActorID: &ownerID, CreatedAt: now, ExpiresAt: now.Add(localSessionTTL),
+	}
+	if err := ts.db.LocalMiAuth.Create(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	token := domain.APIToken{
+		ID: domain.NewID(), TokenHash: "hash-" + routeSessionID, LocalActorID: ownerID,
+		MiAuthLocalSessionID: &routeSessionID, Scopes: scopes, CreatedAt: now,
+	}
+	if err := ts.db.APITokens.Create(t.Context(), token); err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func TestReflectScopes_PicksUpNewlyGrantableScope(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	// Simulates a token issued before write:account/read:drive were added
+	// to grantableScopes: the session's original request already includes
+	// them, but the token's stored scopes only carry what was grantable
+	// at issuance time.
+	token := createSessionAndToken(t, ts, owner.ID, "route-1",
+		"read:account,write:notes,write:account,read:drive,write:drive", "read:notes read:account write:notes")
+
+	result, err := ts.ReflectScopes(t.Context(), token.ID, owner.ID)
+	if err != nil {
+		t.Fatalf("ReflectScopes: %v", err)
+	}
+	if !result.Changed {
+		t.Fatalf("result.Changed = false, want true")
+	}
+	for _, want := range []string{ScopeReadNotes, ScopeReadAccount, ScopeWriteNotes, ScopeWriteAccount, ScopeReadDrive, ScopeWriteDrive} {
+		if !hasScope(result.NewScopes, want) {
+			t.Errorf("NewScopes = %q, missing %s", result.NewScopes, want)
+		}
+	}
+
+	stored, err := ts.db.APITokens.Get(t.Context(), token.ID)
+	if err != nil || stored.Scopes != result.NewScopes {
+		t.Fatalf("stored scopes = %q, err = %v, want %q", stored.Scopes, err, result.NewScopes)
+	}
+}
+
+func TestReflectScopes_NoOpWhenAlreadyCurrent(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	if err := ts.StartLocalSession(t.Context(), "route-1", "read:account", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.ApproveSession(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Check(t.Context(), "route-1"); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := ts.ListAPITokens(t.Context())
+	if err != nil || len(tokens) != 1 {
+		t.Fatalf("tokens = %+v, err = %v", tokens, err)
+	}
+
+	result, err := ts.ReflectScopes(t.Context(), tokens[0].ID, owner.ID)
+	if err != nil {
+		t.Fatalf("ReflectScopes: %v", err)
+	}
+	if result.Changed || result.NewScopes != result.OldScopes {
+		t.Fatalf("result = %+v, want no-op", result)
+	}
+	history, err := ts.db.TokenScopeAudit.ListByToken(t.Context(), tokens[0].ID)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("audit history = %+v, err = %v, want none for a no-op reflect", history, err)
+	}
+}
+
+func TestReflectScopes_RevokedTokenErrors(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	token := createSessionAndToken(t, ts, owner.ID, "route-1", "read:account,write:account", "read:notes read:account")
+	if err := ts.RevokeAPIToken(t.Context(), token.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ts.ReflectScopes(t.Context(), token.ID, owner.ID); !errors.Is(err, ErrTokenRevoked) {
+		t.Fatalf("ReflectScopes on revoked token error = %v, want ErrTokenRevoked", err)
+	}
+	stored, err := ts.db.APITokens.Get(t.Context(), token.ID)
+	if err != nil || stored.Scopes != token.Scopes {
+		t.Fatalf("revoked token scopes changed: stored = %q, err = %v, want unchanged %q", stored.Scopes, err, token.Scopes)
+	}
+	history, err := ts.db.TokenScopeAudit.ListByToken(t.Context(), token.ID)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("audit history after revoked-token error = %+v, err = %v, want none", history, err)
+	}
+}
+
+func TestReflectScopes_MissingSessionErrors(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+
+	noSession := domain.APIToken{
+		ID: domain.NewID(), TokenHash: "hash-no-session", LocalActorID: owner.ID,
+		MiAuthLocalSessionID: nil, Scopes: "read:notes read:account", CreatedAt: ts.clock.Now(),
+	}
+	if err := ts.db.APITokens.Create(t.Context(), noSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.ReflectScopes(t.Context(), noSession.ID, owner.ID); !errors.Is(err, ErrOriginatingSessionGone) {
+		t.Fatalf("ReflectScopes with nil session id error = %v, want ErrOriginatingSessionGone", err)
+	}
+
+	// This app always opens its connections with foreign_keys=1 (see
+	// sqlite.Open), so a dangling miauth_local_session_id can only ever
+	// arise from something bypassing the app entirely — an operator
+	// manually deleting a miauth_local_sessions row outside it. A second
+	// raw connection to the same file, opened with foreign keys off,
+	// simulates exactly that out-of-band deletion without going through
+	// (or being blocked by) this package's own DB handle.
+	dangling := createSessionAndToken(t, ts, owner.ID, "route-to-delete", "read:account", "read:notes read:account")
+	rawDB, err := sql.Open("sqlite", "file:"+ts.dbPath+"?_foreign_keys=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.ExecContext(t.Context(),
+		`DELETE FROM miauth_local_sessions WHERE route_session_id = ?`, "route-to-delete"); err != nil {
+		t.Fatalf("simulate out-of-band session deletion: %v", err)
+	}
+
+	if _, err := ts.ReflectScopes(t.Context(), dangling.ID, owner.ID); !errors.Is(err, ErrOriginatingSessionGone) {
+		t.Fatalf("ReflectScopes with dangling session id error = %v, want ErrOriginatingSessionGone", err)
+	}
+}
+
+func TestReflectScopes_UnknownTokenID(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	if _, err := ts.ReflectScopes(t.Context(), "does-not-exist", owner.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ReflectScopes on unknown token error = %v, want domain.ErrNotFound", err)
+	}
+}
+
+func TestReflectScopesAll_MixedOutcomes(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+
+	needsUpdate := createSessionAndToken(t, ts, owner.ID, "route-needs-update",
+		"read:account,write:account", "read:notes read:account")
+	current := createSessionAndToken(t, ts, owner.ID, "route-current",
+		"read:account", "read:notes read:account")
+	revoked := createSessionAndToken(t, ts, owner.ID, "route-revoked",
+		"read:account,write:account", "read:notes read:account")
+	if err := ts.RevokeAPIToken(t.Context(), revoked.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := ts.ReflectScopesAll(t.Context(), owner.ID)
+	if err != nil {
+		t.Fatalf("ReflectScopesAll: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("ReflectScopesAll returned %d item(s), want 2 (revoked token must be skipped): %+v", len(items), items)
+	}
+	byID := map[string]ReflectScopesAllItem{}
+	for _, item := range items {
+		byID[item.TokenID] = item
+	}
+	if item, ok := byID[needsUpdate.ID]; !ok || item.Err != nil || !item.Result.Changed {
+		t.Errorf("needsUpdate item = %+v, ok = %v, want Changed with no error", item, ok)
+	}
+	if item, ok := byID[current.ID]; !ok || item.Err != nil || item.Result.Changed {
+		t.Errorf("current item = %+v, ok = %v, want no-op with no error", item, ok)
+	}
+	if _, ok := byID[revoked.ID]; ok {
+		t.Errorf("revoked token %s produced a ReflectScopesAllItem, want it skipped entirely", revoked.ID)
+	}
+	storedRevoked, err := ts.db.APITokens.Get(t.Context(), revoked.ID)
+	if err != nil || storedRevoked.Scopes != revoked.Scopes {
+		t.Fatalf("revoked token scopes changed by ReflectScopesAll: stored = %q, err = %v", storedRevoked.Scopes, err)
+	}
+}
+
+// TestReflectScopesAll_PartialFailureDoesNotBlockOthers proves each
+// token is reflected in its own transaction (§5b): a token whose
+// originating session is missing must not prevent a different, healthy
+// token's update from committing.
+func TestReflectScopesAll_PartialFailureDoesNotBlockOthers(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+
+	healthy := createSessionAndToken(t, ts, owner.ID, "route-healthy",
+		"read:account,write:account", "read:notes read:account")
+	broken := domain.APIToken{
+		ID: domain.NewID(), TokenHash: "hash-broken", LocalActorID: owner.ID,
+		MiAuthLocalSessionID: nil, Scopes: "read:notes read:account", CreatedAt: ts.clock.Now(),
+	}
+	if err := ts.db.APITokens.Create(t.Context(), broken); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := ts.ReflectScopesAll(t.Context(), owner.ID)
+	if err != nil {
+		t.Fatalf("ReflectScopesAll: %v", err)
+	}
+	var healthyOK, brokenFailed bool
+	for _, item := range items {
+		switch item.TokenID {
+		case healthy.ID:
+			healthyOK = item.Err == nil && item.Result.Changed
+		case broken.ID:
+			brokenFailed = errors.Is(item.Err, ErrOriginatingSessionGone)
+		}
+	}
+	if !healthyOK {
+		t.Errorf("healthy token was not updated despite broken token's error: items = %+v", items)
+	}
+	if !brokenFailed {
+		t.Errorf("broken token did not fail with ErrOriginatingSessionGone: items = %+v", items)
+	}
+	stored, err := ts.db.APITokens.Get(t.Context(), healthy.ID)
+	if err != nil || !hasScope(stored.Scopes, ScopeWriteAccount) {
+		t.Fatalf("healthy token's update was not committed: stored = %+v, err = %v", stored, err)
+	}
+}
+
+func TestReflectScopes_AuditRecordsExactBeforeAfter(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	token := createSessionAndToken(t, ts, owner.ID, "route-1",
+		"read:account,write:account", "read:notes read:account")
+
+	result, err := ts.ReflectScopes(t.Context(), token.ID, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := ts.db.TokenScopeAudit.ListByToken(t.Context(), token.ID)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("audit history = %+v, err = %v, want exactly one entry", history, err)
+	}
+	entry := history[0]
+	if entry.TokenID != token.ID || entry.OldScopes != result.OldScopes || entry.NewScopes != result.NewScopes {
+		t.Errorf("audit entry = %+v, want TokenID/OldScopes/NewScopes matching result %+v", entry, result)
+	}
+	if !entry.ChangedAt.Equal(ts.clock.Now()) {
+		t.Errorf("audit entry.ChangedAt = %v, want %v", entry.ChangedAt, ts.clock.Now())
+	}
+	if entry.ChangedBy != owner.ID {
+		t.Errorf("audit entry.ChangedBy = %q, want %q", entry.ChangedBy, owner.ID)
+	}
+}
+
+func TestPreviewReflectScopes_DoesNotWrite(t *testing.T) {
+	ts := newTestService(t)
+	owner := createOwnerActor(t, ts)
+	token := createSessionAndToken(t, ts, owner.ID, "route-1",
+		"read:account,write:account", "read:notes read:account")
+
+	preview, err := ts.PreviewReflectScopes(t.Context(), token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Changed || !hasScope(preview.NewScopes, ScopeWriteAccount) {
+		t.Fatalf("preview = %+v, want a would-be change adding write:account", preview)
+	}
+	stored, err := ts.db.APITokens.Get(t.Context(), token.ID)
+	if err != nil || stored.Scopes != token.Scopes {
+		t.Fatalf("PreviewReflectScopes wrote to the token: stored = %q, err = %v, want unchanged %q", stored.Scopes, err, token.Scopes)
+	}
+	history, err := ts.db.TokenScopeAudit.ListByToken(t.Context(), token.ID)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("PreviewReflectScopes wrote an audit entry: %+v, err = %v", history, err)
 	}
 }

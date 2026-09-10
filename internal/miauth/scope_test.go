@@ -77,6 +77,43 @@ func TestEffectiveScopes_GrantsDriveScopesWhenRequested(t *testing.T) {
 	}
 }
 
+func TestClampToGrowth_AddsMissingScopesOnly(t *testing.T) {
+	stored := scopesString([]string{ScopeReadNotes, ScopeReadAccount})
+	recomputed := scopesString([]string{ScopeReadNotes, ScopeReadAccount, ScopeWriteAccount, ScopeReadDrive})
+	got := clampToGrowth(stored, recomputed)
+	want := scopesString([]string{ScopeReadNotes, ScopeReadAccount, ScopeWriteAccount, ScopeReadDrive})
+	if got != want {
+		t.Errorf("clampToGrowth(%q, %q) = %q, want %q", stored, recomputed, got, want)
+	}
+}
+
+// TestClampToGrowth_NeverDropsAScopeRecomputedNoLongerGrants is the
+// single most important regression test for §5a's grow-only decision: it
+// simulates a hypothetical future grantableScopes removal by handing
+// clampToGrowth a recomputed set that omits a scope storedScopes already
+// has, and asserts that scope survives regardless.
+func TestClampToGrowth_NeverDropsAScopeRecomputedNoLongerGrants(t *testing.T) {
+	stored := scopesString([]string{ScopeReadNotes, ScopeReadAccount, ScopeWriteAccount})
+	recomputed := scopesString([]string{ScopeReadNotes, ScopeReadAccount}) // ScopeWriteAccount "removed"
+	got := clampToGrowth(stored, recomputed)
+	if !hasScope(got, ScopeWriteAccount) {
+		t.Errorf("clampToGrowth(%q, %q) = %q, dropped %s that stored already had", stored, recomputed, got, ScopeWriteAccount)
+	}
+	if got != stored {
+		t.Errorf("clampToGrowth(%q, %q) = %q, want unchanged %q (recomputed adds nothing new)", stored, recomputed, got, stored)
+	}
+}
+
+func TestClampToGrowth_Idempotent(t *testing.T) {
+	stored := scopesString([]string{ScopeReadNotes, ScopeReadAccount})
+	recomputed := scopesString([]string{ScopeReadNotes, ScopeReadAccount, ScopeWriteAccount})
+	first := clampToGrowth(stored, recomputed)
+	second := clampToGrowth(first, recomputed)
+	if second != first {
+		t.Errorf("clampToGrowth is not idempotent: first = %q, second = %q", first, second)
+	}
+}
+
 func TestHasScope(t *testing.T) {
 	s := scopesString([]string{ScopeReadNotes, ScopeReadAccount})
 	if !hasScope(s, ScopeReadAccount) {
