@@ -49,5 +49,8 @@ func newRepos(q querier) domain.Repos {
 		ConfigAudit: &configAuditRepository{q: q},
 
 		UserLists: &userListRepository{q: q},
+
+		WebAdminBootstrapTokens: &webAdminBootstrapTokenRepository{q: q},
+		WebAdminCredentials:     &webAdminCredentialRepository{q: q},
 	}
 }

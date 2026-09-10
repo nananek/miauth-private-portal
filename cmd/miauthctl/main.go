@@ -33,7 +33,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return usageError()
 	}
 	switch args[0] {
-	case "list", "approve", "reject", "tokens", "revoke", "config":
+	case "list", "approve", "reject", "tokens", "revoke", "config", "web-login":
 	default:
 		return usageError()
 	}
@@ -94,13 +94,25 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return nil
 	case "config":
 		return runConfig(ctx, db, cfg, args[1:], stdout, time.Now().UTC())
+	case "web-login":
+		// webadmin.Service is constructed lazily, only here: it requires
+		// LOCAL_ORIGIN's host to be a real domain (an inherent WebAuthn
+		// RPID constraint, not a bug — see NewService's own error), which
+		// an IP-based LOCAL_ORIGIN (some local/dev deployments) can never
+		// satisfy. Every other subcommand must keep working regardless,
+		// so this is not resolved eagerly alongside svc above.
+		webAdminSvc, err := newWebAdminService(db, cfg)
+		if err != nil {
+			return err
+		}
+		return runWebLogin(ctx, webAdminSvc, db, cfg.Auth.LocalOrigin, args[1:], stdout)
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: miauthctl <list|approve|reject|tokens|revoke|config> [arguments]")
+	return errors.New("usage: miauthctl <list|approve|reject|tokens|revoke|config|web-login> [arguments]")
 }
 
 func listSessions(ctx context.Context, svc *miauth.Service, out io.Writer, now time.Time) error {

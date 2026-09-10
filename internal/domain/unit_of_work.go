@@ -60,6 +60,15 @@ type Repos struct {
 	// through it is internal/httpserver's route registration decision,
 	// mirroring the Files/Folders precedent above.
 	UserLists UserListRepository
+
+	// WebAdminBootstrapTokens and WebAdminCredentials back Issue #136
+	// Phase 1's admin Web UI bootstrap (ADR-0010): a `miauthctl
+	// web-login issue`-minted single-use token and the WebAuthn
+	// credential(s) it lets the Owner register. Always present, like
+	// UserLists above; nothing writes through them until
+	// internal/webadmin.Service does.
+	WebAdminBootstrapTokens WebAdminBootstrapTokenRepository
+	WebAdminCredentials     WebAdminCredentialRepository
 }
 
 // UnitOfWork runs fn inside one atomic transaction, so writes made

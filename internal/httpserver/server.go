@@ -32,6 +32,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 	"github.com/nananek/miauth-private-portal/internal/userlist"
+	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
 
 // Server wraps an http.ServeMux, applying access-log middleware to every
@@ -88,6 +89,13 @@ type Server struct {
 	// MaxFileBytes (the same bound, kept in sync by cmd/server) that
 	// UploadFromURL and CreateFile's other callers rely on instead.
 	driveMaxFileBytes int64
+
+	// webadmin backs Issue #136 Phase 1's admin bootstrap/registration
+	// routes (GET /admin/setup, POST /admin/setup/begin,
+	// POST /admin/setup/finish). A nil value (the default) registers
+	// none of them — every httpserver test predating this field, and
+	// any deployment that hasn't wired it yet, is unaffected.
+	webadmin *webadmin.Service
 }
 
 // NewServer builds a Server with liveness ("GET /healthz") and readiness
@@ -137,6 +145,7 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		streamHub:                opts.StreamHub,
 		drive:                    opts.Drive,
 		driveMaxFileBytes:        opts.DriveMaxFileBytes,
+		webadmin:                 opts.WebAdmin,
 	}
 
 	s.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +253,19 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 	// auth check belongs here).
 	if opts.Drive != nil {
 		s.Handle("GET /files/{id}", http.HandlerFunc(s.handleFilesShow))
+	}
+
+	// Issue #136 Phase 1 (ADR-0010): the admin bootstrap/registration
+	// ceremony. Independent of opts.MiAuthService — these routes
+	// authenticate a browser via a bearer bootstrap token, not Aria via
+	// a local API token, and issue no session or cookie in this phase
+	// (that is Phase 2). No feature flag gates this off; cmd/server
+	// always constructs a webadmin.Service, the same way it always
+	// constructs miauth.Service.
+	if opts.WebAdmin != nil {
+		s.Handle("GET /admin/setup", http.HandlerFunc(s.handleAdminSetup))
+		s.Handle("POST /admin/setup/begin", http.HandlerFunc(s.handleAdminSetupBegin))
+		s.Handle("POST /admin/setup/finish", http.HandlerFunc(s.handleAdminSetupFinish))
 	}
 
 	return s

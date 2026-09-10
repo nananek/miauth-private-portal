@@ -36,6 +36,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/streamhub"
 	"github.com/nananek/miauth-private-portal/internal/timeline"
 	"github.com/nananek/miauth-private-portal/internal/userlist"
+	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
 
 func main() {
@@ -122,6 +123,30 @@ func run() error {
 	})
 	if err := miauthSvc.BackfillOwnerDisplayName(ctx); err != nil {
 		return fmt.Errorf("backfill owner display name: %w", err)
+	}
+	// webAdminSvc backs Issue #136 Phase 1's admin bootstrap/registration
+	// routes (ADR-0010). Built unconditionally, like miauthSvc above, with
+	// one exception: WebAuthn's RPID must be a real domain, not an IP
+	// address (an inherent protocol constraint, not a bug — see
+	// webadmin.NewService's own error). LOCAL_ORIGIN pointed at a bare IP
+	// (this codebase's own dev/E2E-test convention, and some local
+	// deployments) can never satisfy that, so this treats a construction
+	// failure as "the admin Web UI is unavailable on this deployment" —
+	// the same nil-means-disabled convention virtualActors/
+	// openWebUIBridge below use — rather than refusing to start the rest
+	// of the server over it.
+	var webAdminSvc *webadmin.Service
+	if webAdminRPID, err := url.Parse(cfg.Auth.LocalOrigin); err != nil {
+		// Unreachable in practice: internal/config.Validate already
+		// enforces LOCAL_ORIGIN is a well-formed origin at startup.
+		return fmt.Errorf("parse LOCAL_ORIGIN: %w", err)
+	} else if svc, err := webadmin.NewService(db, db.Repos, webadmin.Config{
+		RPID: webAdminRPID.Hostname(), RPDisplayName: "miauth-private-portal", RPOrigins: []string{cfg.Auth.LocalOrigin},
+		OwnerUsername: cfg.Auth.OwnerUsername, OwnerDisplayName: cfg.Auth.OwnerDisplayName,
+	}); err != nil {
+		logger.Warn("admin web UI bootstrap unavailable: webadmin service init failed", "error", err.Error())
+	} else {
+		webAdminSvc = svc
 	}
 	// streamHub is built before timelineSvc/httpserver.Options and given
 	// to both (timeline.Config.Broadcaster below, httpserver.Options.
@@ -356,6 +381,7 @@ func run() error {
 		OpenWebUIViewerBaseURL:   cfg.OpenWebUI.ViewerBaseURL,
 		Drive:                    driveSvc,
 		DriveMaxFileBytes:        cfg.Drive.MaxFileBytes,
+		WebAdmin:                 webAdminSvc,
 	}
 
 	// Registered only when the feature is on: no Provider (and therefore
