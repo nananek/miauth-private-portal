@@ -142,6 +142,7 @@ attacker-controlled query value.
 | Attribute-based payloads (`onerror`, `onload`, `javascript:` hrefs) never surface after sanitization | `internal/textsanitize/html_test.go`: `TestStripHTML_AttributeBasedXSSPayloadsNeverSurface` (added by Issue #13 PR2) |
 | `handleMiAuthStart`'s waiting/error page never interpolates the attacker-controlled `permission`/`callback` query values, and is always served as `text/plain` (never `text/html`) | `internal/httpserver/miauth_handlers_test.go`: `TestHandleMiAuthStart_NeverReflectsQueryValuesInResponseBody` (added by Issue #13 PR2) |
 | `handleAdminSetup`'s registration page is served byte-for-byte identical regardless of which valid token was presented (the token is never interpolated into the markup), and an invalid/expired token gets a generic `text/plain` error that never echoes the offending token value | `internal/httpserver/webadmin_handlers_test.go`: `TestHandleAdminSetup_ValidTokenServesRegistrationPage`, `TestHandleAdminSetup_InvalidTokenServesGenericError` (added by Issue #136 Phase 1) |
+| `handleAdminIndex`'s dashboard (Issue #136 Phase 3) renders Aria-supplied, untrusted `LocalMiAuthSession.RequestedPermissions`/`.ClientCallback` through `html/template`'s ordinary auto-escaping (never a `template.HTML`-style escape hatch) — a raw `<script>` payload in either field surfaces only in its HTML-escaped form | `internal/httpserver/webadmin_admin_handlers_test.go`: `TestHandleAdminIndex_EscapesUntrustedRequestedPermissionsAndCallback` |
 | JSON responses keep Go's default `<`/`>`/`&` HTML-escaping | Verified by inspection, not a dedicated test: no caller in this codebase ever calls `json.Encoder.SetEscapeHTML(false)` (`encoding/json`'s HTML-escaping is on by default and this repository never disables it) |
 
 ### Cookie attributes
@@ -173,6 +174,7 @@ to apply to.
 | --- | --- |
 | A mutating request (`POST /admin/logout`) missing or presenting the wrong `X-Admin-CSRF-Token` is rejected with 403, even with an otherwise-valid session cookie | `internal/httpserver/session_middleware_test.go`: `TestRequireAdminCSRF_MissingOrWrongTokenReturns403EvenWithValidSessionCookie` |
 | The correct CSRF token (compared via `crypto/subtle.ConstantTimeCompare`) allows the request through | `internal/httpserver/session_middleware_test.go`: `TestRequireAdminCSRF_CorrectTokenAllowsRequest` |
+| Every Issue #136 Phase 3 mutating route (`/admin/sessions/approve`, `/admin/sessions/reject`, `/admin/tokens/revoke`, `/admin/tokens/reflect-scopes`) is individually guarded by both `RequireAdminSession` and `RequireAdminCSRF` — not just some of the four hand-written registrations | `internal/httpserver/webadmin_admin_handlers_test.go`: `TestHandleAdminMutatingRoutes_RequireSession`, `TestHandleAdminMutatingRoutes_RequireCSRF` (both table-driven over all four routes) |
 
 ### Token attributes
 

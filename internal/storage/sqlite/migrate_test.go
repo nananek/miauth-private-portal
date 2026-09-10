@@ -16,7 +16,7 @@ var expectedTables = []string{
 	"external_sources", "external_items", "reactions", "mentions", "notifications",
 	"openwebui_workspaces", "openwebui_models", "openwebui_conversation_links", "openwebui_turn_links",
 	"files", "folders", "api_token_scope_audit",
-	"web_admin_bootstrap_tokens", "web_admin_credentials", "web_admin_sessions",
+	"web_admin_bootstrap_tokens", "web_admin_credentials", "web_admin_sessions", "web_admin_action_audit",
 }
 
 func TestMigrate_FreshDatabase(t *testing.T) {

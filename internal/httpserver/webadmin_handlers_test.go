@@ -25,6 +25,7 @@ import (
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/health"
 	"github.com/nananek/miauth-private-portal/internal/logging"
+	"github.com/nananek/miauth-private-portal/internal/miauth"
 	"github.com/nananek/miauth-private-portal/internal/storage/sqlite"
 	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
@@ -43,12 +44,14 @@ type webAdminTestServer struct {
 	db      *sqlite.DB
 	svc     *webadmin.Service
 	ownerID string
+	dbPath  string
 }
 
 func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
 	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
-		Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
+		Path: dbPath, BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,13 +76,23 @@ func newWebAdminTestServer(t *testing.T) *webAdminTestServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Issue #136 Phase 3's dashboard reads through s.miauth
+	// (ListPendingSessions/ListAPITokens/ApproveSession/...), the same
+	// already-wired *miauth.Service field RequireScope's own tests
+	// construct via miauth.NewService — see miauth_testhelpers_test.go's
+	// newMiAuthTestServer. Without this, GET /admin/ (now a real
+	// dashboard, not Phase 2's placeholder) would panic on a nil
+	// s.miauth.
+	miauthSvc := miauth.NewService(db, db.Repos, miauth.Config{
+		ClientCallbacks: []string{"aria://aria/miauth"}, OwnerUsername: "owner", OwnerDisplayName: "Test Owner",
+	})
 	// LocalOrigin matches webAdminTestOrigin (already https://), so
 	// Server.adminCookieSecure() reports true here by default — this is
 	// the "https:// LOCAL_ORIGIN" variant plan-136-phase2 §9.5 calls for
 	// in the Set-Cookie attribute test, not a separate constructor.
 	server := NewServer(logging.New(&bytes.Buffer{}, logging.Config{Format: "json", Level: "info"}), health.NewRegistry(),
-		Options{WebAdmin: svc, LocalOrigin: webAdminTestOrigin})
-	return &webAdminTestServer{Server: server, db: db, svc: svc, ownerID: owner.ID}
+		Options{WebAdmin: svc, MiAuthService: miauthSvc, LocalOrigin: webAdminTestOrigin})
+	return &webAdminTestServer{Server: server, db: db, svc: svc, ownerID: owner.ID, dbPath: dbPath}
 }
 
 func (ts *webAdminTestServer) issueToken(t *testing.T) string {

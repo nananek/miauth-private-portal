@@ -278,6 +278,15 @@ func NewServer(logger *slog.Logger, reg *health.Registry, opts Options) *Server 
 		adminAuth := RequireAdminSession(logger, opts.WebAdmin)
 		s.Handle("GET /admin/", adminAuth(http.HandlerFunc(s.handleAdminIndex)))
 		s.Handle("POST /admin/logout", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminLogout))))
+
+		// Issue #136 Phase 3 (ADR-0010 Decision 8): the dashboard's
+		// mutating actions, each a thin wrapper around an existing
+		// internal/miauth.Service method plus a best-effort
+		// web_admin_action_audit write.
+		s.Handle("POST /admin/sessions/approve", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminSessionsApprove))))
+		s.Handle("POST /admin/sessions/reject", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminSessionsReject))))
+		s.Handle("POST /admin/tokens/revoke", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminTokensRevoke))))
+		s.Handle("POST /admin/tokens/reflect-scopes", adminAuth(RequireAdminCSRF(http.HandlerFunc(s.handleAdminTokensReflectScopes))))
 	}
 
 	return s
