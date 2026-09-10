@@ -5,10 +5,12 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"strings"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
 	"github.com/nananek/miauth-private-portal/internal/logging"
 	"github.com/nananek/miauth-private-portal/internal/miauth"
+	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
 
 // handleAdminIndex serves GET /admin/ (behind RequireAdminSession only —
@@ -33,6 +35,13 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		writeWebAdminError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	rssSnapshot, err := s.webadmin.ListRSSFeeds(r.Context())
+	if err != nil {
+		s.logger.Error("list RSS feeds for admin dashboard failed",
+			"request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeWebAdminError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	session := AdminSessionFromContext(r.Context())
 	csrfToken := ""
 	if session.CSRFToken != nil {
@@ -46,6 +55,8 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = adminDashboardTemplate.Execute(w, adminDashboardData{
 		CSRFToken: csrfToken, Sessions: sessions, Tokens: tokens,
+		RSSFeeds: rssSnapshot.Feeds, RSSFeedsFromOverride: rssSnapshot.FromOverride,
+		RSSEnabled: s.webadmin.RSSEnabled(), RSSFilterScriptPathConfigured: s.webadmin.RSSFilterScriptPathConfigured(),
 	})
 }
 
@@ -53,6 +64,11 @@ type adminDashboardData struct {
 	CSRFToken string
 	Sessions  []domain.LocalMiAuthSession
 	Tokens    []domain.APIToken
+	// Issue #136 Phase 4:
+	RSSFeeds                      []webadmin.RSSFeed
+	RSSFeedsFromOverride          bool
+	RSSEnabled                    bool
+	RSSFilterScriptPathConfigured bool
 }
 
 // handleAdminSessionsApprove serves POST /admin/sessions/approve (behind
@@ -129,6 +145,56 @@ func (s *Server) handleAdminTokensReflectScopes(w http.ResponseWriter, r *http.R
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "changed": result.Changed})
 }
 
+// handleAdminRSSAdd serves POST /admin/rss/add. Body:
+// {"url": "https://...", "username": "optional, empty means none"}.
+// Decoded inline rather than via decodeAdminActionTarget: that helper
+// is hardcoded for exactly one string field, and this route needs two
+// (url, optional username).
+func (s *Server) handleAdminRSSAdd(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL      string `json:"url"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeWebAdminError(w, http.StatusBadRequest, "malformed request body")
+		return
+	}
+	body.URL = strings.TrimSpace(body.URL)
+	body.Username = strings.TrimSpace(body.Username)
+	if body.URL == "" {
+		writeWebAdminError(w, http.StatusBadRequest, "missing url")
+		return
+	}
+	var username *string
+	if body.Username != "" {
+		username = &body.Username
+	}
+	session := AdminSessionFromContext(r.Context())
+	if err := s.webadmin.AddRSSFeed(r.Context(), session.OwnerActorID, body.URL, username); err != nil {
+		s.writeAdminActionRSSError(w, r, "add RSS feed", err)
+		return
+	}
+	s.recordAdminAction(r, domain.WebAdminActionAddRSSFeed, body.URL, nil, username)
+	writeWebAdminOK(w)
+}
+
+// handleAdminRSSRemove serves POST /admin/rss/remove. Body:
+// {"url": "https://..."}.
+func (s *Server) handleAdminRSSRemove(w http.ResponseWriter, r *http.Request) {
+	url, ok := decodeAdminActionTarget(w, r, "url")
+	if !ok {
+		return
+	}
+	session := AdminSessionFromContext(r.Context())
+	removedUsername, err := s.webadmin.RemoveRSSFeed(r.Context(), session.OwnerActorID, url)
+	if err != nil {
+		s.writeAdminActionRSSError(w, r, "remove RSS feed", err)
+		return
+	}
+	s.recordAdminAction(r, domain.WebAdminActionRemoveRSSFeed, url, removedUsername, nil)
+	writeWebAdminOK(w)
+}
+
 // recordAdminAction is every mutating handler's shared best-effort audit
 // call (see internal/webadmin.Service.RecordAction's own doc comment for
 // why this never fails the HTTP response): logged at Warn, not Error,
@@ -175,6 +241,37 @@ func (s *Server) writeAdminActionMiAuthError(w http.ResponseWriter, r *http.Requ
 		writeWebAdminError(w, http.StatusConflict, "token has no recoverable originating session; re-issue a new token via a fresh Aria login")
 	case errors.Is(err, domain.ErrNotFound):
 		writeWebAdminError(w, http.StatusNotFound, "not found")
+	default:
+		s.logger.Error(logMsg+" failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
+		writeWebAdminError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// writeAdminActionRSSError maps internal/webadmin's RSS sentinel errors
+// to specific, named responses — same "specific once authenticated"
+// reasoning as writeAdminActionMiAuthError (plan-136-phase3 §1 Decision
+// 2), extended with one more case (domain.ErrConflict) this phase
+// introduces for the first time in the Web UI (MiAuth's own actions
+// have no equivalent optimistic-concurrency path today).
+func (s *Server) writeAdminActionRSSError(w http.ResponseWriter, r *http.Request, logMsg string, err error) {
+	switch {
+	case errors.Is(err, webadmin.ErrRSSFeedAlreadyExists):
+		writeWebAdminError(w, http.StatusConflict, "that RSS feed URL is already configured")
+	case errors.Is(err, webadmin.ErrRSSFeedNotFound):
+		writeWebAdminError(w, http.StatusNotFound, "that RSS feed URL is not currently configured")
+	case errors.Is(err, webadmin.ErrRSSFeedCannotRemoveLastBootstrapFeed):
+		writeWebAdminError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, webadmin.ErrRSSFeedInvalid):
+		writeWebAdminError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrNotFound):
+		// domain.ErrNotFound here (as opposed to webadmin.ErrRSSFeedNotFound
+		// above) can only reach this branch through the narrow TOCTOU window
+		// in RemoveRSSFeed/unsetRSSFeedURLs where the app_config row was
+		// concurrently unset between currentRSSFeedURLs' read and this
+		// request's own write — same "someone else changed it, reload" story
+		// as ErrConflict, so it gets the same message rather than a 404 that
+		// would misleadingly suggest the URL itself was never configured.
+		writeWebAdminError(w, http.StatusConflict, "RSS_FEED_URLS was changed concurrently; reload the page and try again")
 	default:
 		s.logger.Error(logMsg+" failed", "request_id", logging.RequestIDFromContext(r.Context()), "error", err.Error())
 		writeWebAdminError(w, http.StatusInternalServerError, "internal error")
@@ -230,6 +327,23 @@ var adminDashboardTemplate = template.Must(template.New("adminDashboard").Parse(
 </div>
 {{end}}
 
+<h2>RSS feeds</h2>
+{{if not .RSSEnabled}}<p><em>RSS ingestion is currently disabled (RSS_ENABLED=false); changes here take effect once it is enabled and the service is restarted.</em></p>{{end}}
+<p>Source: {{if .RSSFeedsFromOverride}}database override{{else}}bootstrap (config file/environment){{end}}.
+{{if .RSSFilterScriptPathConfigured}}A filter script is configured (RSS_FILTER_SCRIPT_PATH); editing it stays CLI/file-only.{{else}}No filter script is configured.{{end}}</p>
+{{if not .RSSFeeds}}<p>No feeds configured.</p>{{end}}
+{{range .RSSFeeds}}
+<div class="rss-feed-row" data-url="{{.URL}}">
+  <p>{{.URL}}{{if .Username}} (posts as {{.Username}}){{end}}</p>
+  <button class="remove-feed">Remove</button>
+</div>
+{{end}}
+<form id="rss-add-form">
+  <input type="url" id="rss-add-url" placeholder="https://example.com/feed.xml" required>
+  <input type="text" id="rss-add-username" placeholder="username (optional)">
+  <button type="submit">Add feed</button>
+</form>
+
 <p id="status"></p>
 <script>
 (function () {
@@ -272,6 +386,18 @@ var adminDashboardTemplate = template.Must(template.New("adminDashboard").Parse(
     row.querySelector(".reflect-scopes").addEventListener("click", function () {
       postAction("/admin/tokens/reflect-scopes", { tokenId: id }, null);
     });
+  });
+  document.querySelectorAll(".rss-feed-row").forEach(function (row) {
+    var url = row.dataset.url;
+    row.querySelector(".remove-feed").addEventListener("click", function () {
+      postAction("/admin/rss/remove", { url: url }, "Remove feed " + url + "?");
+    });
+  });
+  document.getElementById("rss-add-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var url = document.getElementById("rss-add-url").value;
+    var username = document.getElementById("rss-add-username").value;
+    postAction("/admin/rss/add", { url: url, username: username }, null);
   });
 })();
 </script>

@@ -149,6 +149,9 @@ func run() error {
 				return configStore.Duration(ctx, config.KeyAdminSessionTTL, cfg.WebAdmin.SessionTTL)
 			},
 		},
+		// Issue #136 Phase 4:
+		RSSFeedURLsBootstrap: cfg.RSS.FeedURLs, RSSFeedUsernamesBootstrap: cfg.RSS.FeedUsernames,
+		RSSEnabled: cfg.RSS.Enabled, RSSFilterScriptPathConfigured: cfg.RSS.FilterScriptPath != "",
 	}); err != nil {
 		logger.Warn("admin web UI bootstrap unavailable: webadmin service init failed", "error", err.Error())
 	} else {

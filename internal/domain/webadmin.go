@@ -203,6 +203,12 @@ const (
 	WebAdminActionRejectSession  WebAdminAction = "reject_session"
 	WebAdminActionRevokeToken    WebAdminAction = "revoke_token"
 	WebAdminActionReflectScopes  WebAdminAction = "reflect_scopes"
+	// WebAdminActionAddRSSFeed/WebAdminActionRemoveRSSFeed are Issue
+	// #136 Phase 4's two action kinds, added to the set
+	// WebAdminAction's own doc comment already anticipated growing
+	// (Phase 3) — no schema change (action is a plain TEXT column).
+	WebAdminActionAddRSSFeed    WebAdminAction = "add_rss_feed"
+	WebAdminActionRemoveRSSFeed WebAdminAction = "remove_rss_feed"
 )
 
 // WebAdminActionAuditEntry is one row of the api_token_scope_audit-style

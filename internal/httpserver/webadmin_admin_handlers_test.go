@@ -16,6 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/nananek/miauth-private-portal/internal/domain"
+	"github.com/nananek/miauth-private-portal/internal/webadmin"
 )
 
 // authedAdminRequest wires up a fully logged-in admin session (a
@@ -368,6 +369,8 @@ func TestHandleAdminMutatingRoutes_RequireCSRF(t *testing.T) {
 		{"/admin/sessions/reject", map[string]string{"routeSessionId": "x"}},
 		{"/admin/tokens/revoke", map[string]string{"tokenId": "x"}},
 		{"/admin/tokens/reflect-scopes", map[string]string{"tokenId": "x"}},
+		{"/admin/rss/add", map[string]string{"url": "https://example.com/feed.xml"}},
+		{"/admin/rss/remove", map[string]string{"url": "https://example.com/feed.xml"}},
 	}
 	for _, rt := range routes {
 		t.Run(rt.path, func(t *testing.T) {
@@ -390,6 +393,8 @@ func TestHandleAdminMutatingRoutes_RequireSession(t *testing.T) {
 		{"/admin/sessions/reject", map[string]string{"routeSessionId": "x"}},
 		{"/admin/tokens/revoke", map[string]string{"tokenId": "x"}},
 		{"/admin/tokens/reflect-scopes", map[string]string{"tokenId": "x"}},
+		{"/admin/rss/add", map[string]string{"url": "https://example.com/feed.xml"}},
+		{"/admin/rss/remove", map[string]string{"url": "https://example.com/feed.xml"}},
 	}
 	for _, rt := range routes {
 		t.Run(rt.path, func(t *testing.T) {
@@ -457,5 +462,148 @@ func TestRecordAdminAction_FailureDoesNotFailTheHTTPResponse(t *testing.T) {
 		if p.RouteSessionID == "route-session-audit-fail" {
 			t.Fatalf("session still pending: the underlying action must have genuinely succeeded despite the audit failure")
 		}
+	}
+}
+
+// newRSSTestServer builds a webAdminTestServer with the given RSS
+// bootstrap feeds (Issue #136 Phase 4) — urls/usernames must be the same
+// length, usernames[i] nil for an entry with no username (the same
+// parallel-slice contract config.SplitRSSFeedURLs's own callers use).
+func newRSSTestServer(t *testing.T, urls []string, usernames []*string) *webAdminTestServer {
+	t.Helper()
+	return newWebAdminTestServerWithConfig(t, nil, []func(*webadmin.Config){
+		func(c *webadmin.Config) {
+			c.RSSFeedURLsBootstrap = urls
+			c.RSSFeedUsernamesBootstrap = usernames
+			c.RSSEnabled = true
+		},
+	})
+}
+
+func TestHandleAdminIndex_RendersRSSFeeds(t *testing.T) {
+	ts := newRSSTestServer(t,
+		[]string{"https://example.com/feed.xml", "https://example.com/feed2.xml?a=1&b=<2"},
+		[]*string{nil, strPtr("alice")},
+	)
+	cookie, _ := authedAdminRequest(t, ts)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://example.com/feed.xml") {
+		t.Errorf("body does not contain first feed URL: %q", body)
+	}
+	if !strings.Contains(body, "alice") {
+		t.Errorf("body does not contain second feed's username: %q", body)
+	}
+	if strings.Contains(body, "b=<2") {
+		t.Fatalf("raw '<' from the feed URL's query string leaked unescaped into response body: %q", body)
+	}
+	if !strings.Contains(body, "b=&lt;2") {
+		t.Fatalf("expected HTML-escaped form of the feed URL's query string, got: %q", body)
+	}
+}
+
+func TestHandleAdminRSSAdd_HappyPath_AddsAndRecordsAudit(t *testing.T) {
+	ts := newRSSTestServer(t, nil, nil)
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/add", cookie, csrfToken, map[string]string{"url": "https://example.com/new-feed.xml", "username": "bob"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	entry, err := ts.db.Config.Get(context.Background(), "RSS_FEED_URLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Value != "https://example.com/new-feed.xml|bob" {
+		t.Fatalf("app_config value = %q, want the new feed with its username", entry.Value)
+	}
+
+	rows := rawAuditRows(t, ts, "https://example.com/new-feed.xml")
+	if len(rows) != 1 || rows[0].Action != "add_rss_feed" || rows[0].AfterValue != "bob" {
+		t.Fatalf("audit rows = %+v, want one add_rss_feed with AfterValue=bob", rows)
+	}
+}
+
+func TestHandleAdminRSSAdd_DuplicateReturns409(t *testing.T) {
+	ts := newRSSTestServer(t, []string{"https://example.com/feed.xml"}, []*string{nil})
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/add", cookie, csrfToken, map[string]string{"url": "https://example.com/feed.xml"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminRSSAdd_InvalidURLReturns400(t *testing.T) {
+	ts := newRSSTestServer(t, nil, nil)
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/add", cookie, csrfToken, map[string]string{"url": "not-a-url"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminRSSRemove_HappyPath_RemovesAndRecordsAudit(t *testing.T) {
+	ts := newRSSTestServer(t,
+		[]string{"https://example.com/a.xml", "https://example.com/b.xml"},
+		[]*string{nil, nil},
+	)
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/remove", cookie, csrfToken, map[string]string{"url": "https://example.com/a.xml"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+	}
+
+	entry, err := ts.db.Config.Get(context.Background(), "RSS_FEED_URLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Value != "https://example.com/b.xml" {
+		t.Fatalf("app_config value = %q, want just the remaining feed", entry.Value)
+	}
+
+	rows := rawAuditRows(t, ts, "https://example.com/a.xml")
+	if len(rows) != 1 || rows[0].Action != "remove_rss_feed" {
+		t.Fatalf("audit rows = %+v, want one remove_rss_feed", rows)
+	}
+}
+
+func TestHandleAdminRSSRemove_UnknownURLReturns404(t *testing.T) {
+	ts := newRSSTestServer(t, []string{"https://example.com/feed.xml"}, []*string{nil})
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/remove", cookie, csrfToken, map[string]string{"url": "https://does-not-exist.example/feed.xml"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAdminRSSRemove_LastBootstrapFeedReturns409(t *testing.T) {
+	ts := newRSSTestServer(t, []string{"https://example.com/only.xml"}, []*string{nil})
+	cookie, csrfToken := authedAdminRequest(t, ts)
+
+	rec := postAdminAction(t, ts, "/admin/rss/remove", cookie, csrfToken, map[string]string{"url": "https://example.com/only.xml"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409, body = %q", rec.Code, rec.Body.String())
+	}
+
+	// A follow-up GET /admin/ must still show the feed: nothing silently
+	// changed.
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.AddCookie(cookie)
+	indexRec := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(indexRec, req)
+	if !strings.Contains(indexRec.Body.String(), "https://example.com/only.xml") {
+		t.Fatalf("GET /admin/ after failed remove no longer shows the feed: %q", indexRec.Body.String())
 	}
 }
