@@ -178,3 +178,86 @@ func TestParseFeed_ItemWithoutGUIDOrLinkGetsUniqueExternalID(t *testing.T) {
 		t.Error("distinct items without guid/link got the same ExternalID")
 	}
 }
+
+// --- SiteURLFromFeed (Issue #146) ---
+
+func TestSiteURLFromFeed_RSSChannelLink(t *testing.T) {
+	feed := `<rss version="2.0"><channel>
+		<title>Example</title>
+		<atom:link xmlns:atom="http://www.w3.org/2005/Atom" href="https://feeds.example.com/rss.xml" rel="self" type="application/rss+xml"/>
+		<link>https://www.example.com/</link>
+		<image><link>https://www.example.com/wrong-nested-link</link></image>
+		<item><link>https://www.example.com/posts/1</link></item>
+	</channel></rss>`
+
+	got := SiteURLFromFeed([]byte(feed))
+	if got != "https://www.example.com/" {
+		t.Errorf("SiteURLFromFeed = %q, want the channel's own <link> (not atom:link self, not <image><link>, not an item's link)", got)
+	}
+}
+
+func TestSiteURLFromFeed_RSSSkipsAtomSelfLinkWhenItComesFirst(t *testing.T) {
+	// <atom:link rel="self"> has empty chardata (it carries its URL only
+	// as an href attribute), so it must never win over a later plain
+	// <link> even though it is matched into the same Links slice by
+	// local-name-only unmarshaling.
+	feed := `<rss version="2.0"><channel>
+		<atom:link xmlns:atom="http://www.w3.org/2005/Atom" href="https://feeds.example.com/rss.xml" rel="self"/>
+		<link>https://www.example.com/</link>
+	</channel></rss>`
+
+	if got := SiteURLFromFeed([]byte(feed)); got != "https://www.example.com/" {
+		t.Errorf("SiteURLFromFeed = %q, want https://www.example.com/", got)
+	}
+}
+
+func TestSiteURLFromFeed_RSSNonHTTPSLinkIsIgnored(t *testing.T) {
+	feed := `<rss version="2.0"><channel><link>http://www.example.com/</link></channel></rss>`
+	if got := SiteURLFromFeed([]byte(feed)); got != "" {
+		t.Errorf("SiteURLFromFeed = %q, want \"\" for a non-https channel link", got)
+	}
+}
+
+func TestSiteURLFromFeed_RSSNoChannelLinkReturnsEmpty(t *testing.T) {
+	if got := SiteURLFromFeed([]byte(validRSSFeed)); got != "" {
+		t.Errorf("SiteURLFromFeed = %q, want \"\" (validRSSFeed has no channel-level <link>)", got)
+	}
+}
+
+func TestSiteURLFromFeed_AtomFeedLevelLink(t *testing.T) {
+	feed := `<feed xmlns="http://www.w3.org/2005/Atom">
+		<title>Example</title>
+		<link rel="self" href="https://feeds.example.com/atom.xml"/>
+		<link rel="alternate" href="https://www.example.com/"/>
+		<entry>
+			<link rel="alternate" href="https://www.example.com/posts/1"/>
+		</entry>
+	</feed>`
+
+	got := SiteURLFromFeed([]byte(feed))
+	if got != "https://www.example.com/" {
+		t.Errorf("SiteURLFromFeed = %q, want the feed's own rel=alternate link (not rel=self, not the entry's own link)", got)
+	}
+}
+
+func TestSiteURLFromFeed_AtomNoFeedLevelLinkReturnsEmpty(t *testing.T) {
+	// validAtomFeed's only <link> lives inside its one <entry>.
+	if got := SiteURLFromFeed([]byte(validAtomFeed)); got != "" {
+		t.Errorf("SiteURLFromFeed = %q, want \"\" (only an entry-level link is present)", got)
+	}
+}
+
+func TestSiteURLFromFeed_MalformedOrUnrecognizedReturnsEmpty(t *testing.T) {
+	cases := map[string]string{
+		"malformed XML":     malformedXML,
+		"unrecognized root": `<html><body>not a feed</body></html>`,
+		"empty":             "",
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := SiteURLFromFeed([]byte(data)); got != "" {
+				t.Errorf("SiteURLFromFeed(%s) = %q, want \"\"", name, got)
+			}
+		})
+	}
+}

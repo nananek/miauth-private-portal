@@ -167,3 +167,20 @@ above runs, not the identity design itself (real host, per-feed
 username, computed once and never recomputed all still hold). See
 [docs/operations/configuration.md](../operations/configuration.md#startup-seeding-and-live-reconciliation)
 for the current step-by-step behavior.
+
+## Addendum (Issue #146)
+
+This ADR's "computed once ... and never recomputed" guarantee governs
+`actor_id`, `username`, and `host` — the fields `SetActorIdentity`'s
+`WHERE actor_id IS NULL` clause enforces. It says nothing about
+`actors.avatar_file_id`, which is not part of this ADR's identity design
+at all (favicon storage was always out of this ADR's scope — see its
+own opening scope note). Issue #146 therefore has
+`ensureRSSSourceActors` also revisit an already-identified row whose
+avatar is still unset — most production sources predated Issue #77
+PR5's favicon fetch entirely and so never got one — without that being
+a form of recomputing identity: the row's `actor_id`/`username`/`host`
+are read, never rewritten, by that backfill path. See
+[docs/operations/configuration.md](../operations/configuration.md#startup-seeding-and-live-reconciliation)'s
+"Favicon backfill and retry" for the current behavior, including the
+in-process retry cooldown.

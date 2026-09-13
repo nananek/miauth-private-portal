@@ -401,6 +401,24 @@ Favicon fetching:
   `avatarUrl` from the resolved actor's `AvatarFileID`, reusing the same
   `avatarURLFromFileID` helper profile images use.
 
+**Addendum (Issue #146, 2026-09-13).** Two gaps in the above turned out
+to matter once this ran against production RSS sources: (1)
+`fetchAndSetSourceFavicon` only ever ran right after a *newly*
+provisioned actor, so every source that already existed when PR5 shipped
+never got a favicon at all — `ensureRSSSourceActors` now also retries an
+existing actor whose avatar is still unset, subject to an in-process
+24h-per-actor retry cooldown (`faviconRetryCooldown`), never touching
+that actor's identity; and (2) `Fetch`'s single `https://<host>/
+favicon.ico` probe and its "reject BMP-in-ICO" limitation left most
+real-world hosts with no icon at all (of four production feeds checked,
+only one decoded) — `internal/ingest/favicon.Resolve` now also decodes
+legacy BMP-in-ICO entries and falls back to the feed's own linked site
+page's `<link rel="icon">` family, then that site's own host's
+favicon.ico. See
+[docs/operations/configuration.md](../operations/configuration.md#startup-seeding-and-live-reconciliation)
+and [ADR-0008's Issue #146 addendum](../decisions/0008-external-source-identity.md)
+for the current behavior.
+
 ## PR6: Post attachments
 
 **Status: complete.** Depended on PR1 and PR3.
@@ -580,13 +598,32 @@ PR7, the last PR in this roadmap:
    `failingStorage`-based storage-failure-path tests.
 8. **favicon自動取得のSSRF・過大レスポンス・外部追跡リスクをテストする**
    — ✅ SSRF and oversized-response: `internal/ingest/favicon`'s own test
-   file (PR5). External tracking risk: structurally eliminated by
-   design, not merely tested — `favicon.Fetch` only ever requests a
-   fixed, self-derived `https://<host>/favicon.ico` path; it does not
-   parse or follow any feed-supplied `<icon>`/`<logo>` URL at all
-   (confirmed: `internal/ingest/rss` never parses either field), so
-   there is no arbitrary/tracking URL this service could be tricked into
-   fetching in the first place.
+   file (PR5). External tracking risk (as shipped in PR5): structurally
+   eliminated by design, not merely tested — `favicon.Fetch` only ever
+   requested a fixed, self-derived `https://<host>/favicon.ico` path; it
+   did not parse or follow any feed-supplied `<icon>`/`<logo>` URL at
+   all (confirmed: `internal/ingest/rss` never parsed either field), so
+   there was no arbitrary/tracking URL this service could be tricked
+   into fetching in the first place.
+
+   **Superseded by Issue #146 (2026-09-13):** this no longer holds
+   as-is — `favicon.Resolve`'s fallback chain now also fetches the feed
+   document itself (to read only its own channel/feed-level `<link>`,
+   never an item's) and, from the site page that link names, follows a
+   `<link rel="icon">`-family `href` (which real sites often point at a
+   third-party asset CDN, e.g. Yahoo's `s.yimg.jp` or the Guardian's
+   `assets.guim.co.uk` — observed during #146's own verification). This
+   is a deliberate, accepted widening: PR5's fixed-path design left most
+   real-world hosts with no favicon at all (only 1 of 4 production feeds
+   checked in #146 decoded), so #146 trades the "no feed-derived URL is
+   ever fetched" property for actually getting real icons. What is
+   **not** widened: every fetch in the chain — the feed itself, the site
+   page, and every candidate icon URL — still goes through the same
+   `internal/ingest/safehttp.Client` (fixed https scheme, the same
+   public-unicast-only SSRF IP policy, the same redirect-count limit),
+   and every response is still bounded by `DRIVE_MAX_FILE_BYTES` (the
+   HTML page additionally capped at 1 MiB). No step gains a broader
+   policy than any other outbound fetch in this repository already has.
 
 Every acceptance criterion is satisfied; item 4's VirtualActor gap is
 the only one that required new work discovered specifically by this

@@ -24,6 +24,14 @@ import (
 type rssRootXML struct {
 	Channel struct {
 		Items []rssItemXML `xml:"item"`
+		// Links captures every direct child <link> of <channel> — the
+		// channel's own site link, plus (by local-name-only matching,
+		// see this type's own doc comment) any <atom:link> such as a
+		// rel="self" feed-URL pointer, which unmarshals with empty
+		// chardata. It never sees <image><link>, a grandchild rather
+		// than a direct child. SiteURLFromFeed (Issue #146) is its only
+		// reader.
+		Links []string `xml:"link"`
 	} `xml:"channel"`
 }
 
@@ -37,6 +45,11 @@ type rssItemXML struct {
 
 type atomRootXML struct {
 	Entries []atomEntryXML `xml:"entry"`
+	// Links captures only <feed>'s own direct-child <link> elements —
+	// the feed's own site link — never an <entry>'s own Links, which
+	// nest one level deeper and are unmarshaled separately by
+	// atomEntryXML. SiteURLFromFeed (Issue #146) is its only reader.
+	Links []atomLinkXML `xml:"link"`
 }
 
 type atomEntryXML struct {
@@ -93,6 +106,51 @@ func parseFeed(data []byte, sourceID string, cfg Config) ([]ingest.FetchedItem, 
 	default:
 		return nil, fmt.Errorf("unrecognized feed root element %q", root)
 	}
+}
+
+// SiteURLFromFeed extracts a feed's own site link — an RSS channel's
+// direct <link>, or an Atom feed's own canonical <link>
+// (atomCanonicalLink), never an item/entry's own link — for Issue
+// #146's favicon resolution chain: a feed hosted on a delivery-only
+// domain with no favicon.ico of its own (e.g. an aggregator's
+// per-category feed host) still names the human-facing site its items
+// belong to. Returns "" if the feed cannot be parsed, names no such
+// link, or that link is not an https:// URL (this repository's favicon
+// fetch is https-only, see internal/ingest/favicon.Fetch's doc
+// comment).
+func SiteURLFromFeed(data []byte) string {
+	root, err := detectRootLocalName(data)
+	if err != nil {
+		return ""
+	}
+
+	var link string
+	switch root {
+	case "rss":
+		var feed rssRootXML
+		if err := xml.Unmarshal(data, &feed); err != nil {
+			return ""
+		}
+		for _, l := range feed.Channel.Links {
+			if trimmed := strings.TrimSpace(l); trimmed != "" {
+				link = trimmed
+				break
+			}
+		}
+	case "feed":
+		var feed atomRootXML
+		if err := xml.Unmarshal(data, &feed); err != nil {
+			return ""
+		}
+		link = atomCanonicalLink(feed.Links)
+	default:
+		return ""
+	}
+
+	if !strings.HasPrefix(link, "https://") {
+		return ""
+	}
+	return link
 }
 
 func detectRootLocalName(data []byte) (string, error) {
