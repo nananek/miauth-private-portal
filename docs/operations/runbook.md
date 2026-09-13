@@ -155,6 +155,21 @@ rotation" below.
   configuration.md's "RSS/Atom ingestion" and "IMAP mail ingestion"
   sections). Diagnose with the same `jobsctl list --state=dead`/`show`
   commands above.
+- **An RSS source shows no avatar** (Issue #146): check for
+  `"rss source favicon fetch skipped"` (host/username/error on the same
+  log line) — this is expected and non-fatal for most hosts; not every
+  site has a decodable favicon anywhere in `internal/ingest/
+  favicon.Resolve`'s chain (its own host's `/favicon.ico`, the feed's
+  own linked site page's `<link rel="icon">`, that site's own host's
+  `/favicon.ico`). A failed attempt is not retried for 24 hours per
+  actor (`faviconRetryCooldown`, in-process memory only, so a restart
+  always retries immediately) — restart the server if you need to force
+  an immediate retry after fixing something on the remote side (e.g. the
+  site started serving a decodable icon). There is no
+  `jobsctl`/`openwebuictl`-style CLI for this: it runs inline in
+  `ensureRSSSourceActors` on every scheduler tick, not as a separate
+  durable job. A source's `actor_id`/`username`/`host` are never
+  affected either way (ADR-0008).
 - **`cmd/mailfetch` unreachable** (`IMAP_ENABLED=true`): classifies as a
   retryable transport failure identical to a transient IMAP server
   outage (configuration.md's "Process isolation" section) — confirm the

@@ -154,7 +154,7 @@ catch that class of mistake during local development.
 | `DRIVE_S3_ACCESS_KEY_ID` / `DRIVE_S3_SECRET_ACCESS_KEY` | required if `DRIVE_BACKEND=s3compat` | `""` | S3 credentials. Never logged or returned to a client; `Config.Redacted()` shows only whether each is set. Unlike `OPENWEBUI_API_KEY`, these are not stored via the `secret_ref` indirection (`internal/openwebui/registry.go`'s pattern of persisting only a configuration key's *name* to a database row) — this PR persists no Drive configuration to any database row for a `secret_ref` to name. A future PR that does add one should reuse that same indirection rather than storing a raw credential a second time. |
 | `DRIVE_S3_USE_SSL` | no | `true` | Selects `https` (default) or `http` against `DRIVE_S3_ENDPOINT`. |
 | `DRIVE_S3_REGION` | no | `""` | Passed to the S3 client when non-empty; most S3-compatible servers (MinIO included) do not require it. |
-| `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. Issue #77 PR5: also bounds an RSS source's favicon fetch (`internal/ingest/favicon.Fetch`'s `maxBytes`) — no separate favicon-specific size configuration key exists. |
+| `DRIVE_MAX_FILE_BYTES` | no | `10485760` (10 MiB) | Bounds any single uploaded file, image or not. Minimum `1`. Issue #77 PR5: also bounds every step of an RSS source's favicon resolution (`internal/ingest/favicon.Resolve`'s `maxBytes`; Issue #146 additionally caps an intermediate HTML page fetch at 1 MiB regardless of this value) — no separate favicon-specific size configuration key exists. |
 | `DRIVE_MAX_IMAGE_WIDTH` / `DRIVE_MAX_IMAGE_HEIGHT` | no | `8000` | Bounds a raster image's decoded pixel dimensions (`internal/drive.ValidateImage`), independent of `DRIVE_MAX_FILE_BYTES` — a small but pathologically large-dimension image ("decompression bomb") is rejected by this check even when it fits comfortably under the byte-size bound. 1-100000. |
 | `DRIVE_ORPHAN_GC_INTERVAL` | no | `24h` | Issue #77 PR7: how often `internal/drive.GCScheduler` enqueues an orphan-file GC sweep (`RunOrphanGC`), which deletes any object the configured `Storage` backend holds that no `files` row references — the safety net for a rare best-effort-cleanup failure in the upload/delete paths, not a correctness-critical process, hence the deliberately infrequent default. Positive duration. |
 | `ADMIN_SESSION_TTL` | no | `12h` | Issue #136 Phase 2 (ADR-0010): how long a browser session issued by `POST /admin/login/finish` stays valid before `RequireAdminSession` rejects it and the Owner must log in again with a passkey. Positive duration. |
@@ -1105,17 +1105,30 @@ before that fix, step 2 below ran once, at startup, only):
    an already-registered source's identity is never recomputed.
    Immediately after each row's actor commits — outside that
    transaction, and never able to fail it — Issue #77 PR5's
-   `fetchAndSetSourceFavicon` best-effort fetches that source's own
-   `https://<host>/favicon.ico`, extracts its largest embedded PNG image
-   (`internal/ingest/favicon.Fetch`/`ExtractPNGFromICO`; a legacy
-   BMP-in-ICO favicon is not supported and is skipped like any other
-   failure), stores it via `drive.Service.CreateSystemFile`
-   (`source_favicon` purpose, no owner), and sets the actor's
-   `avatar_file_id` to it. This fetch always uses `https`, bounded by
-   `DRIVE_MAX_FILE_BYTES`, regardless of `RSS_ALLOW_INSECURE_HTTP`
-   (which governs only the feed fetch itself); a missing, oversized, or
-   undecodable favicon is logged and otherwise silently skipped — the
-   source keeps its actor either way, which simply keeps no avatar.
+   `fetchAndSetSourceFavicon` best-effort resolves that source's icon via
+   `internal/ingest/favicon.Resolve` (Issue #146's fallback chain, tried
+   in order until one succeeds): (a) the feed host's own
+   `https://<host>/favicon.ico`; (b) the feed document's own `<link>` to
+   its human-facing site (`internal/ingest/rss.SiteURLFromFeed`) followed
+   by that page's `<head><link rel="icon"|"shortcut icon"|
+   "apple-touch-icon"[-precomposed]>` (largest declared `sizes` wins;
+   `FetchFromPage`); (c) that site's own host's `https://<host>/
+   favicon.ico`, when it differs from the feed's own host. An ICO
+   container's PNG-formatted entries are used as-is, and — since Issue
+   #146 — a legacy uncompressed BMP-in-ICO entry (1/4/8bpp palette,
+   24bpp, or 32bpp) is decoded and re-encoded as PNG rather than
+   rejected; every entry across every ICO tried is otherwise ranked
+   largest-pixel-count first. The result, once found, is stored via
+   `drive.Service.CreateSystemFile` (`source_favicon` purpose, no owner)
+   and set as the actor's `avatar_file_id`. Every step is `https`-only,
+   bounded by `DRIVE_MAX_FILE_BYTES` (an HTML page fetched in step (b) is
+   additionally capped at 1 MiB, since it is only scanned as text),
+   regardless of `RSS_ALLOW_INSECURE_HTTP` (which governs only the feed
+   fetch itself); if every step fails — no favicon anywhere in the
+   chain, or a Drive validation/storage error — it is logged and
+   silently skipped: the source keeps its actor either way, which simply
+   keeps no avatar for now (see "Favicon backfill and retry" below for
+   when it is tried again).
 
 Since `RSS_FEED_URLS` is one of Issue #76's db-eligible keys, and both
 steps above now run on every scheduler tick (not just at startup):
@@ -1142,6 +1155,25 @@ once, at entry-creation time, and never re-resolved, so historical items
 already showing the shared `system` actor stay that way permanently —
 only entries ingested *after* the backfill runs pick up the source's
 real actor.
+
+**Favicon backfill and retry (Issue #146).** Unlike actor identity, a
+row's *avatar* is revisited on every tick even after its actor already
+exists: if `ensureRSSSourceActors` finds an actor with `avatar_file_id`
+still `NULL` — because it was provisioned before Issue #77 PR5 shipped
+favicon fetch at all (this is why every pre-existing production source
+had no avatar until this fix), or because a prior attempt simply never
+found one — it retries the same `favicon.Resolve` chain described above
+for that row too. This never touches `actor_id`/`username`/`host`
+(ADR-0008's "computed once ... and never recomputed" rule is about
+identity, not the avatar; see that ADR's Issue #146 addendum). To avoid
+hitting the same unreachable or icon-less host every `RSS_POLL_INTERVAL`
+tick forever, a successful or failed attempt is remembered **in
+process memory only**, per actor, for 24 hours before it is tried again;
+this cooldown is not persisted, so restarting the process always retries
+immediately. There is no operator action to force an immediate retry
+other than a restart, and no `miauthctl`/SQL step is needed to enable
+backfill for existing rows — the first tick after upgrading provisions
+it automatically, subject to the same cooldown as any other retry.
 
 ### RSS item filtering
 

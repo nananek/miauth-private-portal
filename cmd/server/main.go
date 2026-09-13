@@ -528,12 +528,15 @@ func run() error {
 		// (cfg.RSS.AllowInsecureHTTP-controlled) one above: favicon fetch
 		// always requires https, matching driveSvc's upload-from-url
 		// client's reasoning — see internal/ingest/favicon.Fetch's doc
-		// comment.
+		// comment. faviconFetcher additionally applies Issue #146's
+		// per-actor retry cooldown across every call below, both at
+		// startup and on every later scheduler tick.
 		faviconClient := safehttp.NewClient(safehttp.Config{MaxRedirects: 3, AllowInsecureHTTP: false})
+		faviconFetch := newFaviconFetcher(faviconClient, cfg.Drive.MaxFileBytes)
 		if err := db.ExternalSources.ReconcileFromConfig(ctx, rss.Kind, cfg.RSS.FeedURLs, seedNow); err != nil {
 			return fmt.Errorf("reconcile rss sources: %w", err)
 		}
-		if err := ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow, driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger); err != nil {
+		if err := ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, seedNow, driveSvc, faviconFetch, logger); err != nil {
 			return fmt.Errorf("ensure rss source actors: %w", err)
 		}
 
@@ -547,7 +550,7 @@ func run() error {
 				return configStore.StringList(ctx, config.KeyRSSFeedURLs, cfg.RSS.FeedURLs)
 			},
 			EnsureActors: func(ctx context.Context) error {
-				return ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, time.Now().UTC(), driveSvc, faviconClient, cfg.Drive.MaxFileBytes, logger)
+				return ensureRSSSourceActors(ctx, db, cfg.RSS.FeedURLs, cfg.RSS.FeedUsernames, time.Now().UTC(), driveSvc, faviconFetch, logger)
 			},
 		}, logger)
 	}
@@ -689,6 +692,52 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 	}
 }
 
+// faviconRetryCooldown bounds how often fetchAndSetSourceFavicon retries
+// a source whose avatar is still unset after a prior attempt failed
+// (Issue #146). ensureRSSSourceActors runs on every scheduler tick
+// (RSS_POLL_INTERVAL, 15m by default), and most real-world hosts either
+// have no favicon at all or one favicon.Resolve's chain cannot decode,
+// so retrying every tick would mean one or more outbound GETs to the
+// same unreachable/unusable host(s) every few minutes, forever. The
+// cooldown lives only in process memory — a restart always retries
+// immediately — matching the owner's decision (2026-09-13) not to add a
+// persisted retry-tracking column for this.
+const faviconRetryCooldown = 24 * time.Hour
+
+// faviconFetcher wraps favicon.Resolve with Issue #146's per-actor retry
+// cooldown. resolve is a seam: production wires it to favicon.Resolve
+// against a real safehttp.Client; tests substitute a stub so
+// ensureRSSSourceActors' own tests never depend on real network access.
+type faviconFetcher struct {
+	resolve func(ctx context.Context, feedURL string) ([]byte, error)
+
+	mu      sync.Mutex
+	lastTry map[string]time.Time // actor ID -> that actor's last attempt time.
+}
+
+func newFaviconFetcher(client *safehttp.Client, maxBytes int64) *faviconFetcher {
+	return &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			return favicon.Resolve(ctx, client, feedURL, maxBytes)
+		},
+		lastTry: make(map[string]time.Time),
+	}
+}
+
+// shouldTry reports whether actorID's favicon may be (re)attempted at
+// now, and — if so — immediately records now as its latest attempt,
+// before the caller's own fetch runs, so two ticks racing on the same
+// actor (a slow fetch spanning a tick boundary) never both proceed.
+func (f *faviconFetcher) shouldTry(actorID string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if last, ok := f.lastTry[actorID]; ok && now.Sub(last) < faviconRetryCooldown {
+		return false
+	}
+	f.lastTry[actorID] = now
+	return true
+}
+
 // ensureRSSSourceActors idempotently fills in actor_id/username/host
 // (Issue #77 PR4, ADR-0008) for every currently *active* rss-kind
 // external_sources row that does not have one yet. A row can reach that
@@ -700,9 +749,9 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 // left in that state by a version of this service that predates this
 // fix (Issue #134's backfill case — same code path, no separate
 // one-off tool needed). It never recomputes an already-set actor
-// identity: only a row with ActorID == nil is touched, and
-// SetActorIdentity's own `WHERE actor_id IS NULL` makes that enforced,
-// not just intended (ADR-0008: "computed once ... and never
+// identity: only a row with ActorID == nil has its identity provisioned,
+// and SetActorIdentity's own `WHERE actor_id IS NULL` makes that
+// enforced, not just intended (ADR-0008: "computed once ... and never
 // recomputed").
 //
 // Callers must run this again after every ReconcileFromConfig round,
@@ -720,14 +769,26 @@ func jobsConfigFrom(cfg config.JobsConfig) jobs.Config {
 // actor-less row gets an auto-derived username instead, exactly as an
 // unset feedUsernames[i] entry always has.
 //
-// After each row's actor commits, its host's favicon.ico is fetched,
-// validated, and stored as that actor's avatar (Issue #77 PR5, folded in
-// per plan-77 requirement 2). This step is strictly best-effort — see
+// After a row's actor commits, favicon.Resolve's fallback chain (Issue
+// #146: the feed host's own favicon.ico, then the feed's own linked
+// site page's <link rel="icon">, then that site's own host's
+// favicon.ico) is tried and, on success, stored as that actor's avatar
+// (Issue #77 PR5, folded in per plan-77 requirement 2, extended by
+// #146). This step is strictly best-effort — see
 // fetchAndSetSourceFavicon's doc comment — and runs outside the actor/
 // source transaction: a network fetch has no business holding a database
 // write lock, and a favicon failure must never unwind an otherwise
 // successful actor provisioning.
-func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs []string, bootstrapFeedUsernames []*string, now time.Time, driveSvc *drive.Service, faviconClient *safehttp.Client, faviconMaxBytes int64, logger *slog.Logger) error {
+//
+// Issue #146: a row that already has an actor is never touched for
+// identity (ADR-0008 — see docs/decisions/0008-external-source-identity.md's
+// Issue #146 addendum for why backfilling only the avatar does not
+// conflict with that rule), but if its avatar is still unset — because
+// it predates PR5 entirely, or a prior attempt never succeeded — this
+// function retries it too, subject to fetcher's in-process cooldown
+// (faviconRetryCooldown) so a host that keeps failing is not re-fetched
+// every scheduler tick forever.
+func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs []string, bootstrapFeedUsernames []*string, now time.Time, driveSvc *drive.Service, fetcher *faviconFetcher, logger *slog.Logger) error {
 	usernameByURI := make(map[string]string, len(bootstrapFeedURLs))
 	for i, u := range bootstrapFeedURLs {
 		if i < len(bootstrapFeedUsernames) && bootstrapFeedUsernames[i] != nil {
@@ -758,7 +819,12 @@ func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs
 
 	for _, source := range sources {
 		if source.ActorID != nil {
-			continue // already has its own actor; never recomputed (ADR-0008)
+			// Identity is never recomputed (ADR-0008); only a still-missing
+			// avatar is worth revisiting here (Issue #146's backfill).
+			if err := backfillSourceFavicon(ctx, db, driveSvc, fetcher, source, now, logger); err != nil {
+				return err
+			}
+			continue
 		}
 
 		host, err := rss.HostFromFeedURL(source.URI)
@@ -790,28 +856,55 @@ func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs
 			return fmt.Errorf("provision rss source actor %q: %w", source.URI, err)
 		}
 
-		fetchAndSetSourceFavicon(ctx, db, driveSvc, faviconClient, faviconMaxBytes, actorID, host, username, logger)
+		fetchAndSetSourceFavicon(ctx, db, driveSvc, fetcher, source.URI, actorID, host, username, now, logger)
 	}
 	return nil
 }
 
-// fetchAndSetSourceFavicon best-effort fetches host's favicon.ico,
-// stores it as an owner-less Drive file (domain.FilePurposeSourceFavicon),
-// and points actorID's avatar_file_id at it. Every failure — no
-// favicon.ico, an unsupported legacy BMP-in-ICO, a favicon exceeding
-// faviconMaxBytes, or a Drive validation/storage error — is logged and
-// swallowed: this is a cosmetic enhancement to a source actor a caller
-// has already committed to the database, not a precondition for it, so
-// none of these failures may propagate to ensureRSSSourceActors' caller
-// (which would otherwise fail this process's entire startup, or a
-// scheduler tick, over a third party's missing icon).
-func fetchAndSetSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, client *safehttp.Client, maxBytes int64, actorID, host, username string, logger *slog.Logger) {
-	pngData, err := favicon.Fetch(ctx, client, host, maxBytes)
+// backfillSourceFavicon is Issue #146's fix for a source whose actor
+// already exists (provisioned before Issue #77 PR5 shipped favicon
+// fetch at all, or by a prior pass whose fetch never succeeded) but
+// still has no avatar. It changes nothing about identity — never
+// recomputed, per ADR-0008 — only whether a favicon fetch is worth
+// retrying for this row.
+func backfillSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, fetcher *faviconFetcher, source domain.ExternalSource, now time.Time, logger *slog.Logger) error {
+	if source.Host == nil || source.Username == nil {
+		return nil // ADR-0008 leaves imap-kind sources without a projected host/username at all.
+	}
+	actor, err := db.Actors.Get(ctx, *source.ActorID)
+	if err != nil {
+		return fmt.Errorf("get rss source actor %q: %w", *source.ActorID, err)
+	}
+	if actor.AvatarFileID != nil {
+		return nil
+	}
+	fetchAndSetSourceFavicon(ctx, db, driveSvc, fetcher, source.URI, *source.ActorID, *source.Host, *source.Username, now, logger)
+	return nil
+}
+
+// fetchAndSetSourceFavicon best-effort resolves feedURL's favicon via
+// fetcher (favicon.Resolve's fallback chain, Issue #146), stores it as
+// an owner-less Drive file (domain.FilePurposeSourceFavicon), and points
+// actorID's avatar_file_id at it. fetcher's own cooldown
+// (faviconRetryCooldown) may skip the attempt entirely, silently, if
+// actorID was already tried recently. Every other failure — no
+// resolvable favicon anywhere in the chain, or a Drive validation/
+// storage error — is logged and swallowed: this is a cosmetic
+// enhancement to a source actor a caller has already committed to the
+// database, not a precondition for it, so none of these failures may
+// propagate to ensureRSSSourceActors' caller (which would otherwise
+// fail this process's entire startup, or a scheduler tick, over a third
+// party's missing icon).
+func fetchAndSetSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, fetcher *faviconFetcher, feedURL, actorID, host, username string, now time.Time, logger *slog.Logger) {
+	if !fetcher.shouldTry(actorID, now) {
+		return
+	}
+	imgData, err := fetcher.resolve(ctx, feedURL)
 	if err != nil {
 		logger.Info("rss source favicon fetch skipped", "host", host, "username", username, "error", err)
 		return
 	}
-	file, err := driveSvc.CreateSystemFile(ctx, domain.FilePurposeSourceFavicon, host+"-favicon.png", pngData)
+	file, err := driveSvc.CreateSystemFile(ctx, domain.FilePurposeSourceFavicon, host+"-favicon.png", imgData)
 	if err != nil {
 		logger.Warn("rss source favicon store failed", "host", host, "username", username, "error", err)
 		return

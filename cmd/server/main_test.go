@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"image"
+	"image/png"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -43,15 +47,17 @@ func TestJobsConfigFrom(t *testing.T) {
 }
 
 // newEnsureActorsTestFixture builds a real *sqlite.DB, *drive.Service
-// (local-disk backed), and a *safehttp.Client for ensureRSSSourceActors'
-// tests below. The client's default (non-test) SSRF policy is used
-// deliberately, not AllowIPForTesting: every test feed URL below uses a
+// (local-disk backed), and a *faviconFetcher (wrapping favicon.Resolve
+// against a client using the production, non-test SSRF policy) for
+// ensureRSSSourceActors' tests below. Every test feed URL below uses a
 // loopback host, which that policy rejects outright without a network
 // round trip, so favicon fetch fails fast and deterministically — the
 // assertions below don't depend on favicon succeeding, only on it never
 // blocking actor creation (fetchAndSetSourceFavicon's documented
-// best-effort contract).
-func newEnsureActorsTestFixture(t *testing.T) (*sqlite.DB, *drive.Service, *safehttp.Client) {
+// best-effort contract). Tests that need favicon fetch to actually
+// succeed (Issue #146's backfill/cooldown tests) replace fetcher.resolve
+// with a stub instead of relying on real network access.
+func newEnsureActorsTestFixture(t *testing.T) (*sqlite.DB, *drive.Service, *faviconFetcher) {
 	t.Helper()
 	db, err := sqlite.Open(t.Context(), sqlite.Config{
 		Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second, MaxOpenConns: 4,
@@ -74,7 +80,7 @@ func newEnsureActorsTestFixture(t *testing.T) (*sqlite.DB, *drive.Service, *safe
 		db.Repos,
 		drive.Config{MaxFileBytes: 1 << 20, MaxImageWidth: 2000, MaxImageHeight: 2000, CapacityBytes: 1 << 30},
 	)
-	return db, driveSvc, faviconClient
+	return db, driveSvc, newFaviconFetcher(faviconClient, 1<<20)
 }
 
 func strPtr(s string) *string { return &s }
@@ -92,7 +98,7 @@ func discardLogger() *slog.Logger {
 // provisioned by ensureRSSSourceActors called with empty bootstrap
 // lists, matching the scheduler-tick closure's real arguments.
 func TestEnsureRSSSourceActors_ProvisionsSourceCreatedByReconcileFromConfig(t *testing.T) {
-	db, driveSvc, faviconClient := newEnsureActorsTestFixture(t)
+	db, driveSvc, fetcher := newEnsureActorsTestFixture(t)
 	logger := discardLogger()
 	now := time.Now().UTC()
 	const feedURL = "https://localhost/new-feed.xml"
@@ -100,7 +106,7 @@ func TestEnsureRSSSourceActors_ProvisionsSourceCreatedByReconcileFromConfig(t *t
 	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), rss.Kind, []string{feedURL}, now); err != nil {
 		t.Fatalf("ReconcileFromConfig: %v", err)
 	}
-	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors: %v", err)
 	}
 
@@ -134,7 +140,7 @@ func TestEnsureRSSSourceActors_ProvisionsSourceCreatedByReconcileFromConfig(t *t
 // dedupe-scope-relevant fields ReconcileFromConfig itself never touches
 // either.
 func TestEnsureRSSSourceActors_BackfillsPreExistingActorlessRow(t *testing.T) {
-	db, driveSvc, faviconClient := newEnsureActorsTestFixture(t)
+	db, driveSvc, fetcher := newEnsureActorsTestFixture(t)
 	logger := discardLogger()
 	now := time.Now().UTC()
 
@@ -149,7 +155,7 @@ func TestEnsureRSSSourceActors_BackfillsPreExistingActorlessRow(t *testing.T) {
 		t.Fatalf("RecordFetchSuccess: %v", err)
 	}
 
-	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors: %v", err)
 	}
 
@@ -181,7 +187,7 @@ func TestEnsureRSSSourceActors_BackfillsPreExistingActorlessRow(t *testing.T) {
 // with no override get distinct auto-derived usernames, and a second
 // call (as if from a later restart) makes no further changes.
 func TestEnsureRSSSourceActors_StartupPathRegression(t *testing.T) {
-	db, driveSvc, faviconClient := newEnsureActorsTestFixture(t)
+	db, driveSvc, fetcher := newEnsureActorsTestFixture(t)
 	logger := discardLogger()
 	now := time.Now().UTC()
 
@@ -195,7 +201,7 @@ func TestEnsureRSSSourceActors_StartupPathRegression(t *testing.T) {
 	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), rss.Kind, feedURLs, now); err != nil {
 		t.Fatalf("ReconcileFromConfig: %v", err)
 	}
-	if err := ensureRSSSourceActors(t.Context(), db, feedURLs, feedUsernames, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, feedURLs, feedUsernames, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors (first pass): %v", err)
 	}
 
@@ -221,7 +227,7 @@ func TestEnsureRSSSourceActors_StartupPathRegression(t *testing.T) {
 
 	// Second call, same arguments (as if the process restarted): no
 	// further changes — same actor IDs, no new actor rows, no error.
-	if err := ensureRSSSourceActors(t.Context(), db, feedURLs, feedUsernames, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, feedURLs, feedUsernames, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors (second pass): %v", err)
 	}
 	for _, uri := range feedURLs {
@@ -244,7 +250,7 @@ func TestEnsureRSSSourceActors_StartupPathRegression(t *testing.T) {
 // call with a *different* bootstrap username mapping for the same URI
 // must not change an already-provisioned source's identity.
 func TestEnsureRSSSourceActors_NeverRecomputesExistingActor(t *testing.T) {
-	db, driveSvc, faviconClient := newEnsureActorsTestFixture(t)
+	db, driveSvc, fetcher := newEnsureActorsTestFixture(t)
 	logger := discardLogger()
 	now := time.Now().UTC()
 	const feedURL = "https://localhost/feed.xml"
@@ -252,7 +258,7 @@ func TestEnsureRSSSourceActors_NeverRecomputesExistingActor(t *testing.T) {
 	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), rss.Kind, []string{feedURL}, now); err != nil {
 		t.Fatalf("ReconcileFromConfig: %v", err)
 	}
-	if err := ensureRSSSourceActors(t.Context(), db, []string{feedURL}, []*string{strPtr("first")}, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, []string{feedURL}, []*string{strPtr("first")}, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors (first pass): %v", err)
 	}
 	first, err := db.ExternalSources.GetByURI(t.Context(), rss.Kind, feedURL)
@@ -262,7 +268,7 @@ func TestEnsureRSSSourceActors_NeverRecomputesExistingActor(t *testing.T) {
 
 	// A later tick/restart with a different (or even bootstrap-absent)
 	// username mapping for the very same URI must not recompute anything.
-	if err := ensureRSSSourceActors(t.Context(), db, []string{feedURL}, []*string{strPtr("second")}, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, []string{feedURL}, []*string{strPtr("second")}, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors (second pass): %v", err)
 	}
 
@@ -286,7 +292,7 @@ func TestEnsureRSSSourceActors_NeverRecomputesExistingActor(t *testing.T) {
 // SetActorIdentity racing ahead of ensureRSSSourceActors' own List call
 // must be treated as an already-provisioned row, not an error.
 func TestEnsureRSSSourceActors_ConcurrentProvisionIsSafeNoOp(t *testing.T) {
-	db, driveSvc, faviconClient := newEnsureActorsTestFixture(t)
+	db, driveSvc, fetcher := newEnsureActorsTestFixture(t)
 	logger := discardLogger()
 	now := time.Now().UTC()
 
@@ -303,7 +309,7 @@ func TestEnsureRSSSourceActors_ConcurrentProvisionIsSafeNoOp(t *testing.T) {
 		t.Fatalf("SetActorIdentity: %v", err)
 	}
 
-	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, faviconClient, 1<<20, logger); err != nil {
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, logger); err != nil {
 		t.Fatalf("ensureRSSSourceActors: %v", err)
 	}
 
@@ -313,5 +319,204 @@ func TestEnsureRSSSourceActors_ConcurrentProvisionIsSafeNoOp(t *testing.T) {
 	}
 	if *got.ActorID != actorID || *got.Username != "raced" {
 		t.Errorf("source = %+v, want the concurrently-set identity left untouched", got)
+	}
+}
+
+// --- Issue #146: avatar backfill for a pre-existing actor ---
+
+// mustProvisionSourceWithoutAvatar provisions feedURL's actor via
+// ensureRSSSourceActors using a throwaway fetcher whose resolve always
+// fails, leaving the returned source's actor identity set but its
+// avatar still unset — the starting state every backfill test below
+// needs.
+func mustProvisionSourceWithoutAvatar(t *testing.T, db *sqlite.DB, driveSvc *drive.Service, feedURL string, now time.Time) domain.ExternalSource {
+	t.Helper()
+	failFetcher := &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			return nil, errors.New("no favicon in this test")
+		},
+		lastTry: make(map[string]time.Time),
+	}
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), rss.Kind, []string{feedURL}, now); err != nil {
+		t.Fatalf("ReconcileFromConfig: %v", err)
+	}
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, failFetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors: %v", err)
+	}
+	got, err := db.ExternalSources.GetByURI(t.Context(), rss.Kind, feedURL)
+	if err != nil {
+		t.Fatalf("GetByURI: %v", err)
+	}
+	if got.ActorID == nil {
+		t.Fatal("mustProvisionSourceWithoutAvatar: source was not provisioned")
+	}
+	return got
+}
+
+func encodeTestPNG(t *testing.T, size int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, size, size))); err != nil {
+		t.Fatalf("encode PNG: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestEnsureRSSSourceActors_BackfillsAvatarForExistingActor is Issue
+// #146's core regression test: an actor provisioned before favicon
+// fetch ever succeeded (or before Issue #77 PR5 existed at all) must
+// still get its avatar filled in by a later pass, without its identity
+// (ActorID/Username/Host) changing.
+func TestEnsureRSSSourceActors_BackfillsAvatarForExistingActor(t *testing.T) {
+	db, driveSvc, _ := newEnsureActorsTestFixture(t)
+	now := time.Now().UTC()
+	const feedURL = "https://localhost/backfill.xml"
+	source := mustProvisionSourceWithoutAvatar(t, db, driveSvc, feedURL, now)
+
+	wantPNG := encodeTestPNG(t, 16)
+	resolveCalls := 0
+	fetcher := &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			resolveCalls++
+			return wantPNG, nil
+		},
+		lastTry: make(map[string]time.Time),
+	}
+
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors: %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls = %d, want 1", resolveCalls)
+	}
+
+	got, err := db.ExternalSources.Get(t.Context(), source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got.ActorID != *source.ActorID || *got.Username != *source.Username || *got.Host != *source.Host {
+		t.Errorf("identity changed by an avatar-only backfill: got %+v, want unchanged from %+v", got, source)
+	}
+
+	actor, err := db.Actors.Get(t.Context(), *source.ActorID)
+	if err != nil {
+		t.Fatalf("Actors.Get: %v", err)
+	}
+	if actor.AvatarFileID == nil {
+		t.Fatal("AvatarFileID = nil, want backfilled")
+	}
+}
+
+// TestEnsureRSSSourceActors_SkipsActorThatAlreadyHasAvatar asserts the
+// backfill path never re-fetches (or re-derives) an avatar that is
+// already set.
+func TestEnsureRSSSourceActors_SkipsActorThatAlreadyHasAvatar(t *testing.T) {
+	db, driveSvc, _ := newEnsureActorsTestFixture(t)
+	now := time.Now().UTC()
+	const feedURL = "https://localhost/has-avatar.xml"
+	source := mustProvisionSourceWithoutAvatar(t, db, driveSvc, feedURL, now)
+
+	existingFile, err := driveSvc.CreateSystemFile(t.Context(), domain.FilePurposeSourceFavicon, "existing-favicon.png", encodeTestPNG(t, 8))
+	if err != nil {
+		t.Fatalf("CreateSystemFile: %v", err)
+	}
+	if err := db.Actors.SetAvatarFileID(t.Context(), *source.ActorID, &existingFile.ID); err != nil {
+		t.Fatalf("SetAvatarFileID: %v", err)
+	}
+
+	fetcher := &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			t.Error("resolve must not be called for an actor that already has an avatar")
+			return nil, errors.New("unreachable")
+		},
+		lastTry: make(map[string]time.Time),
+	}
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors: %v", err)
+	}
+
+	actor, err := db.Actors.Get(t.Context(), *source.ActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actor.AvatarFileID == nil || *actor.AvatarFileID != existingFile.ID {
+		t.Errorf("AvatarFileID = %v, want unchanged %q", actor.AvatarFileID, existingFile.ID)
+	}
+}
+
+// TestEnsureRSSSourceActors_FaviconCooldownSuppressesImmediateRetry
+// backs faviconRetryCooldown end to end: a failed attempt must not be
+// retried on the very next tick, only after the cooldown elapses.
+func TestEnsureRSSSourceActors_FaviconCooldownSuppressesImmediateRetry(t *testing.T) {
+	db, driveSvc, _ := newEnsureActorsTestFixture(t)
+	now := time.Now().UTC()
+	const feedURL = "https://localhost/cooldown.xml"
+	mustProvisionSourceWithoutAvatar(t, db, driveSvc, feedURL, now)
+
+	resolveCalls := 0
+	fetcher := &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			resolveCalls++
+			return nil, errors.New("still failing")
+		},
+		lastTry: make(map[string]time.Time),
+	}
+
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors (first): %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls after first tick = %d, want 1", resolveCalls)
+	}
+
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now.Add(time.Minute), driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors (second, within cooldown): %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls after second tick (within cooldown) = %d, want still 1", resolveCalls)
+	}
+
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now.Add(faviconRetryCooldown+time.Second), driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors (third, after cooldown): %v", err)
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("resolveCalls after third tick (past cooldown) = %d, want 2", resolveCalls)
+	}
+}
+
+// TestEnsureRSSSourceActors_NewlyProvisionedActorIsRecordedInCooldown
+// asserts the cooldown also covers the first attempt made at
+// provisioning time, not only later backfill attempts: the tick right
+// after a brand-new actor's failed favicon fetch must not retry it
+// immediately either.
+func TestEnsureRSSSourceActors_NewlyProvisionedActorIsRecordedInCooldown(t *testing.T) {
+	db, driveSvc, _ := newEnsureActorsTestFixture(t)
+	now := time.Now().UTC()
+	const feedURL = "https://localhost/fresh.xml"
+
+	resolveCalls := 0
+	fetcher := &faviconFetcher{
+		resolve: func(ctx context.Context, feedURL string) ([]byte, error) {
+			resolveCalls++
+			return nil, errors.New("still failing")
+		},
+		lastTry: make(map[string]time.Time),
+	}
+
+	if err := db.ExternalSources.ReconcileFromConfig(t.Context(), rss.Kind, []string{feedURL}, now); err != nil {
+		t.Fatalf("ReconcileFromConfig: %v", err)
+	}
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now, driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors (provision): %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls after provisioning = %d, want 1", resolveCalls)
+	}
+
+	if err := ensureRSSSourceActors(t.Context(), db, nil, nil, now.Add(time.Minute), driveSvc, fetcher, discardLogger()); err != nil {
+		t.Fatalf("ensureRSSSourceActors (next tick): %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolveCalls after next tick = %d, want still 1 (cooldown covers the provisioning-time attempt too)", resolveCalls)
 	}
 }
