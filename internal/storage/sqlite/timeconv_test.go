@@ -50,3 +50,39 @@ func TestParseTime_RoundTripsFormatTime(t *testing.T) {
 		}
 	}
 }
+
+// TestParseTime_AcceptsLegacyTrimmedFraction guards against regressing
+// to a fixed-width-only parseTime (Issue #148): a handful of pre-existing
+// actor rows were written with a 6-digit fraction by a since-removed code
+// path, and the fixed-width timeLayout rejected them outright, turning a
+// single row read into a full startup crash loop.
+func TestParseTime_AcceptsLegacyTrimmedFraction(t *testing.T) {
+	got, err := parseTime("2026-09-08T15:13:42.619632Z")
+	if err != nil {
+		t.Fatalf("parseTime of a 6-digit-fraction timestamp: %v", err)
+	}
+	want := time.Date(2026, 9, 8, 15, 13, 42, 619_632_000, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("parseTime = %v, want %v", got, want)
+	}
+}
+
+func TestParseTime_AcceptsNoFraction(t *testing.T) {
+	got, err := parseTime("2024-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("parseTime of a no-fraction timestamp: %v", err)
+	}
+	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("parseTime = %v, want %v", got, want)
+	}
+}
+
+// TestParseTime_RejectsGarbage confirms widening parseTime's accepted
+// fraction width (Issue #148) did not also loosen it into accepting
+// non-timestamp strings.
+func TestParseTime_RejectsGarbage(t *testing.T) {
+	if _, err := parseTime("not-a-time"); err == nil {
+		t.Fatal("parseTime(\"not-a-time\") = nil error, want an error")
+	}
+}

@@ -23,6 +23,21 @@ import (
 // order agree.
 const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
+// timeParseLayout is deliberately more permissive than timeLayout: its
+// "9" placeholders accept any fractional-second width, including none,
+// where timeLayout's "0" placeholders demand exactly nine digits.
+// formatTime never uses this layout — writes stay fixed-width via
+// timeLayout so the sort-order invariant above holds for every row this
+// process itself writes — but parseTime reads with it so a row written
+// before this fixed-width scheme existed, or by any future path that
+// bypasses formatTime, still parses instead of failing its caller
+// (Issue #148: a handful of pre-existing actor rows had a trimmed
+// 6-digit fraction, and the fixed-width-only parseTime turned reading
+// them into a startup crash loop). It happily accepts the fixed nine
+// digits formatTime writes too, so this is a pure widening of what
+// parseTime accepts, never a change to what gets written.
+const timeParseLayout = time.RFC3339Nano
+
 // formatTime renders t for storage, normalizing it to UTC first so a
 // caller passing a value in another location never silently changes how
 // timeline ordering compares.
@@ -41,7 +56,7 @@ func formatTimePtr(t *time.Time) any {
 
 // parseTime parses a stored timestamp back into UTC.
 func parseTime(s string) (time.Time, error) {
-	t, err := time.Parse(timeLayout, s)
+	t, err := time.Parse(timeParseLayout, s)
 	if err != nil {
 		return time.Time{}, err
 	}

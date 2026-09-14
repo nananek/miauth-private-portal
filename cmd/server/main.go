@@ -80,6 +80,20 @@ func run() error {
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
+	// Issue #148: rewrites any timestamp row still carrying a legacy,
+	// non-fixed-width fraction (predating timeconv's current scheme, or
+	// written by any other path that ever bypassed formatTime) back into
+	// the canonical form every ORDER BY / pagination cursor on a
+	// timestamp column depends on. parseTime itself no longer rejects
+	// such rows either way, so this is cleanup, not a startup-safety
+	// precondition — but it runs before every other read below so this
+	// process's own listings/cursors see fully canonical data from the
+	// first query on. Idempotent: a no-op once every row is canonical.
+	if normalized, skipped, err := db.NormalizeStoredTimestamps(ctx); err != nil {
+		return fmt.Errorf("normalize stored timestamps: %w", err)
+	} else if normalized > 0 || skipped > 0 {
+		logger.Info("normalized legacy timestamp rows", "normalized", normalized, "skipped_unparseable", skipped)
+	}
 	if err := db.Actors.EnsureReservedActors(ctx); err != nil {
 		return fmt.Errorf("seed reserved actors: %w", err)
 	}
@@ -821,9 +835,7 @@ func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs
 		if source.ActorID != nil {
 			// Identity is never recomputed (ADR-0008); only a still-missing
 			// avatar is worth revisiting here (Issue #146's backfill).
-			if err := backfillSourceFavicon(ctx, db, driveSvc, fetcher, source, now, logger); err != nil {
-				return err
-			}
+			backfillSourceFavicon(ctx, db, driveSvc, fetcher, source, now, logger)
 			continue
 		}
 
@@ -866,20 +878,29 @@ func ensureRSSSourceActors(ctx context.Context, db *sqlite.DB, bootstrapFeedURLs
 // fetch at all, or by a prior pass whose fetch never succeeded) but
 // still has no avatar. It changes nothing about identity — never
 // recomputed, per ADR-0008 — only whether a favicon fetch is worth
-// retrying for this row.
-func backfillSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, fetcher *faviconFetcher, source domain.ExternalSource, now time.Time, logger *slog.Logger) error {
+// retrying for this row. Like fetchAndSetSourceFavicon below, every
+// failure here — including looking the actor row up at all — is
+// strictly best-effort: this whole function is a cosmetic backfill onto
+// a source the caller already committed, so it must never be the reason
+// ensureRSSSourceActors' caller fails an otherwise-healthy startup or
+// scheduler tick (Issue #148: a row whose stored created_at predated
+// timeconv's current fixed-width scheme once turned exactly this lookup
+// into a startup crash loop; parseTime no longer rejects such rows, but
+// this must not regress into a single-row failure again either way).
+func backfillSourceFavicon(ctx context.Context, db *sqlite.DB, driveSvc *drive.Service, fetcher *faviconFetcher, source domain.ExternalSource, now time.Time, logger *slog.Logger) {
 	if source.Host == nil || source.Username == nil {
-		return nil // ADR-0008 leaves imap-kind sources without a projected host/username at all.
+		return // ADR-0008 leaves imap-kind sources without a projected host/username at all.
 	}
 	actor, err := db.Actors.Get(ctx, *source.ActorID)
 	if err != nil {
-		return fmt.Errorf("get rss source actor %q: %w", *source.ActorID, err)
+		logger.Warn("rss source actor lookup failed; skipping favicon backfill for this row",
+			"source_id", source.ID, "actor_id", *source.ActorID, "error", err)
+		return
 	}
 	if actor.AvatarFileID != nil {
-		return nil
+		return
 	}
 	fetchAndSetSourceFavicon(ctx, db, driveSvc, fetcher, source.URI, *source.ActorID, *source.Host, *source.Username, now, logger)
-	return nil
 }
 
 // fetchAndSetSourceFavicon best-effort resolves feedURL's favicon via
